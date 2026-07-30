@@ -9,14 +9,17 @@ The project is intentionally split into:
 - a stable, batched C ABI for Python/PufferLib integration;
 - differential parity tests against the pinned Python implementation.
 
-Status: the map topology and board-placement kernel are implemented. Full game
-state transitions, feature extraction, baseline players, and the batched
-training backend are still in progress.
+Status: the map topology, board-placement kernel, complete flat action-index
+table, initial snake setup, and basic non-seven turns are implemented. The flat
+action table has been exhaustively compared with CatanRL for MINI, BASE, and
+TOURNAMENT with 2–4 players. Seven/discard/robber transitions, development
+cards, trades, complete awards, feature extraction, baseline players, and the
+batched training backend are still in progress.
 
 ## Build and test
 
 ```bash
-cmake -S . -B build -G Ninja
+cmake -S . -B build
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```

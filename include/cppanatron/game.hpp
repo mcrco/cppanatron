@@ -42,7 +42,8 @@ public:
         int discard_limit = 7,
         bool friendly_robber = false,
         int victory_points_to_win = 10,
-        NumberPlacement number_placement = NumberPlacement::official_spiral);
+        NumberPlacement number_placement = NumberPlacement::official_spiral,
+        std::optional<std::uint64_t> map_seed = std::nullopt);
 
     [[nodiscard]] const Board& board() const noexcept { return board_; }
     [[nodiscard]] const std::vector<Color>& colors() const noexcept { return colors_; }

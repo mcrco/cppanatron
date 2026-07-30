@@ -25,10 +25,14 @@ Game::Game(
     int discard_limit,
     bool friendly_robber,
     int victory_points_to_win,
-    NumberPlacement number_placement)
+    NumberPlacement number_placement,
+    std::optional<std::uint64_t> map_seed)
     : colors_(std::move(colors)),
       players_(colors_.size()),
-      board_(CatanMap::build(map_type, seed, number_placement)),
+      board_(CatanMap::build(
+          map_type,
+          map_seed.value_or(seed),
+          number_placement)),
       random_(seed),
       discard_limit_(discard_limit),
       friendly_robber_(friendly_robber),

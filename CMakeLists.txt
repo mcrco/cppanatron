@@ -8,6 +8,7 @@ add_library(cppanatron
     src/board.cpp
     src/game.cpp
     src/action_space.cpp
+    src/value_player.cpp
 )
 add_library(cppanatron::cppanatron ALIAS cppanatron)
 

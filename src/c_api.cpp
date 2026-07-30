@@ -9,14 +9,20 @@
 #include <vector>
 
 #include "cppanatron/action_space.hpp"
+#include "cppanatron/batch.hpp"
 #include "cppanatron/game.hpp"
 #include "cppanatron/value_player.hpp"
 
 using cppanatron::Color;
+using cppanatron::BatchConfig;
+using cppanatron::BatchBuffers;
 using cppanatron::FlatActionSpace;
 using cppanatron::Game;
+using cppanatron::GameBatch;
 using cppanatron::MapType;
 using cppanatron::NumberPlacement;
+using cppanatron::ObservationLayout;
+using cppanatron::RewardFunction;
 
 struct cppanatron_game {
     int num_players{};
@@ -69,6 +75,13 @@ struct cppanatron_game {
     }
 };
 
+struct cppanatron_batch {
+    GameBatch batch;
+
+    cppanatron_batch(BatchConfig config, ObservationLayout layout)
+        : batch(config, std::move(layout)) {}
+};
+
 namespace {
 
 thread_local std::string last_error;
@@ -94,6 +107,17 @@ NumberPlacement parse_number_placement(int value) {
             return NumberPlacement::random;
         default:
             throw std::invalid_argument("invalid number placement");
+    }
+}
+
+RewardFunction parse_reward_function(int value) {
+    switch (value) {
+        case 0:
+            return RewardFunction::shaped;
+        case 1:
+            return RewardFunction::win;
+        default:
+            throw std::invalid_argument("invalid reward function");
     }
 }
 
@@ -588,6 +612,167 @@ int32_t cppanatron_game_tiles(
             std::copy(tile.nodes.begin(), tile.nodes.end(), target.nodes);
         }
         return static_cast<int>(tiles.size());
+    });
+}
+
+cppanatron_batch* cppanatron_batch_create(
+    int32_t num_envs,
+    int32_t num_players,
+    int32_t map_type,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement,
+    int32_t reward_function,
+    int32_t turns_limit,
+    int32_t board_width,
+    int32_t board_height,
+    const cppanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cppanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cppanatron_tile_position* tile_positions,
+    size_t tile_position_count) {
+    try {
+        if ((node_position_count > 0 && node_positions == nullptr) ||
+            (edge_position_count > 0 && edge_positions == nullptr) ||
+            (tile_position_count > 0 && tile_positions == nullptr)) {
+            throw std::invalid_argument("null observation position array");
+        }
+        std::vector<cppanatron::NodePosition> nodes;
+        nodes.reserve(node_position_count);
+        for (std::size_t index = 0; index < node_position_count; ++index) {
+            nodes.push_back({
+                node_positions[index].node,
+                node_positions[index].x,
+                node_positions[index].y,
+            });
+        }
+        std::vector<cppanatron::EdgePosition> edges;
+        edges.reserve(edge_position_count);
+        for (std::size_t index = 0; index < edge_position_count; ++index) {
+            edges.push_back({
+                {
+                    edge_positions[index].a,
+                    edge_positions[index].b,
+                },
+                edge_positions[index].x,
+                edge_positions[index].y,
+            });
+        }
+        std::vector<cppanatron::TilePosition> tiles;
+        tiles.reserve(tile_position_count);
+        for (std::size_t index = 0; index < tile_position_count; ++index) {
+            tiles.push_back({
+                {
+                    tile_positions[index].x,
+                    tile_positions[index].y,
+                    tile_positions[index].z,
+                },
+                tile_positions[index].board_x,
+                tile_positions[index].board_y,
+            });
+        }
+        auto* result = new cppanatron_batch(
+            BatchConfig{
+                num_envs,
+                num_players,
+                parse_map_type(map_type),
+                parse_number_placement(number_placement),
+                discard_limit,
+                friendly_robber != 0,
+                victory_points_to_win,
+                parse_reward_function(reward_function),
+                turns_limit,
+            },
+            ObservationLayout{
+                board_width,
+                board_height,
+                std::move(nodes),
+                std::move(edges),
+                std::move(tiles),
+            });
+        last_error.clear();
+        return result;
+    } catch (const std::exception& error) {
+        last_error = error.what();
+        return nullptr;
+    } catch (...) {
+        last_error = "unknown C++ exception";
+        return nullptr;
+    }
+}
+
+void cppanatron_batch_destroy(cppanatron_batch* handle) {
+    delete handle;
+}
+
+int32_t cppanatron_batch_bind_buffers(
+    cppanatron_batch* handle,
+    uint8_t* observations,
+    size_t observation_row_stride,
+    size_t action_mask_offset,
+    size_t observation_offset,
+    int32_t* actions,
+    float* rewards,
+    uint8_t* terminals,
+    uint8_t* truncations,
+    uint8_t* masks) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null batch handle");
+        }
+        handle->batch.bind(BatchBuffers{
+            observations,
+            observation_row_stride,
+            action_mask_offset,
+            observation_offset,
+            actions,
+            rewards,
+            terminals,
+            truncations,
+            masks,
+        });
+    });
+}
+
+int32_t cppanatron_batch_reset_all(
+    cppanatron_batch* handle,
+    const uint64_t* map_seeds,
+    const uint64_t* game_seeds,
+    size_t seed_count) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null batch handle");
+        }
+        handle->batch.reset_all(map_seeds, game_seeds, seed_count);
+    });
+}
+
+int32_t cppanatron_batch_reset_at(
+    cppanatron_batch* handle,
+    int32_t env_index,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t preserve_transition) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null batch handle");
+        }
+        handle->batch.reset_at(
+            env_index,
+            map_seed,
+            game_seed,
+            preserve_transition != 0);
+    });
+}
+
+int32_t cppanatron_batch_step(cppanatron_batch* handle) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null batch handle");
+        }
+        handle->batch.step();
     });
 }
 

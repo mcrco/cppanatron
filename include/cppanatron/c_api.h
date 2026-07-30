@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 typedef struct cppanatron_game cppanatron_game;
+typedef struct cppanatron_batch cppanatron_batch;
 
 enum cppanatron_map_type {
     CPPANATRON_MAP_BASE = 0,
@@ -68,6 +69,27 @@ typedef struct cppanatron_tile {
     int32_t port_direction;
     int32_t nodes[6];
 } cppanatron_tile;
+
+typedef struct cppanatron_node_position {
+    int32_t node;
+    int32_t x;
+    int32_t y;
+} cppanatron_node_position;
+
+typedef struct cppanatron_edge_position {
+    int32_t a;
+    int32_t b;
+    int32_t x;
+    int32_t y;
+} cppanatron_edge_position;
+
+typedef struct cppanatron_tile_position {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+    int32_t board_x;
+    int32_t board_y;
+} cppanatron_tile_position;
 
 CPPANATRON_API const char* cppanatron_version(void);
 CPPANATRON_API const char* cppanatron_last_error(void);
@@ -153,6 +175,49 @@ CPPANATRON_API int32_t cppanatron_game_tiles(
     const cppanatron_game* handle,
     cppanatron_tile* output,
     size_t capacity);
+
+CPPANATRON_API cppanatron_batch* cppanatron_batch_create(
+    int32_t num_envs,
+    int32_t num_players,
+    int32_t map_type,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement,
+    int32_t reward_function,
+    int32_t turns_limit,
+    int32_t board_width,
+    int32_t board_height,
+    const cppanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cppanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cppanatron_tile_position* tile_positions,
+    size_t tile_position_count);
+CPPANATRON_API void cppanatron_batch_destroy(cppanatron_batch* handle);
+CPPANATRON_API int32_t cppanatron_batch_bind_buffers(
+    cppanatron_batch* handle,
+    uint8_t* observations,
+    size_t observation_row_stride,
+    size_t action_mask_offset,
+    size_t observation_offset,
+    int32_t* actions,
+    float* rewards,
+    uint8_t* terminals,
+    uint8_t* truncations,
+    uint8_t* masks);
+CPPANATRON_API int32_t cppanatron_batch_reset_all(
+    cppanatron_batch* handle,
+    const uint64_t* map_seeds,
+    const uint64_t* game_seeds,
+    size_t seed_count);
+CPPANATRON_API int32_t cppanatron_batch_reset_at(
+    cppanatron_batch* handle,
+    int32_t env_index,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t preserve_transition);
+CPPANATRON_API int32_t cppanatron_batch_step(cppanatron_batch* handle);
 
 #ifdef __cplusplus
 }

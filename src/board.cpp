@@ -126,6 +126,41 @@ std::vector<Edge> Board::buildable_edges(Color color) const {
     return result;
 }
 
+std::set<std::optional<Resource>> Board::player_port_resources(Color color) const {
+    std::set<std::optional<Resource>> result;
+    for (const Tile& tile : map_.tiles()) {
+        if (tile.kind != TileKind::port || !tile.port_direction.has_value()) {
+            continue;
+        }
+        std::pair<int, int> port_nodes;
+        switch (*tile.port_direction) {
+            case Direction::west:
+                port_nodes = {tile.nodes[5], tile.nodes[4]};
+                break;
+            case Direction::northwest:
+                port_nodes = {tile.nodes[0], tile.nodes[5]};
+                break;
+            case Direction::northeast:
+                port_nodes = {tile.nodes[1], tile.nodes[0]};
+                break;
+            case Direction::east:
+                port_nodes = {tile.nodes[2], tile.nodes[1]};
+                break;
+            case Direction::southeast:
+                port_nodes = {tile.nodes[3], tile.nodes[2]};
+                break;
+            case Direction::southwest:
+                port_nodes = {tile.nodes[4], tile.nodes[3]};
+                break;
+        }
+        if (is_friendly_node(port_nodes.first, color) ||
+            is_friendly_node(port_nodes.second, color)) {
+            result.insert(tile.resource);
+        }
+    }
+    return result;
+}
+
 void Board::build_settlement(Color color, int node_id, bool initial_build_phase) {
     const auto buildable = buildable_node_ids(color, initial_build_phase);
     if (!contains(buildable, node_id)) {

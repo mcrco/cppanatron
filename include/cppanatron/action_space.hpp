@@ -19,6 +19,13 @@ public:
     [[nodiscard]] const std::vector<Action>& actions() const noexcept { return actions_; }
     [[nodiscard]] const Action& at(std::size_t index) const { return actions_.at(index); }
     [[nodiscard]] std::size_t index(const Action& action) const;
+    [[nodiscard]] std::size_t index(
+        const Action& action,
+        const std::vector<Color>& game_colors) const;
+    [[nodiscard]] Action decode(
+        std::size_t index,
+        Color actor,
+        const std::vector<Color>& game_colors) const;
 
 private:
     std::vector<Action> actions_;

@@ -209,4 +209,64 @@ std::size_t FlatActionSpace::index(const Action& action) const {
     return static_cast<std::size_t>(std::distance(actions_.begin(), it));
 }
 
+std::size_t FlatActionSpace::index(
+    const Action& action,
+    const std::vector<Color>& game_colors) const {
+    if (action.type != ActionType::move_robber) {
+        return index(action);
+    }
+    const RobberMove& move = std::get<RobberMove>(action.value);
+    std::optional<int> slot;
+    if (move.victim.has_value()) {
+        const auto actor = std::find(
+            game_colors.begin(), game_colors.end(), action.color);
+        const auto victim = std::find(
+            game_colors.begin(), game_colors.end(), *move.victim);
+        if (actor == game_colors.end() || victim == game_colors.end()) {
+            throw std::out_of_range("robber actor or victim is not in game");
+        }
+        const int actor_index =
+            static_cast<int>(std::distance(game_colors.begin(), actor));
+        const int victim_index =
+            static_cast<int>(std::distance(game_colors.begin(), victim));
+        const int count = static_cast<int>(game_colors.size());
+        slot = (victim_index - actor_index + count) % count;
+        if (*slot == 0) {
+            throw std::logic_error("robber cannot target its actor");
+        }
+    }
+    return index(
+        {Color::red,
+         ActionType::move_robber,
+         FlatRobberMove{move.coordinate, slot}});
+}
+
+Action FlatActionSpace::decode(
+    std::size_t action_index,
+    Color actor,
+    const std::vector<Color>& game_colors) const {
+    Action result = at(action_index);
+    result.color = actor;
+    if (result.type != ActionType::move_robber) {
+        return result;
+    }
+    const FlatRobberMove flat = std::get<FlatRobberMove>(result.value);
+    std::optional<Color> victim;
+    if (flat.victim_slot.has_value()) {
+        const auto actor_it =
+            std::find(game_colors.begin(), game_colors.end(), actor);
+        if (actor_it == game_colors.end()) {
+            throw std::out_of_range("robber actor is not in game");
+        }
+        const int actor_index =
+            static_cast<int>(std::distance(game_colors.begin(), actor_it));
+        const int victim_index =
+            (actor_index + *flat.victim_slot) %
+            static_cast<int>(game_colors.size());
+        victim = game_colors[static_cast<std::size_t>(victim_index)];
+    }
+    result.value = RobberMove{flat.coordinate, victim};
+    return result;
+}
+
 }  // namespace cppanatron

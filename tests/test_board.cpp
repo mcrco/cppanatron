@@ -39,6 +39,24 @@ void require_throws(Callable callable, const std::string& message) {
     throw std::runtime_error(message);
 }
 
+cppanatron::Action find_action(const Game& game, ActionType type) {
+    const auto it = std::find_if(
+        game.playable_actions().begin(),
+        game.playable_actions().end(),
+        [type](const auto& action) { return action.type == type; });
+    if (it == game.playable_actions().end()) {
+        throw std::runtime_error("expected action type is not playable");
+    }
+    return *it;
+}
+
+void finish_turn(Game& game, Dice dice = Dice{1, 1}) {
+    if (!game.player(game.current_color()).has_rolled) {
+        game.execute(find_action(game, ActionType::roll), dice);
+    }
+    game.execute(find_action(game, ActionType::end_turn));
+}
+
 void test_topology_contract() {
     const auto mini = CatanMap::build(MapType::mini, 7);
     require(mini.num_nodes() == 24, "MINI must have 24 nodes");
@@ -185,6 +203,17 @@ void test_flat_action_space_contract() {
     require(
         base.index({Color::blue, ActionType::roll, std::monostate{}}) == 312,
         "ROLL index");
+    const std::vector<Color> colors{Color::red, Color::blue};
+    const cppanatron::Action robber{
+        Color::red,
+        ActionType::move_robber,
+        cppanatron::RobberMove{{0, 0, 0}, Color::blue}};
+    require(
+        base.index(robber, colors) == 265,
+        "absolute robber victim maps to relative action slot");
+    require(
+        base.decode(265, Color::red, colors) == robber,
+        "relative robber action decodes to absolute victim");
 }
 
 void test_seven_discard_and_robber_transition() {
@@ -244,6 +273,123 @@ void test_tournament_setup_differential_fixture() {
         "setup settlements must match Python");
 }
 
+void test_development_card_lifecycle_and_knight() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 41);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {0, 0, 1, 1, 1};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+    game.execute(
+        find_action(game, ActionType::buy_development_card),
+        std::nullopt,
+        cppanatron::DevelopmentCard::knight);
+    require(
+        game.player(Color::red).development_cards[0] == 1,
+        "bought knight enters hand");
+    require(
+        std::none_of(
+            game.playable_actions().begin(),
+            game.playable_actions().end(),
+            [](const auto& action) {
+                return action.type == ActionType::play_knight_card;
+            }),
+        "development card cannot be played on purchase turn");
+
+    game.execute(find_action(game, ActionType::end_turn));
+    finish_turn(game);
+    game.execute(find_action(game, ActionType::play_knight_card));
+    require(
+        game.player(Color::red).played_development_cards[0] == 1 &&
+            game.player(Color::red).development_cards[0] == 0,
+        "playing knight transfers it from hand to played count");
+    require(
+        game.current_prompt() == ActionPrompt::move_robber,
+        "knight requires robber movement");
+}
+
+void test_maritime_trade_and_other_development_cards() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 51);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {4, 0, 1, 1, 1};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+
+    const auto trade_it = std::find_if(
+        game.playable_actions().begin(),
+        game.playable_actions().end(),
+        [](const auto& action) {
+            if (action.type != ActionType::maritime_trade) {
+                return false;
+            }
+            const auto& trade = std::get<cppanatron::MaritimeTrade>(action.value);
+            return trade.cards[0] == Resource::wood &&
+                   trade.cards[1] == Resource::wood &&
+                   trade.cards[2] == Resource::wood &&
+                   trade.cards[3] == Resource::wood &&
+                   trade.cards[4] == Resource::ore;
+        });
+    require(trade_it != game.playable_actions().end(), "4:1 bank trade is legal");
+    const auto before_trade = game.player(Color::red).resources;
+    game.execute(*trade_it);
+    require(
+        game.player(Color::red).resources[0] == before_trade[0] - 4 &&
+            game.player(Color::red).resources[4] == before_trade[4] + 1,
+        "maritime trade exchanges exact resources");
+
+    game.execute(
+        find_action(game, ActionType::buy_development_card),
+        std::nullopt,
+        cppanatron::DevelopmentCard::road_building);
+    game.execute(find_action(game, ActionType::end_turn));
+    finish_turn(game);
+    const std::size_t roads_before = game.player(Color::red).roads.size();
+    game.execute(find_action(game, ActionType::play_road_building));
+    game.execute(find_action(game, ActionType::build_road));
+    if (std::any_of(
+            game.playable_actions().begin(),
+            game.playable_actions().end(),
+            [](const auto& action) { return action.type == ActionType::build_road; })) {
+        game.execute(find_action(game, ActionType::build_road));
+    }
+    require(
+        game.player(Color::red).roads.size() >= roads_before + 1,
+        "road building places free roads");
+}
+
+void test_domestic_trade_negotiation() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 61);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {1, 0, 0, 0, 0};
+    game.player(Color::blue).resources = {0, 1, 0, 0, 0};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+
+    cppanatron::DomesticTrade offer;
+    offer.offering[0] = 1;
+    offer.asking[1] = 1;
+    game.execute({Color::red, ActionType::offer_trade, offer});
+    require(
+        game.current_prompt() == ActionPrompt::decide_trade &&
+            game.current_color() == Color::blue,
+        "offer asks the opponent");
+    game.execute(find_action(game, ActionType::accept_trade));
+    require(
+        game.current_prompt() == ActionPrompt::decide_acceptees &&
+            game.current_color() == Color::red,
+        "accepted offer returns to offering player");
+    game.execute(find_action(game, ActionType::confirm_trade));
+    require(
+        game.current_prompt() == ActionPrompt::play_turn &&
+            game.player(Color::red).resources[0] == 0 &&
+            game.player(Color::red).resources[1] == 1 &&
+            game.player(Color::blue).resources[0] == 1 &&
+            game.player(Color::blue).resources[1] == 0,
+        "confirmed domestic trade exchanges both hands");
+}
+
 }  // namespace
 
 int main() {
@@ -256,6 +402,9 @@ int main() {
         test_flat_action_space_contract();
         test_seven_discard_and_robber_transition();
         test_tournament_setup_differential_fixture();
+        test_development_card_lifecycle_and_knight();
+        test_maritime_trade_and_other_development_cards();
+        test_domestic_trade_negotiation();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

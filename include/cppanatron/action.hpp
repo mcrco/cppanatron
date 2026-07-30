@@ -68,6 +68,21 @@ struct MaritimeTrade {
     auto operator<=>(const MaritimeTrade&) const = default;
 };
 
+struct DomesticTrade {
+    std::array<int, 5> offering{};
+    std::array<int, 5> asking{};
+    int offering_player_index{-1};
+
+    auto operator<=>(const DomesticTrade&) const = default;
+};
+
+struct ConfirmedTrade {
+    DomesticTrade trade;
+    Color partner{};
+
+    auto operator<=>(const ConfirmedTrade&) const = default;
+};
+
 using ActionValue =
     std::variant<
         std::monostate,
@@ -78,6 +93,8 @@ using ActionValue =
         RobberMove,
         FlatRobberMove,
         MaritimeTrade,
+        DomesticTrade,
+        ConfirmedTrade,
         std::vector<Resource>>;
 
 struct Action {

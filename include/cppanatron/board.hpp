@@ -34,6 +34,8 @@ public:
         Color color,
         bool initial_build_phase = false) const;
     [[nodiscard]] std::vector<Edge> buildable_edges(Color color) const;
+    [[nodiscard]] std::set<std::optional<Resource>> player_port_resources(
+        Color color) const;
 
     void build_settlement(Color color, int node_id, bool initial_build_phase = false);
     void build_road(Color color, Edge edge);

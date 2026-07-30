@@ -10,6 +10,7 @@ namespace {
 constexpr std::array<int, 5> kRoadCost{1, 1, 0, 0, 0};
 constexpr std::array<int, 5> kSettlementCost{1, 1, 1, 1, 0};
 constexpr std::array<int, 5> kCityCost{0, 0, 0, 2, 3};
+constexpr std::array<int, 5> kDevelopmentCardCost{0, 0, 1, 1, 1};
 
 std::size_t resource_index(Resource resource) {
     return static_cast<std::size_t>(resource);
@@ -32,6 +33,7 @@ Game::Game(
       discard_limit_(discard_limit),
       friendly_robber_(friendly_robber),
       victory_points_to_win_(victory_points_to_win),
+      acceptees_(colors_.size()),
       discard_counts_(colors_.size()) {
     if (colors_.empty() || colors_.size() > kColors.size()) {
         throw std::invalid_argument("game requires one to four colors");
@@ -42,6 +44,17 @@ Game::Game(
         unique_colors.end()) {
         throw std::invalid_argument("player colors must be unique");
     }
+    development_deck_.insert(
+        development_deck_.end(), 14, DevelopmentCard::knight);
+    development_deck_.insert(
+        development_deck_.end(), 2, DevelopmentCard::year_of_plenty);
+    development_deck_.insert(
+        development_deck_.end(), 2, DevelopmentCard::road_building);
+    development_deck_.insert(
+        development_deck_.end(), 2, DevelopmentCard::monopoly);
+    development_deck_.insert(
+        development_deck_.end(), 5, DevelopmentCard::victory_point);
+    std::shuffle(development_deck_.begin(), development_deck_.end(), random_);
     playable_actions_ = generate_playable_actions();
 }
 
@@ -86,6 +99,30 @@ int Game::num_resource_cards(Color color) const {
     return std::accumulate(resources.begin(), resources.end(), 0);
 }
 
+bool Game::can_play_development_card(
+    Color color,
+    DevelopmentCard card) const {
+    if (card == DevelopmentCard::victory_point) {
+        return false;
+    }
+    const PlayerState& state = player(color);
+    const std::size_t index = static_cast<std::size_t>(card);
+    return !state.has_played_development_card_in_turn &&
+           state.development_cards[index] > 0 &&
+           state.development_card_owned_at_start[index];
+}
+
+void Game::consume_development_card(Color color, DevelopmentCard card) {
+    if (!can_play_development_card(color, card)) {
+        throw std::logic_error("development card is not playable");
+    }
+    PlayerState& state = player(color);
+    const std::size_t index = static_cast<std::size_t>(card);
+    --state.development_cards[index];
+    ++state.played_development_cards[index];
+    state.has_played_development_card_in_turn = true;
+}
+
 void Game::pay(Color color, const std::array<int, 5>& cost) {
     auto& hand = player(color).resources;
     for (std::size_t i = 0; i < hand.size(); ++i) {
@@ -117,6 +154,28 @@ std::vector<Action> Game::generate_playable_actions() const {
         return result;
     }
     if (current_prompt_ != ActionPrompt::play_turn) {
+        if (current_prompt_ == ActionPrompt::decide_trade) {
+            result.push_back(
+                {color, ActionType::reject_trade, current_trade_});
+            if (can_afford(color, current_trade_.asking)) {
+                result.push_back(
+                    {color, ActionType::accept_trade, current_trade_});
+            }
+            return result;
+        }
+        if (current_prompt_ == ActionPrompt::decide_acceptees) {
+            result.push_back(
+                {color, ActionType::cancel_trade, std::monostate{}});
+            for (std::size_t i = 0; i < acceptees_.size(); ++i) {
+                if (acceptees_[i]) {
+                    result.push_back(
+                        {color,
+                         ActionType::confirm_trade,
+                         ConfirmedTrade{current_trade_, colors_[i]}});
+                }
+            }
+            return result;
+        }
         if (current_prompt_ == ActionPrompt::discard) {
             const auto& hand = player(color).resources;
             for (std::size_t i = 0; i < hand.size(); ++i) {
@@ -191,6 +250,56 @@ std::vector<Action> Game::generate_playable_actions() const {
     }
 
     const PlayerState& state = player(color);
+    if (is_road_building_) {
+        if (state.roads_available > 0) {
+            for (Edge edge : board_.buildable_edges(color)) {
+                result.push_back({color, ActionType::build_road, edge});
+            }
+        }
+        return result;
+    }
+
+    if (can_play_development_card(color, DevelopmentCard::year_of_plenty)) {
+        std::set<std::vector<Resource>> options;
+        for (std::size_t first = 0; first < kResources.size(); ++first) {
+            for (std::size_t second = first; second < kResources.size(); ++second) {
+                const bool pair_available =
+                    first == second
+                        ? resource_bank_[first] >= 2
+                        : (resource_bank_[first] >= 1 &&
+                           resource_bank_[second] >= 1);
+                if (pair_available) {
+                    options.insert({kResources[first], kResources[second]});
+                } else {
+                    if (resource_bank_[first] > 0) {
+                        options.insert({kResources[first]});
+                    }
+                    if (resource_bank_[second] > 0) {
+                        options.insert({kResources[second]});
+                    }
+                }
+            }
+        }
+        for (const auto& cards : options) {
+            result.push_back(
+                {color, ActionType::play_year_of_plenty, cards});
+        }
+    }
+    if (can_play_development_card(color, DevelopmentCard::monopoly)) {
+        for (Resource resource : kResources) {
+            result.push_back({color, ActionType::play_monopoly, resource});
+        }
+    }
+    if (can_play_development_card(color, DevelopmentCard::knight)) {
+        result.push_back(
+            {color, ActionType::play_knight_card, std::monostate{}});
+    }
+    if (can_play_development_card(color, DevelopmentCard::road_building) &&
+        state.roads_available > 0 && !board_.buildable_edges(color).empty()) {
+        result.push_back(
+            {color, ActionType::play_road_building, std::monostate{}});
+    }
+
     if (!state.has_rolled) {
         result.push_back({color, ActionType::roll, std::monostate{}});
         return result;
@@ -212,12 +321,68 @@ std::vector<Action> Game::generate_playable_actions() const {
             result.push_back({color, ActionType::build_city, node});
         }
     }
+    if (!development_deck_.empty() &&
+        can_afford(color, kDevelopmentCardCost)) {
+        result.push_back(
+            {color, ActionType::buy_development_card, std::monostate{}});
+    }
+
+    std::array<int, 5> rates{4, 4, 4, 4, 4};
+    const auto ports = board_.player_port_resources(color);
+    if (ports.contains(std::nullopt)) {
+        rates.fill(3);
+    }
+    for (const auto port : ports) {
+        if (port.has_value()) {
+            rates[resource_index(*port)] = 2;
+        }
+    }
+    for (std::size_t offered = 0; offered < kResources.size(); ++offered) {
+        if (state.resources[offered] < rates[offered]) {
+            continue;
+        }
+        for (std::size_t received = 0; received < kResources.size(); ++received) {
+            if (offered == received || resource_bank_[received] <= 0) {
+                continue;
+            }
+            MaritimeTrade trade;
+            for (int i = 0; i < rates[offered]; ++i) {
+                trade.cards[static_cast<std::size_t>(i)] = kResources[offered];
+            }
+            trade.cards[4] = kResources[received];
+            result.push_back({color, ActionType::maritime_trade, trade});
+        }
+    }
     return result;
 }
 
-void Game::execute(const Action& action, std::optional<Dice> replay_dice) {
-    if (std::find(playable_actions_.begin(), playable_actions_.end(), action) ==
-        playable_actions_.end()) {
+void Game::execute(
+    const Action& action,
+    std::optional<Dice> replay_dice,
+    std::optional<DevelopmentCard> replay_development_card,
+    std::optional<Resource> replay_stolen_resource) {
+    const bool is_offer =
+        action.type == ActionType::offer_trade &&
+        action.color == current_color() &&
+        current_prompt_ == ActionPrompt::play_turn &&
+        player(action.color).has_rolled;
+    bool valid_offer = false;
+    if (is_offer) {
+        const DomesticTrade& trade = std::get<DomesticTrade>(action.value);
+        const int offered =
+            std::accumulate(trade.offering.begin(), trade.offering.end(), 0);
+        const int asked =
+            std::accumulate(trade.asking.begin(), trade.asking.end(), 0);
+        valid_offer = offered > 0 && asked > 0;
+        for (std::size_t i = 0; i < trade.offering.size(); ++i) {
+            valid_offer =
+                valid_offer &&
+                !(trade.offering[i] > 0 && trade.asking[i] > 0);
+        }
+    }
+    if (!valid_offer &&
+        std::find(playable_actions_.begin(), playable_actions_.end(), action) ==
+            playable_actions_.end()) {
         throw std::invalid_argument("action is not currently playable");
     }
     switch (action.type) {
@@ -230,6 +395,9 @@ void Game::execute(const Action& action, std::optional<Dice> replay_dice) {
         case ActionType::build_city:
             apply_build_city(action);
             break;
+        case ActionType::buy_development_card:
+            apply_buy_development_card(action, replay_development_card);
+            break;
         case ActionType::roll:
             apply_roll(action, replay_dice);
             break;
@@ -237,7 +405,37 @@ void Game::execute(const Action& action, std::optional<Dice> replay_dice) {
             apply_discard(action);
             break;
         case ActionType::move_robber:
-            apply_move_robber(action);
+            apply_move_robber(action, replay_stolen_resource);
+            break;
+        case ActionType::play_knight_card:
+            apply_play_knight(action);
+            break;
+        case ActionType::play_year_of_plenty:
+            apply_play_year_of_plenty(action);
+            break;
+        case ActionType::play_monopoly:
+            apply_play_monopoly(action);
+            break;
+        case ActionType::play_road_building:
+            apply_play_road_building(action);
+            break;
+        case ActionType::maritime_trade:
+            apply_maritime_trade(action);
+            break;
+        case ActionType::offer_trade:
+            apply_offer_trade(action);
+            break;
+        case ActionType::accept_trade:
+            apply_accept_trade(action);
+            break;
+        case ActionType::reject_trade:
+            apply_reject_trade(action);
+            break;
+        case ActionType::confirm_trade:
+            apply_confirm_trade(action);
+            break;
+        case ActionType::cancel_trade:
+            apply_cancel_trade(action);
             break;
         case ActionType::end_turn:
             apply_end_turn(action);
@@ -285,6 +483,7 @@ void Game::apply_build_settlement(const Action& action) {
     ++state.victory_points;
     ++state.actual_victory_points;
     pay(action.color, kSettlementCost);
+    update_longest_road_award();
 }
 
 void Game::apply_build_road(const Action& action) {
@@ -318,10 +517,17 @@ void Game::apply_build_road(const Action& action) {
         return;
     }
 
-    pay(action.color, kRoadCost);
-    state.longest_road_length = board_.longest_road(action.color);
-    // Longest-road ownership transfer is added with full award parity; keeping
-    // the exact length now makes observations and later award logic stable.
+    if (is_road_building_ && free_roads_available_ > 0) {
+        --free_roads_available_;
+        if (free_roads_available_ == 0 || state.roads_available == 0 ||
+            board_.buildable_edges(action.color).empty()) {
+            is_road_building_ = false;
+            free_roads_available_ = 0;
+        }
+    } else {
+        pay(action.color, kRoadCost);
+    }
+    update_longest_road_award();
 }
 
 void Game::apply_build_city(const Action& action) {
@@ -339,6 +545,34 @@ void Game::apply_build_city(const Action& action) {
     ++state.victory_points;
     ++state.actual_victory_points;
     pay(action.color, kCityCost);
+}
+
+void Game::apply_buy_development_card(
+    const Action& action,
+    std::optional<DevelopmentCard> replay_card) {
+    if (development_deck_.empty() ||
+        !can_afford(action.color, kDevelopmentCardCost)) {
+        throw std::logic_error("development card cannot be bought");
+    }
+    DevelopmentCard card;
+    if (replay_card.has_value()) {
+        const auto it = std::find(
+            development_deck_.begin(), development_deck_.end(), *replay_card);
+        if (it == development_deck_.end()) {
+            throw std::logic_error("replay development card is absent");
+        }
+        card = *it;
+        development_deck_.erase(it);
+    } else {
+        card = development_deck_.back();
+        development_deck_.pop_back();
+    }
+    PlayerState& state = player(action.color);
+    ++state.development_cards[static_cast<std::size_t>(card)];
+    if (card == DevelopmentCard::victory_point) {
+        ++state.actual_victory_points;
+    }
+    pay(action.color, kDevelopmentCardCost);
 }
 
 void Game::yield_resources(int number) {
@@ -440,7 +674,9 @@ void Game::apply_discard(const Action& action) {
     std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
 }
 
-void Game::apply_move_robber(const Action& action) {
+void Game::apply_move_robber(
+    const Action& action,
+    std::optional<Resource> replay_stolen_resource) {
     const RobberMove& move = std::get<RobberMove>(action.value);
     if (move.victim.has_value()) {
         PlayerState& victim = player(*move.victim);
@@ -454,8 +690,16 @@ void Game::apply_move_robber(const Action& action) {
         if (cards.empty()) {
             throw std::logic_error("robber victim has no resources");
         }
-        std::uniform_int_distribution<std::size_t> choose(0, cards.size() - 1);
-        const Resource stolen = cards[choose(random_)];
+        Resource stolen;
+        if (replay_stolen_resource.has_value()) {
+            if (victim.resources[resource_index(*replay_stolen_resource)] <= 0) {
+                throw std::logic_error("replay stolen resource is absent");
+            }
+            stolen = *replay_stolen_resource;
+        } else {
+            std::uniform_int_distribution<std::size_t> choose(0, cards.size() - 1);
+            stolen = cards[choose(random_)];
+        }
         const std::size_t resource = resource_index(stolen);
         --victim.resources[resource];
         ++player(action.color).resources[resource];
@@ -463,6 +707,256 @@ void Game::apply_move_robber(const Action& action) {
     board_.move_robber(move.coordinate);
     current_prompt_ = ActionPrompt::play_turn;
     is_moving_knight_ = false;
+}
+
+void Game::apply_play_knight(const Action& action) {
+    consume_development_card(action.color, DevelopmentCard::knight);
+    update_largest_army_award(action.color);
+    current_prompt_ = ActionPrompt::move_robber;
+    is_moving_knight_ = true;
+}
+
+void Game::apply_play_year_of_plenty(const Action& action) {
+    const auto& cards = std::get<std::vector<Resource>>(action.value);
+    if (cards.empty() || cards.size() > 2) {
+        throw std::logic_error("year of plenty must draw one or two resources");
+    }
+    std::array<int, 5> requested{};
+    for (Resource card : cards) {
+        ++requested[resource_index(card)];
+    }
+    for (std::size_t i = 0; i < requested.size(); ++i) {
+        if (requested[i] > resource_bank_[i]) {
+            throw std::logic_error("bank cannot fulfill year of plenty");
+        }
+    }
+    consume_development_card(action.color, DevelopmentCard::year_of_plenty);
+    PlayerState& state = player(action.color);
+    for (std::size_t i = 0; i < requested.size(); ++i) {
+        state.resources[i] += requested[i];
+        resource_bank_[i] -= requested[i];
+    }
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_play_monopoly(const Action& action) {
+    const Resource card = std::get<Resource>(action.value);
+    consume_development_card(action.color, DevelopmentCard::monopoly);
+    const std::size_t resource = resource_index(card);
+    int stolen = 0;
+    for (Color color : colors_) {
+        if (color == action.color) {
+            continue;
+        }
+        PlayerState& victim = player(color);
+        stolen += victim.resources[resource];
+        victim.resources[resource] = 0;
+    }
+    player(action.color).resources[resource] += stolen;
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_play_road_building(const Action& action) {
+    consume_development_card(action.color, DevelopmentCard::road_building);
+    is_road_building_ = true;
+    free_roads_available_ = 2;
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_maritime_trade(const Action& action) {
+    const MaritimeTrade& trade = std::get<MaritimeTrade>(action.value);
+    if (!trade.cards[4].has_value()) {
+        throw std::logic_error("maritime trade must request a resource");
+    }
+    std::array<int, 5> offered{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        if (trade.cards[i].has_value()) {
+            ++offered[resource_index(*trade.cards[i])];
+        }
+    }
+    const std::size_t received = resource_index(*trade.cards[4]);
+    if (!can_afford(action.color, offered) || resource_bank_[received] <= 0) {
+        throw std::logic_error("maritime trade cannot be fulfilled");
+    }
+    pay(action.color, offered);
+    --resource_bank_[received];
+    ++player(action.color).resources[received];
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_offer_trade(const Action& action) {
+    current_trade_ = std::get<DomesticTrade>(action.value);
+    current_trade_.offering_player_index = current_turn_index_;
+    is_resolving_trade_ = true;
+    const auto it = std::find_if(
+        colors_.begin(),
+        colors_.end(),
+        [&](Color color) { return color != action.color; });
+    current_player_index_ = static_cast<int>(std::distance(colors_.begin(), it));
+    current_prompt_ = ActionPrompt::decide_trade;
+}
+
+void Game::apply_accept_trade(const Action& action) {
+    const int index = player_index(action.color);
+    acceptees_[static_cast<std::size_t>(index)] = true;
+    int next = -1;
+    for (int i = current_player_index_ + 1;
+         i < static_cast<int>(colors_.size());
+         ++i) {
+        if (colors_[static_cast<std::size_t>(i)] != action.color) {
+            next = i;
+            break;
+        }
+    }
+    if (next >= 0) {
+        current_player_index_ = next;
+    } else {
+        current_player_index_ = current_turn_index_;
+        current_prompt_ = ActionPrompt::decide_acceptees;
+    }
+}
+
+void Game::apply_reject_trade(const Action& action) {
+    int next = -1;
+    for (int i = current_player_index_ + 1;
+         i < static_cast<int>(colors_.size());
+         ++i) {
+        if (colors_[static_cast<std::size_t>(i)] != action.color) {
+            next = i;
+            break;
+        }
+    }
+    if (next >= 0) {
+        current_player_index_ = next;
+        return;
+    }
+    current_player_index_ = current_turn_index_;
+    if (std::none_of(acceptees_.begin(), acceptees_.end(), [](bool value) {
+            return value;
+        })) {
+        reset_trading_state();
+        current_prompt_ = ActionPrompt::play_turn;
+    } else {
+        current_prompt_ = ActionPrompt::decide_acceptees;
+    }
+}
+
+void Game::apply_confirm_trade(const Action& action) {
+    const ConfirmedTrade& confirmed = std::get<ConfirmedTrade>(action.value);
+    PlayerState& offering = player(action.color);
+    PlayerState& partner = player(confirmed.partner);
+    for (std::size_t i = 0; i < offering.resources.size(); ++i) {
+        offering.resources[i] -= confirmed.trade.offering[i];
+        offering.resources[i] += confirmed.trade.asking[i];
+        partner.resources[i] -= confirmed.trade.asking[i];
+        partner.resources[i] += confirmed.trade.offering[i];
+    }
+    reset_trading_state();
+    current_player_index_ = current_turn_index_;
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_cancel_trade(const Action&) {
+    reset_trading_state();
+    current_player_index_ = current_turn_index_;
+    current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::reset_trading_state() {
+    is_resolving_trade_ = false;
+    current_trade_ = DomesticTrade{};
+    std::fill(acceptees_.begin(), acceptees_.end(), false);
+}
+
+void Game::update_longest_road_award() {
+    std::optional<int> previous_owner;
+    for (std::size_t i = 0; i < players_.size(); ++i) {
+        players_[i].longest_road_length = board_.longest_road(colors_[i]);
+        if (players_[i].has_road) {
+            previous_owner = static_cast<int>(i);
+        }
+    }
+
+    std::optional<int> winner;
+    if (previous_owner.has_value() &&
+        players_[static_cast<std::size_t>(*previous_owner)].longest_road_length >= 5) {
+        const int owner_length =
+            players_[static_cast<std::size_t>(*previous_owner)].longest_road_length;
+        const bool surpassed = std::any_of(
+            players_.begin(),
+            players_.end(),
+            [owner_length](const PlayerState& candidate) {
+                return candidate.longest_road_length > owner_length;
+            });
+        if (!surpassed) {
+            winner = previous_owner;
+        }
+    }
+    if (!winner.has_value()) {
+        int best_length = 4;
+        for (std::size_t i = 0; i < players_.size(); ++i) {
+            if (players_[i].longest_road_length > best_length) {
+                best_length = players_[i].longest_road_length;
+                winner = static_cast<int>(i);
+            }
+        }
+    }
+    if (winner == previous_owner) {
+        return;
+    }
+    if (previous_owner.has_value()) {
+        PlayerState& previous = players_[static_cast<std::size_t>(*previous_owner)];
+        previous.has_road = false;
+        previous.victory_points -= 2;
+        previous.actual_victory_points -= 2;
+    }
+    if (winner.has_value()) {
+        PlayerState& next = players_[static_cast<std::size_t>(*winner)];
+        next.has_road = true;
+        next.victory_points += 2;
+        next.actual_victory_points += 2;
+    }
+}
+
+void Game::update_largest_army_award(Color candidate_color) {
+    const int candidate_index = player_index(candidate_color);
+    PlayerState& candidate = players_[static_cast<std::size_t>(candidate_index)];
+    const int candidate_size = candidate.played_development_cards[
+        static_cast<std::size_t>(DevelopmentCard::knight)];
+    if (candidate_size < 3) {
+        return;
+    }
+    std::optional<int> previous_owner;
+    for (std::size_t i = 0; i < players_.size(); ++i) {
+        if (players_[i].has_army) {
+            previous_owner = static_cast<int>(i);
+            break;
+        }
+    }
+    if (!previous_owner.has_value()) {
+        candidate.has_army = true;
+        candidate.victory_points += 2;
+        candidate.actual_victory_points += 2;
+        return;
+    }
+    if (*previous_owner == candidate_index) {
+        return;
+    }
+    const PlayerState& previous =
+        players_[static_cast<std::size_t>(*previous_owner)];
+    const int previous_size = previous.played_development_cards[
+        static_cast<std::size_t>(DevelopmentCard::knight)];
+    if (candidate_size <= previous_size) {
+        return;
+    }
+    PlayerState& mutable_previous =
+        players_[static_cast<std::size_t>(*previous_owner)];
+    mutable_previous.has_army = false;
+    mutable_previous.victory_points -= 2;
+    mutable_previous.actual_victory_points -= 2;
+    candidate.has_army = true;
+    candidate.victory_points += 2;
+    candidate.actual_victory_points += 2;
 }
 
 void Game::apply_end_turn(const Action& action) {

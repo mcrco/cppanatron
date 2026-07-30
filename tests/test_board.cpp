@@ -243,6 +243,36 @@ void test_seven_discard_and_robber_transition() {
     require(game.player(Color::red).has_rolled, "rolling player remains marked rolled");
 }
 
+void test_friendly_robber_filters_low_score_opponents() {
+    Game game(
+        {Color::red, Color::blue},
+        MapType::tournament,
+        37,
+        7,
+        true);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.execute(find_action(game, ActionType::roll), Dice{3, 4});
+    require(
+        game.current_prompt() == ActionPrompt::move_robber,
+        "seven without discards moves the robber");
+    require(!game.playable_actions().empty(), "friendly robber has safe destinations");
+
+    for (const auto& action : game.playable_actions()) {
+        const auto& move = std::get<cppanatron::RobberMove>(action.value);
+        const auto& tile = game.board().map().tile_at(move.coordinate);
+        for (int node : tile.nodes) {
+            const auto building = game.board().buildings().find(node);
+            require(
+                building == game.board().buildings().end() ||
+                    building->second.color == Color::red ||
+                    game.player(building->second.color).actual_victory_points >= 3,
+                "friendly robber cannot block a low-score opponent");
+        }
+    }
+}
+
 void test_tournament_setup_differential_fixture() {
     Game game({Color::red, Color::blue}, MapType::tournament, 42);
     const FlatActionSpace action_space(2, MapType::tournament);
@@ -604,6 +634,7 @@ int main() {
         test_two_player_initial_setup_and_turn();
         test_flat_action_space_contract();
         test_seven_discard_and_robber_transition();
+        test_friendly_robber_filters_low_score_opponents();
         test_tournament_setup_differential_fixture();
         test_development_card_lifecycle_and_knight();
         test_year_of_plenty_and_monopoly();

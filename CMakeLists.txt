@@ -27,6 +27,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cppanatron PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+add_library(cppanatron_c SHARED src/c_api.cpp)
+target_link_libraries(cppanatron_c PRIVATE cppanatron::cppanatron)
+target_compile_features(cppanatron_c PRIVATE cxx_std_20)
+target_include_directories(cppanatron_c PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set_target_properties(cppanatron_c PROPERTIES
+    CXX_EXTENSIONS OFF
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+    OUTPUT_NAME cppanatron
+)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(cppanatron_c PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
 if(CPPANATRON_BUILD_TESTS)
     enable_testing()
     add_executable(cppanatron_tests tests/test_board.cpp)

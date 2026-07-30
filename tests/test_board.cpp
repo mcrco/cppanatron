@@ -451,6 +451,48 @@ void test_domestic_trade_negotiation() {
         "confirmed domestic trade exchanges both hands");
 }
 
+void test_domestic_trade_reject_and_cancel() {
+    Game game(
+        {Color::red, Color::blue, Color::white},
+        MapType::tournament,
+        67);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {1, 0, 0, 0, 0};
+    game.player(Color::blue).resources = {0, 1, 0, 0, 0};
+    game.player(Color::white).resources = {0, 1, 0, 0, 0};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+
+    cppanatron::DomesticTrade offer;
+    offer.offering[0] = 1;
+    offer.asking[1] = 1;
+    game.execute({Color::red, ActionType::offer_trade, offer});
+    require(
+        game.current_color() == Color::blue,
+        "first opponent receives the trade offer");
+    game.execute(find_action(game, ActionType::reject_trade));
+    require(
+        game.current_color() == Color::white &&
+            game.current_prompt() == ActionPrompt::decide_trade,
+        "a rejection advances to the next opponent");
+    game.execute(find_action(game, ActionType::accept_trade));
+    require(
+        game.current_color() == Color::red &&
+            game.current_prompt() == ActionPrompt::decide_acceptees,
+        "the offer returns after every opponent answers");
+
+    const auto red_before = game.player(Color::red).resources;
+    const auto white_before = game.player(Color::white).resources;
+    game.execute(find_action(game, ActionType::cancel_trade));
+    require(
+        game.current_color() == Color::red &&
+            game.current_prompt() == ActionPrompt::play_turn &&
+            game.player(Color::red).resources == red_before &&
+            game.player(Color::white).resources == white_before,
+        "cancelling an accepted offer preserves both hands");
+}
+
 }  // namespace
 
 int main() {
@@ -467,6 +509,7 @@ int main() {
         test_year_of_plenty_and_monopoly();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
+        test_domestic_trade_reject_and_cancel();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

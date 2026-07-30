@@ -29,6 +29,8 @@ struct PlayerState {
     std::vector<int> settlements;
     std::vector<int> cities;
     std::vector<Edge> roads;
+    int last_knight_completed_turn{-1};
+    int last_development_card_bought_completed_turn{-1};
 };
 
 class Game {
@@ -61,6 +63,14 @@ public:
     [[nodiscard]] bool is_initial_build_phase() const noexcept {
         return is_initial_build_phase_;
     }
+    [[nodiscard]] bool is_discarding() const noexcept { return is_discarding_; }
+    [[nodiscard]] bool is_moving_robber() const noexcept {
+        return current_prompt_ == ActionPrompt::move_robber;
+    }
+    [[nodiscard]] bool is_road_building() const noexcept {
+        return is_road_building_;
+    }
+    [[nodiscard]] int completed_turns() const noexcept { return completed_turns_; }
     [[nodiscard]] const std::array<int, 5>& resource_bank() const noexcept {
         return resource_bank_;
     }
@@ -128,6 +138,7 @@ private:
     int current_player_index_{};
     int current_turn_index_{};
     int num_turns_{};
+    int completed_turns_{};
     ActionPrompt current_prompt_{ActionPrompt::build_initial_settlement};
     bool is_initial_build_phase_{true};
     bool is_discarding_{};

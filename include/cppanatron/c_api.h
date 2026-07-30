@@ -36,6 +36,8 @@ typedef struct cppanatron_player_state {
     int32_t development_cards[5];
     int32_t played_development_cards[5];
     int32_t development_card_owned_at_start[4];
+    int32_t turns_since_last_knight;
+    int32_t turns_since_last_development_card_bought;
 } cppanatron_player_state;
 
 typedef struct cppanatron_building {
@@ -91,6 +93,12 @@ CPPANATRON_API int32_t cppanatron_game_current_player(const cppanatron_game* han
 CPPANATRON_API int32_t cppanatron_game_current_prompt(const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_num_turns(const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_winner(const cppanatron_game* handle);
+CPPANATRON_API int32_t cppanatron_game_flags(
+    const cppanatron_game* handle,
+    int32_t output[7]);
+CPPANATRON_API int32_t cppanatron_game_robber_coordinate(
+    const cppanatron_game* handle,
+    int32_t output[3]);
 CPPANATRON_API int32_t cppanatron_game_development_cards_remaining(
     const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_resource_bank(

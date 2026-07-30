@@ -569,6 +569,7 @@ void Game::apply_buy_development_card(
     }
     PlayerState& state = player(action.color);
     ++state.development_cards[static_cast<std::size_t>(card)];
+    state.last_development_card_bought_completed_turn = completed_turns_;
     if (card == DevelopmentCard::victory_point) {
         ++state.actual_victory_points;
     }
@@ -711,6 +712,7 @@ void Game::apply_move_robber(
 
 void Game::apply_play_knight(const Action& action) {
     consume_development_card(action.color, DevelopmentCard::knight);
+    player(action.color).last_knight_completed_turn = completed_turns_;
     update_largest_army_award(action.color);
     current_prompt_ = ActionPrompt::move_robber;
     is_moving_knight_ = true;
@@ -966,6 +968,7 @@ void Game::apply_end_turn(const Action& action) {
     for (std::size_t i = 0; i < state.development_card_owned_at_start.size(); ++i) {
         state.development_card_owned_at_start[i] = state.development_cards[i] > 0;
     }
+    ++completed_turns_;
     advance_turn();
     current_prompt_ = ActionPrompt::play_turn;
 }

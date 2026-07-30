@@ -272,6 +272,37 @@ int32_t cppanatron_game_winner(const cppanatron_game* handle) {
         std::find(handle->colors.begin(), handle->colors.end(), *winner)));
 }
 
+int32_t cppanatron_game_flags(
+    const cppanatron_game* handle,
+    int32_t output[7]) {
+    return guard([&] {
+        if (handle == nullptr || output == nullptr) {
+            throw std::invalid_argument("null output or game handle");
+        }
+        output[0] = handle->game->is_initial_build_phase();
+        output[1] = handle->game->is_discarding();
+        output[2] = handle->game->is_moving_robber();
+        output[3] = handle->game->is_road_building();
+        output[4] = handle->game->current_player_index();
+        output[5] = handle->game->current_turn_index();
+        output[6] = handle->game->completed_turns();
+    });
+}
+
+int32_t cppanatron_game_robber_coordinate(
+    const cppanatron_game* handle,
+    int32_t output[3]) {
+    return guard([&] {
+        if (handle == nullptr || output == nullptr) {
+            throw std::invalid_argument("null output or game handle");
+        }
+        const auto coordinate = handle->game->board().robber_coordinate();
+        output[0] = coordinate.x;
+        output[1] = coordinate.y;
+        output[2] = coordinate.z;
+    });
+}
+
 int32_t cppanatron_game_development_cards_remaining(const cppanatron_game* handle) {
     return handle == nullptr
                ? -1
@@ -327,6 +358,16 @@ int32_t cppanatron_game_player_state(
             state.development_card_owned_at_start.begin(),
             state.development_card_owned_at_start.end(),
             output->development_card_owned_at_start);
+        output->turns_since_last_knight =
+            state.last_knight_completed_turn < 0
+                ? -1
+                : handle->game->completed_turns() -
+                      state.last_knight_completed_turn;
+        output->turns_since_last_development_card_bought =
+            state.last_development_card_bought_completed_turn < 0
+                ? -1
+                : handle->game->completed_turns() -
+                      state.last_development_card_bought_completed_turn;
     });
 }
 

@@ -308,6 +308,67 @@ void test_development_card_lifecycle_and_knight() {
         "knight requires robber movement");
 }
 
+void test_year_of_plenty_and_monopoly() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 47);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {0, 0, 2, 2, 2};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+    game.execute(
+        find_action(game, ActionType::buy_development_card),
+        std::nullopt,
+        cppanatron::DevelopmentCard::year_of_plenty);
+    game.execute(
+        find_action(game, ActionType::buy_development_card),
+        std::nullopt,
+        cppanatron::DevelopmentCard::monopoly);
+    game.execute(find_action(game, ActionType::end_turn));
+    finish_turn(game);
+
+    const auto plenty = std::find_if(
+        game.playable_actions().begin(),
+        game.playable_actions().end(),
+        [](const auto& action) {
+            return action.type == ActionType::play_year_of_plenty &&
+                   std::get<std::vector<Resource>>(action.value) ==
+                       std::vector<Resource>{Resource::wood, Resource::ore};
+        });
+    require(plenty != game.playable_actions().end(), "year of plenty pair is legal");
+    const auto hand_before = game.player(Color::red).resources;
+    game.execute(*plenty);
+    require(
+        game.player(Color::red).resources[0] == hand_before[0] + 1 &&
+            game.player(Color::red).resources[4] == hand_before[4] + 1,
+        "year of plenty draws both selected resources");
+    require(
+        std::none_of(
+            game.playable_actions().begin(),
+            game.playable_actions().end(),
+            [](const auto& action) {
+                return action.type == ActionType::play_monopoly;
+            }),
+        "only one development card can be played per turn");
+
+    finish_turn(game);
+    finish_turn(game);
+    game.player(Color::blue).resources[0] = 3;
+    const auto monopoly = std::find_if(
+        game.playable_actions().begin(),
+        game.playable_actions().end(),
+        [](const auto& action) {
+            return action.type == ActionType::play_monopoly &&
+                   std::get<Resource>(action.value) == Resource::wood;
+        });
+    require(monopoly != game.playable_actions().end(), "wood monopoly is legal");
+    const int red_wood_before = game.player(Color::red).resources[0];
+    game.execute(*monopoly);
+    require(
+        game.player(Color::blue).resources[0] == 0 &&
+            game.player(Color::red).resources[0] == red_wood_before + 3,
+        "monopoly transfers every selected opponent resource");
+}
+
 void test_maritime_trade_and_other_development_cards() {
     Game game({Color::red, Color::blue}, MapType::tournament, 51);
     while (game.is_initial_build_phase()) {
@@ -403,6 +464,7 @@ int main() {
         test_seven_discard_and_robber_transition();
         test_tournament_setup_differential_fixture();
         test_development_card_lifecycle_and_knight();
+        test_year_of_plenty_and_monopoly();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
     } catch (const std::exception& error) {

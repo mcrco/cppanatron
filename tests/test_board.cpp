@@ -499,6 +499,27 @@ void test_longest_road_award() {
         "only the longest qualifying network owns the award");
 }
 
+void test_enemy_endpoint_road_matches_reference_component_cache() {
+    Board board(CatanMap::build(
+        MapType::mini, 17, cppanatron::NumberPlacement::random));
+    board.build_settlement(Color::blue, 0, true);
+    board.build_settlement(Color::red, 2, true);
+
+    board.build_road(Color::blue, {0, 1});
+    board.build_road(Color::blue, {1, 2});
+    board.build_road(Color::blue, {0, 20});
+    board.build_road(Color::blue, {20, 22});
+    board.build_road(Color::blue, {0, 5});
+
+    require(
+        board.is_friendly_road({1, 2}, Color::blue),
+        "road ending at an enemy settlement remains on the board");
+    require(
+        board.longest_road(Color::blue) == 3,
+        "road built into an existing enemy node is excluded from the "
+        "reference connected-component cache");
+}
+
 void test_maritime_trade_and_other_development_cards() {
     Game game({Color::red, Color::blue}, MapType::tournament, 51);
     while (game.is_initial_build_phase()) {
@@ -641,6 +662,7 @@ int main() {
         test_largest_army_award();
         test_victory_point_card_is_hidden_and_terminal();
         test_longest_road_award();
+        test_enemy_endpoint_road_matches_reference_component_cache();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
         test_domestic_trade_reject_and_cancel();

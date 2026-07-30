@@ -16,10 +16,12 @@ using cppanatron::Color;
 using cppanatron::FlatActionSpace;
 using cppanatron::Game;
 using cppanatron::MapType;
+using cppanatron::NumberPlacement;
 
 struct cppanatron_game {
     int num_players{};
     MapType map_type{};
+    NumberPlacement number_placement{};
     int discard_limit{};
     bool friendly_robber{};
     int victory_points_to_win{};
@@ -30,6 +32,7 @@ struct cppanatron_game {
     cppanatron_game(
         int players,
         MapType map,
+        NumberPlacement placement,
         std::uint64_t map_seed,
         std::uint64_t game_seed,
         int discard,
@@ -37,6 +40,7 @@ struct cppanatron_game {
         int victory_points)
         : num_players(players),
           map_type(map),
+          number_placement(placement),
           discard_limit(discard),
           friendly_robber(friendly),
           victory_points_to_win(victory_points),
@@ -49,7 +53,7 @@ struct cppanatron_game {
               discard,
               friendly,
               victory_points,
-              cppanatron::NumberPlacement::official_spiral,
+              placement,
               map_seed)) {}
 
     void reset(std::uint64_t map_seed, std::uint64_t game_seed) {
@@ -60,7 +64,7 @@ struct cppanatron_game {
             discard_limit,
             friendly_robber,
             victory_points_to_win,
-            cppanatron::NumberPlacement::official_spiral,
+            number_placement,
             map_seed);
     }
 };
@@ -79,6 +83,17 @@ MapType parse_map_type(int value) {
             return MapType::tournament;
         default:
             throw std::invalid_argument("invalid map type");
+    }
+}
+
+NumberPlacement parse_number_placement(int value) {
+    switch (value) {
+        case CPPANATRON_NUMBER_PLACEMENT_OFFICIAL_SPIRAL:
+            return NumberPlacement::official_spiral;
+        case CPPANATRON_NUMBER_PLACEMENT_RANDOM:
+            return NumberPlacement::random;
+        default:
+            throw std::invalid_argument("invalid number placement");
     }
 }
 
@@ -117,7 +132,7 @@ int guarded_value(Callable&& callable, int error_value = -1) noexcept {
 extern "C" {
 
 const char* cppanatron_version(void) {
-    return "0.1.0";
+    return "0.2.0";
 }
 
 const char* cppanatron_last_error(void) {
@@ -138,6 +153,7 @@ cppanatron_game* cppanatron_game_create(
         auto* result = new cppanatron_game(
             num_players,
             parse_map_type(map_type),
+            NumberPlacement::official_spiral,
             seed,
             seed,
             discard_limit,
@@ -169,6 +185,40 @@ cppanatron_game* cppanatron_game_create_seeded(
         auto* result = new cppanatron_game(
             num_players,
             parse_map_type(map_type),
+            NumberPlacement::official_spiral,
+            map_seed,
+            game_seed,
+            discard_limit,
+            friendly_robber != 0,
+            victory_points_to_win);
+        last_error.clear();
+        return result;
+    } catch (const std::exception& error) {
+        last_error = error.what();
+        return nullptr;
+    } catch (...) {
+        last_error = "unknown C++ exception";
+        return nullptr;
+    }
+}
+
+cppanatron_game* cppanatron_game_create_seeded_with_number_placement(
+    int32_t num_players,
+    int32_t map_type,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement) {
+    try {
+        if (num_players < 1 || num_players > 4) {
+            throw std::invalid_argument("num_players must be between one and four");
+        }
+        auto* result = new cppanatron_game(
+            num_players,
+            parse_map_type(map_type),
+            parse_number_placement(number_placement),
             map_seed,
             game_seed,
             discard_limit,

@@ -15,7 +15,8 @@ builds, development cards, maritime and domestic trades, Longest Road, Largest
 Army, terminal scoring, the CatanRL flat action table, and the pinned
 `ValueFunctionPlayer` heuristic. The C ABI exposes legal masks, replayable
 stochastic transitions, observations, state inspection, independent map/game
-seeds, and native expert actions.
+seeds, selectable official-spiral or random number placement, and native expert
+actions.
 
 The parent CatanRL repository supplies the `ctypes` binding, exact full-feature
 adapter, and multiprocessing PufferLib environment. Its differential suite
@@ -42,7 +43,9 @@ Random streams do not need to be bit-identical across languages, but replaying
 recorded stochastic outcomes must produce identical states.
 
 Map and in-game randomness use independent seeds. The legacy single-seed C ABI
-remains available and applies that seed to both streams.
+remains available and applies that seed to both streams with official-spiral
+number placement. CatanRL uses the additive configured constructor with random
+number placement to match its Python training environments.
 
 ## License
 

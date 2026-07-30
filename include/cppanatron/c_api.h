@@ -21,6 +21,11 @@ enum cppanatron_map_type {
     CPPANATRON_MAP_TOURNAMENT = 2,
 };
 
+enum cppanatron_number_placement {
+    CPPANATRON_NUMBER_PLACEMENT_OFFICIAL_SPIRAL = 0,
+    CPPANATRON_NUMBER_PLACEMENT_RANDOM = 1,
+};
+
 typedef struct cppanatron_player_state {
     int32_t victory_points;
     int32_t actual_victory_points;
@@ -81,6 +86,16 @@ CPPANATRON_API cppanatron_game* cppanatron_game_create_seeded(
     int32_t discard_limit,
     int32_t friendly_robber,
     int32_t victory_points_to_win);
+CPPANATRON_API cppanatron_game*
+cppanatron_game_create_seeded_with_number_placement(
+    int32_t num_players,
+    int32_t map_type,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win,
+    int32_t number_placement);
 CPPANATRON_API void cppanatron_game_destroy(cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_reset(cppanatron_game* handle, uint64_t seed);
 CPPANATRON_API int32_t cppanatron_game_reset_seeded(

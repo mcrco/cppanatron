@@ -882,31 +882,11 @@ void Game::update_longest_road_award() {
             previous_owner = static_cast<int>(i);
         }
     }
-
-    std::optional<int> winner;
-    if (previous_owner.has_value() &&
-        players_[static_cast<std::size_t>(*previous_owner)].longest_road_length >= 5) {
-        const int owner_length =
-            players_[static_cast<std::size_t>(*previous_owner)].longest_road_length;
-        const bool surpassed = std::any_of(
-            players_.begin(),
-            players_.end(),
-            [owner_length](const PlayerState& candidate) {
-                return candidate.longest_road_length > owner_length;
-            });
-        if (!surpassed) {
-            winner = previous_owner;
-        }
-    }
-    if (!winner.has_value()) {
-        int best_length = 4;
-        for (std::size_t i = 0; i < players_.size(); ++i) {
-            if (players_[i].longest_road_length > best_length) {
-                best_length = players_[i].longest_road_length;
-                winner = static_cast<int>(i);
-            }
-        }
-    }
+    const auto winner_color = board_.longest_road_color();
+    const std::optional<int> winner =
+        winner_color.has_value()
+            ? std::optional<int>(player_index(*winner_color))
+            : std::nullopt;
     if (winner == previous_owner) {
         return;
     }

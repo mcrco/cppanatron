@@ -409,6 +409,39 @@ void test_largest_army_award() {
         "third knight awards largest army and two victory points");
 }
 
+void test_longest_road_award() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 53);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {15, 15, 0, 0, 0};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+
+    int roads_built = 0;
+    while (game.player(Color::red).longest_road_length < 5) {
+        const auto road = std::find_if(
+            game.playable_actions().begin(),
+            game.playable_actions().end(),
+            [](const auto& action) {
+                return action.type == ActionType::build_road;
+            });
+        require(
+            road != game.playable_actions().end(),
+            "road network can extend to award length");
+        game.execute(*road);
+        require(++roads_built <= 13, "road award fixture must converge");
+    }
+
+    require(
+        game.player(Color::red).has_road &&
+            game.player(Color::red).victory_points == 4 &&
+            game.player(Color::red).actual_victory_points == 4,
+        "a five-edge path awards longest road and two victory points");
+    require(
+        !game.player(Color::blue).has_road,
+        "only the longest qualifying network owns the award");
+}
+
 void test_maritime_trade_and_other_development_cards() {
     Game game({Color::red, Color::blue}, MapType::tournament, 51);
     while (game.is_initial_build_phase()) {
@@ -548,6 +581,7 @@ int main() {
         test_development_card_lifecycle_and_knight();
         test_year_of_plenty_and_monopoly();
         test_largest_army_award();
+        test_longest_road_award();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
         test_domestic_trade_reject_and_cancel();

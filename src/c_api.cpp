@@ -30,7 +30,8 @@ struct cppanatron_game {
     cppanatron_game(
         int players,
         MapType map,
-        std::uint64_t seed,
+        std::uint64_t map_seed,
+        std::uint64_t game_seed,
         int discard,
         bool friendly,
         int victory_points)
@@ -42,16 +43,25 @@ struct cppanatron_game {
           colors(cppanatron::kColors.begin(), cppanatron::kColors.begin() + players),
           action_space(players, map),
           game(std::make_unique<Game>(
-              colors, map, seed, discard, friendly, victory_points)) {}
+              colors,
+              map,
+              game_seed,
+              discard,
+              friendly,
+              victory_points,
+              cppanatron::NumberPlacement::official_spiral,
+              map_seed)) {}
 
-    void reset(std::uint64_t seed) {
+    void reset(std::uint64_t map_seed, std::uint64_t game_seed) {
         game = std::make_unique<Game>(
             colors,
             map_type,
-            seed,
+            game_seed,
             discard_limit,
             friendly_robber,
-            victory_points_to_win);
+            victory_points_to_win,
+            cppanatron::NumberPlacement::official_spiral,
+            map_seed);
     }
 };
 
@@ -129,6 +139,38 @@ cppanatron_game* cppanatron_game_create(
             num_players,
             parse_map_type(map_type),
             seed,
+            seed,
+            discard_limit,
+            friendly_robber != 0,
+            victory_points_to_win);
+        last_error.clear();
+        return result;
+    } catch (const std::exception& error) {
+        last_error = error.what();
+        return nullptr;
+    } catch (...) {
+        last_error = "unknown C++ exception";
+        return nullptr;
+    }
+}
+
+cppanatron_game* cppanatron_game_create_seeded(
+    int32_t num_players,
+    int32_t map_type,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win) {
+    try {
+        if (num_players < 1 || num_players > 4) {
+            throw std::invalid_argument("num_players must be between one and four");
+        }
+        auto* result = new cppanatron_game(
+            num_players,
+            parse_map_type(map_type),
+            map_seed,
+            game_seed,
             discard_limit,
             friendly_robber != 0,
             victory_points_to_win);
@@ -152,7 +194,19 @@ int32_t cppanatron_game_reset(cppanatron_game* handle, uint64_t seed) {
         if (handle == nullptr) {
             throw std::invalid_argument("null game handle");
         }
-        handle->reset(seed);
+        handle->reset(seed, seed);
+    });
+}
+
+int32_t cppanatron_game_reset_seeded(
+    cppanatron_game* handle,
+    uint64_t map_seed,
+    uint64_t game_seed) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null game handle");
+        }
+        handle->reset(map_seed, game_seed);
     });
 }
 

@@ -73,8 +73,20 @@ CPPANATRON_API cppanatron_game* cppanatron_game_create(
     int32_t discard_limit,
     int32_t friendly_robber,
     int32_t victory_points_to_win);
+CPPANATRON_API cppanatron_game* cppanatron_game_create_seeded(
+    int32_t num_players,
+    int32_t map_type,
+    uint64_t map_seed,
+    uint64_t game_seed,
+    int32_t discard_limit,
+    int32_t friendly_robber,
+    int32_t victory_points_to_win);
 CPPANATRON_API void cppanatron_game_destroy(cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_reset(cppanatron_game* handle, uint64_t seed);
+CPPANATRON_API int32_t cppanatron_game_reset_seeded(
+    cppanatron_game* handle,
+    uint64_t map_seed,
+    uint64_t game_seed);
 CPPANATRON_API int32_t cppanatron_game_action_space_size(const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_valid_action_mask(
     const cppanatron_game* handle,

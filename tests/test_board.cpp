@@ -369,6 +369,46 @@ void test_year_of_plenty_and_monopoly() {
         "monopoly transfers every selected opponent resource");
 }
 
+void test_largest_army_award() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 49);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {0, 0, 3, 3, 3};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+    for (int i = 0; i < 3; ++i) {
+        game.execute(
+            find_action(game, ActionType::buy_development_card),
+            std::nullopt,
+            cppanatron::DevelopmentCard::knight);
+    }
+    game.execute(find_action(game, ActionType::end_turn));
+
+    for (int played = 1; played <= 3; ++played) {
+        finish_turn(game);
+        game.execute(find_action(game, ActionType::play_knight_card));
+        require(
+            game.current_prompt() == ActionPrompt::move_robber,
+            "each knight requires robber movement");
+        game.execute(find_action(game, ActionType::move_robber));
+        require(
+            game.player(Color::red).played_development_cards[0] == played,
+            "played knight count advances");
+        if (played < 3) {
+            require(
+                !game.player(Color::red).has_army,
+                "fewer than three knights do not receive largest army");
+            finish_turn(game);
+        }
+    }
+
+    require(
+        game.player(Color::red).has_army &&
+            game.player(Color::red).victory_points == 4 &&
+            game.player(Color::red).actual_victory_points == 4,
+        "third knight awards largest army and two victory points");
+}
+
 void test_maritime_trade_and_other_development_cards() {
     Game game({Color::red, Color::blue}, MapType::tournament, 51);
     while (game.is_initial_build_phase()) {
@@ -507,6 +547,7 @@ int main() {
         test_tournament_setup_differential_fixture();
         test_development_card_lifecycle_and_knight();
         test_year_of_plenty_and_monopoly();
+        test_largest_army_award();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
         test_domestic_trade_reject_and_cancel();

@@ -409,6 +409,33 @@ void test_largest_army_award() {
         "third knight awards largest army and two victory points");
 }
 
+void test_victory_point_card_is_hidden_and_terminal() {
+    Game game(
+        {Color::red, Color::blue},
+        MapType::tournament,
+        50,
+        7,
+        false,
+        3);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {0, 0, 1, 1, 1};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+    game.execute(
+        find_action(game, ActionType::buy_development_card),
+        std::nullopt,
+        cppanatron::DevelopmentCard::victory_point);
+
+    require(
+        game.player(Color::red).victory_points == 2 &&
+            game.player(Color::red).actual_victory_points == 3,
+        "victory point cards remain hidden from the public score");
+    require(
+        game.winning_color() == Color::red,
+        "a hidden victory point card can end the game");
+}
+
 void test_longest_road_award() {
     Game game({Color::red, Color::blue}, MapType::tournament, 53);
     while (game.is_initial_build_phase()) {
@@ -581,6 +608,7 @@ int main() {
         test_development_card_lifecycle_and_knight();
         test_year_of_plenty_and_monopoly();
         test_largest_army_award();
+        test_victory_point_card_is_hidden_and_terminal();
         test_longest_road_award();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();

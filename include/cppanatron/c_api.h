@@ -88,6 +88,12 @@ CPPANATRON_API int32_t cppanatron_game_step_replay(
     int32_t die_two,
     int32_t development_card,
     int32_t stolen_resource);
+CPPANATRON_API int32_t cppanatron_game_value_action(
+    const cppanatron_game* handle);
+CPPANATRON_API int32_t cppanatron_game_value_score(
+    const cppanatron_game* handle,
+    int32_t player,
+    double* output);
 CPPANATRON_API int32_t cppanatron_game_num_players(const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_current_player(const cppanatron_game* handle);
 CPPANATRON_API int32_t cppanatron_game_current_prompt(const cppanatron_game* handle);

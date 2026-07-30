@@ -10,6 +10,7 @@
 
 #include "cppanatron/action_space.hpp"
 #include "cppanatron/game.hpp"
+#include "cppanatron/value_player.hpp"
 
 using cppanatron::Color;
 using cppanatron::FlatActionSpace;
@@ -240,6 +241,34 @@ int32_t cppanatron_game_step_replay(
             handle->game->current_color(),
             handle->colors);
         handle->game->execute(action, dice, card, resource);
+    });
+}
+
+int32_t cppanatron_game_value_action(const cppanatron_game* handle) {
+    return guarded_value([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null game handle");
+        }
+        const auto action = cppanatron::value_action(*handle->game);
+        return static_cast<int>(
+            handle->action_space.index(action, handle->colors));
+    });
+}
+
+int32_t cppanatron_game_value_score(
+    const cppanatron_game* handle,
+    int32_t player,
+    double* output) {
+    return guard([&] {
+        if (handle == nullptr || output == nullptr) {
+            throw std::invalid_argument("null output or game handle");
+        }
+        if (player < 0 || player >= handle->num_players) {
+            throw std::out_of_range("player index is out of range");
+        }
+        *output = cppanatron::value_score(
+            *handle->game,
+            handle->colors[static_cast<std::size_t>(player)]);
     });
 }
 

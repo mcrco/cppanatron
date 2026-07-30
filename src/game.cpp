@@ -31,7 +31,8 @@ Game::Game(
       random_(seed),
       discard_limit_(discard_limit),
       friendly_robber_(friendly_robber),
-      victory_points_to_win_(victory_points_to_win) {
+      victory_points_to_win_(victory_points_to_win),
+      discard_counts_(colors_.size()) {
     if (colors_.empty() || colors_.size() > kColors.size()) {
         throw std::invalid_argument("game requires one to four colors");
     }
@@ -80,6 +81,11 @@ bool Game::can_afford(Color color, const std::array<int, 5>& cost) const {
     return true;
 }
 
+int Game::num_resource_cards(Color color) const {
+    const auto& resources = player(color).resources;
+    return std::accumulate(resources.begin(), resources.end(), 0);
+}
+
 void Game::pay(Color color, const std::array<int, 5>& cost) {
     auto& hand = player(color).resources;
     for (std::size_t i = 0; i < hand.size(); ++i) {
@@ -111,6 +117,76 @@ std::vector<Action> Game::generate_playable_actions() const {
         return result;
     }
     if (current_prompt_ != ActionPrompt::play_turn) {
+        if (current_prompt_ == ActionPrompt::discard) {
+            const auto& hand = player(color).resources;
+            for (std::size_t i = 0; i < hand.size(); ++i) {
+                if (hand[i] > 0) {
+                    result.push_back(
+                        {color, ActionType::discard_resource, kResources[i]});
+                }
+            }
+            return result;
+        }
+        if (current_prompt_ == ActionPrompt::move_robber) {
+            std::vector<Action> unfiltered;
+            for (const auto& [coordinate, tile_index] :
+                 board_.map().coordinate_to_tile()) {
+                const Tile& tile =
+                    board_.map().tiles().at(static_cast<std::size_t>(tile_index));
+                if (tile.kind != TileKind::land ||
+                    coordinate == board_.robber_coordinate()) {
+                    continue;
+                }
+                std::vector<Color> victims;
+                for (int node : tile.nodes) {
+                    const auto building = board_.buildings().find(node);
+                    if (building == board_.buildings().end() ||
+                        building->second.color == color ||
+                        num_resource_cards(building->second.color) == 0) {
+                        continue;
+                    }
+                    if (std::find(
+                            victims.begin(),
+                            victims.end(),
+                            building->second.color) == victims.end()) {
+                        victims.push_back(building->second.color);
+                    }
+                }
+                if (victims.empty()) {
+                    unfiltered.push_back(
+                        {color,
+                         ActionType::move_robber,
+                         RobberMove{coordinate, std::nullopt}});
+                } else {
+                    for (Color victim : victims) {
+                        unfiltered.push_back(
+                            {color,
+                             ActionType::move_robber,
+                             RobberMove{coordinate, victim}});
+                    }
+                }
+            }
+            if (!friendly_robber_) {
+                return unfiltered;
+            }
+            for (const Action& action : unfiltered) {
+                const RobberMove& move = std::get<RobberMove>(action.value);
+                const Tile& tile = board_.map().tile_at(move.coordinate);
+                const bool blocks_low_vp_enemy = std::any_of(
+                    tile.nodes.begin(),
+                    tile.nodes.end(),
+                    [&](int node) {
+                        const auto building = board_.buildings().find(node);
+                        return building != board_.buildings().end() &&
+                               building->second.color != color &&
+                               player(building->second.color).actual_victory_points < 3;
+                    });
+                if (!blocks_low_vp_enemy) {
+                    result.push_back(action);
+                }
+            }
+            return result.empty() ? unfiltered : result;
+        }
         return result;
     }
 
@@ -156,6 +232,12 @@ void Game::execute(const Action& action, std::optional<Dice> replay_dice) {
             break;
         case ActionType::roll:
             apply_roll(action, replay_dice);
+            break;
+        case ActionType::discard_resource:
+            apply_discard(action);
+            break;
+        case ActionType::move_robber:
+            apply_move_robber(action);
             break;
         case ActionType::end_turn:
             apply_end_turn(action);
@@ -297,15 +379,90 @@ void Game::apply_roll(const Action& action, std::optional<Dice> replay_dice) {
     std::uniform_int_distribution<int> die(1, 6);
     const Dice dice = replay_dice.value_or(Dice{die(random_), die(random_)});
     const int number = dice.first + dice.second;
-    if (number == 7) {
-        // Keeping seven unavailable is safer than producing a legal-action set
-        // with incomplete discard/robber semantics.
-        throw std::logic_error("discard and robber transition is not implemented yet");
-    }
     PlayerState& state = player(action.color);
     state.has_rolled = true;
+    if (number == 7) {
+        int first_discarder = -1;
+        for (std::size_t i = 0; i < colors_.size(); ++i) {
+            const int cards = num_resource_cards(colors_[i]);
+            discard_counts_[i] = cards > discard_limit_ ? cards / 2 : 0;
+            if (discard_counts_[i] > 0 && first_discarder < 0) {
+                first_discarder = static_cast<int>(i);
+            }
+        }
+        if (first_discarder >= 0) {
+            current_player_index_ = first_discarder;
+            current_prompt_ = ActionPrompt::discard;
+            is_discarding_ = true;
+        } else {
+            std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
+            current_prompt_ = ActionPrompt::move_robber;
+            is_moving_knight_ = true;
+        }
+        return;
+    }
     yield_resources(number);
     current_prompt_ = ActionPrompt::play_turn;
+}
+
+void Game::apply_discard(const Action& action) {
+    const int index = player_index(action.color);
+    if (discard_counts_.at(static_cast<std::size_t>(index)) <= 0) {
+        throw std::logic_error("player is not required to discard");
+    }
+    const std::size_t resource = resource_index(std::get<Resource>(action.value));
+    PlayerState& state = player(action.color);
+    if (state.resources[resource] <= 0) {
+        throw std::logic_error("cannot discard an absent resource");
+    }
+    --state.resources[resource];
+    ++resource_bank_[resource];
+    --discard_counts_[static_cast<std::size_t>(index)];
+    if (discard_counts_[static_cast<std::size_t>(index)] > 0) {
+        return;
+    }
+
+    int next_discarder = -1;
+    for (int i = index + 1; i < static_cast<int>(colors_.size()); ++i) {
+        if (discard_counts_[static_cast<std::size_t>(i)] > 0) {
+            next_discarder = i;
+            break;
+        }
+    }
+    if (next_discarder >= 0) {
+        current_player_index_ = next_discarder;
+        return;
+    }
+    current_player_index_ = current_turn_index_;
+    current_prompt_ = ActionPrompt::move_robber;
+    is_discarding_ = false;
+    is_moving_knight_ = true;
+    std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
+}
+
+void Game::apply_move_robber(const Action& action) {
+    const RobberMove& move = std::get<RobberMove>(action.value);
+    if (move.victim.has_value()) {
+        PlayerState& victim = player(*move.victim);
+        std::vector<Resource> cards;
+        for (std::size_t i = 0; i < victim.resources.size(); ++i) {
+            cards.insert(
+                cards.end(),
+                static_cast<std::size_t>(victim.resources[i]),
+                kResources[i]);
+        }
+        if (cards.empty()) {
+            throw std::logic_error("robber victim has no resources");
+        }
+        std::uniform_int_distribution<std::size_t> choose(0, cards.size() - 1);
+        const Resource stolen = cards[choose(random_)];
+        const std::size_t resource = resource_index(stolen);
+        --victim.resources[resource];
+        ++player(action.color).resources[resource];
+    }
+    board_.move_robber(move.coordinate);
+    current_prompt_ = ActionPrompt::play_turn;
+    is_moving_knight_ = false;
 }
 
 void Game::apply_end_turn(const Action& action) {

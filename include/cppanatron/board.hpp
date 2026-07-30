@@ -28,6 +28,7 @@ public:
     }
     [[nodiscard]] const std::map<Edge, Color>& roads() const noexcept { return roads_; }
     [[nodiscard]] Coordinate robber_coordinate() const noexcept { return robber_coordinate_; }
+    void move_robber(Coordinate coordinate);
 
     [[nodiscard]] std::vector<int> buildable_node_ids(
         Color color,

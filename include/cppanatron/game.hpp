@@ -78,10 +78,13 @@ private:
     void apply_build_road(const Action& action);
     void apply_build_city(const Action& action);
     void apply_roll(const Action& action, std::optional<Dice> replay_dice);
+    void apply_discard(const Action& action);
+    void apply_move_robber(const Action& action);
     void apply_end_turn(const Action& action);
     void advance_turn(int direction = 1);
     void yield_resources(int number);
     [[nodiscard]] bool can_afford(Color color, const std::array<int, 5>& cost) const;
+    [[nodiscard]] int num_resource_cards(Color color) const;
     void pay(Color color, const std::array<int, 5>& cost);
 
     std::vector<Color> colors_;
@@ -97,6 +100,9 @@ private:
     int num_turns_{};
     ActionPrompt current_prompt_{ActionPrompt::build_initial_settlement};
     bool is_initial_build_phase_{true};
+    bool is_discarding_{};
+    bool is_moving_knight_{};
+    std::vector<int> discard_counts_;
     std::vector<Action> playable_actions_;
 };
 

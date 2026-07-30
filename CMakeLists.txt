@@ -35,4 +35,7 @@ if(CPPANATRON_BUILD_TESTS)
 
     add_executable(cppanatron_action_dump tools/dump_action_space.cpp)
     target_link_libraries(cppanatron_action_dump PRIVATE cppanatron::cppanatron)
+
+    add_executable(cppanatron_setup_dump tools/dump_setup.cpp)
+    target_link_libraries(cppanatron_setup_dump PRIVATE cppanatron::cppanatron)
 endif()

@@ -187,6 +187,63 @@ void test_flat_action_space_contract() {
         "ROLL index");
 }
 
+void test_seven_discard_and_robber_transition() {
+    Game game({Color::red, Color::blue}, MapType::base, 31);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+
+    game.player(Color::red).resources = {8, 0, 0, 0, 0};
+    game.execute(game.playable_actions().front(), Dice{3, 4});
+    require(game.current_prompt() == ActionPrompt::discard, "eight cards require four discards");
+    for (int i = 0; i < 4; ++i) {
+        require(
+            game.playable_actions().size() == 1 &&
+                game.playable_actions().front().type == ActionType::discard_resource,
+            "only held resources can be discarded");
+        game.execute(game.playable_actions().front());
+    }
+    require(
+        game.current_prompt() == ActionPrompt::move_robber,
+        "last discard advances to robber movement");
+    require(!game.playable_actions().empty(), "robber has legal destination actions");
+    game.execute(game.playable_actions().front());
+    require(
+        game.current_prompt() == ActionPrompt::play_turn,
+        "robber movement returns to play turn");
+    require(game.player(Color::red).has_rolled, "rolling player remains marked rolled");
+}
+
+void test_tournament_setup_differential_fixture() {
+    Game game({Color::red, Color::blue}, MapType::tournament, 42);
+    const FlatActionSpace action_space(2, MapType::tournament);
+    std::vector<std::size_t> played;
+    while (game.is_initial_build_phase()) {
+        const auto selected = std::min_element(
+            game.playable_actions().begin(),
+            game.playable_actions().end(),
+            [&](const auto& lhs, const auto& rhs) {
+                return action_space.index(lhs) < action_space.index(rhs);
+            });
+        played.push_back(action_space.index(*selected));
+        game.execute(*selected);
+    }
+
+    require(
+        played == std::vector<std::size_t>{126, 54, 128, 59, 130, 61, 132, 64},
+        "setup action trace must match pinned Python Catanatron");
+    require(
+        game.player(Color::red).resources == std::array<int, 5>{0, 1, 0, 1, 1},
+        "red setup resources must match Python");
+    require(
+        game.player(Color::blue).resources == std::array<int, 5>{1, 0, 1, 0, 1},
+        "blue setup resources must match Python");
+    require(
+        game.player(Color::red).settlements == std::vector<int>{0, 14} &&
+            game.player(Color::blue).settlements == std::vector<int>{10, 12},
+        "setup settlements must match Python");
+}
+
 }  // namespace
 
 int main() {
@@ -197,6 +254,8 @@ int main() {
         test_connected_roads_and_city();
         test_two_player_initial_setup_and_turn();
         test_flat_action_space_contract();
+        test_seven_discard_and_robber_transition();
+        test_tournament_setup_differential_fixture();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

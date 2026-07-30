@@ -33,6 +33,17 @@ Board::Board(CatanMap map) : map_(std::move(map)), board_buildable_ids_(map_.lan
     }
 }
 
+void Board::move_robber(Coordinate coordinate) {
+    const Tile& tile = map_.tile_at(coordinate);
+    if (tile.kind != TileKind::land) {
+        throw std::invalid_argument("robber must move to a land tile");
+    }
+    if (coordinate == robber_coordinate_) {
+        throw std::invalid_argument("robber must move to a different tile");
+    }
+    robber_coordinate_ = coordinate;
+}
+
 std::vector<int> Board::neighbors(int node_id) const {
     std::vector<int> result;
     for (Edge edge : map_.land_edges()) {

@@ -244,6 +244,64 @@ void test_mcts_dice_outcomes_are_exact() {
         "roll search outcome probabilities must match two dice");
 }
 
+void test_mcts_card_and_robber_outcomes_are_exact() {
+    Game game({Color::red, Color::blue}, MapType::mini, 45);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    game.player(Color::red).resources = {0, 0, 1, 1, 1};
+    game.execute(find_action(game, ActionType::roll), Dice{1, 1});
+    const auto buy = find_action(game, ActionType::buy_development_card);
+    const auto card_outcomes = cppanatron::action_outcomes(game, buy);
+    require(
+        card_outcomes.size() == 5,
+        "development-card search edge must enumerate every remaining card type");
+    const auto knight = std::find_if(
+        card_outcomes.begin(),
+        card_outcomes.end(),
+        [](const auto& outcome) {
+            return outcome.game.player(Color::red)
+                       .development_cards[static_cast<std::size_t>(
+                           cppanatron::DevelopmentCard::knight)] == 1;
+        });
+    require(
+        knight != card_outcomes.end() &&
+            std::abs(knight->probability - 14.0 / 25.0) < 1e-12,
+        "development-card outcome probability must match deck composition");
+
+    Game robber_game({Color::red, Color::blue}, MapType::mini, 46);
+    while (robber_game.is_initial_build_phase()) {
+        robber_game.execute(robber_game.playable_actions().front());
+    }
+    robber_game.player(Color::red).resources = {};
+    robber_game.player(Color::blue).resources = {2, 1, 0, 0, 0};
+    robber_game.execute(find_action(robber_game, ActionType::roll), Dice{3, 4});
+    const auto robber = std::find_if(
+        robber_game.playable_actions().begin(),
+        robber_game.playable_actions().end(),
+        [](const auto& action) {
+            const auto& move = std::get<cppanatron::RobberMove>(action.value);
+            return move.victim == Color::blue;
+        });
+    require(
+        robber != robber_game.playable_actions().end(),
+        "robber fixture must expose a steal action");
+    const auto robber_outcomes =
+        cppanatron::action_outcomes(robber_game, *robber);
+    require(
+        robber_outcomes.size() == 2,
+        "robber search edge must enumerate every resource type held by victim");
+    std::vector<double> robber_probabilities;
+    for (const auto& outcome : robber_outcomes) {
+        robber_probabilities.push_back(outcome.probability);
+    }
+    std::sort(robber_probabilities.begin(), robber_probabilities.end());
+    require(
+        std::abs(robber_probabilities[0] - 1.0 / 3.0) < 1e-12 &&
+            std::abs(robber_probabilities[1] - 2.0 / 3.0) < 1e-12,
+        "robber outcome probability must match victim resource counts");
+}
+
 void test_mcts_visits_only_legal_actions() {
     Game game({Color::red, Color::blue}, MapType::mini, 47);
     const FlatActionSpace action_space(2, MapType::mini);
@@ -722,6 +780,7 @@ int main() {
         test_two_player_initial_setup_and_turn();
         test_flat_action_space_contract();
         test_mcts_dice_outcomes_are_exact();
+        test_mcts_card_and_robber_outcomes_are_exact();
         test_mcts_visits_only_legal_actions();
         test_seven_discard_and_robber_transition();
         test_friendly_robber_filters_low_score_opponents();

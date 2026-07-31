@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -8,6 +10,7 @@
 #include "cppanatron/board.hpp"
 #include "cppanatron/action_space.hpp"
 #include "cppanatron/game.hpp"
+#include "cppanatron/mcts.hpp"
 
 namespace {
 
@@ -22,6 +25,7 @@ using cppanatron::ActionType;
 using cppanatron::Dice;
 using cppanatron::Game;
 using cppanatron::FlatActionSpace;
+using cppanatron::MCTSSearch;
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
@@ -214,6 +218,69 @@ void test_flat_action_space_contract() {
     require(
         base.decode(265, Color::red, colors) == robber,
         "relative robber action decodes to absolute victim");
+}
+
+void test_mcts_dice_outcomes_are_exact() {
+    Game game({Color::red, Color::blue}, MapType::mini, 43);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    const auto roll = find_action(game, ActionType::roll);
+    const auto outcomes = cppanatron::action_outcomes(game, roll);
+    require(outcomes.size() == 11, "roll search edge must enumerate every dice total");
+    const double total = std::accumulate(
+        outcomes.begin(),
+        outcomes.end(),
+        0.0,
+        [](double sum, const auto& outcome) {
+            return sum + outcome.probability;
+        });
+    require(
+        std::abs(total - 1.0) < 1e-12,
+        "roll search outcome probabilities must sum to one");
+    require(
+        std::abs(outcomes.front().probability - 1.0 / 36.0) < 1e-12 &&
+            std::abs(outcomes[5].probability - 6.0 / 36.0) < 1e-12,
+        "roll search outcome probabilities must match two dice");
+}
+
+void test_mcts_visits_only_legal_actions() {
+    Game game({Color::red, Color::blue}, MapType::mini, 47);
+    const FlatActionSpace action_space(2, MapType::mini);
+    MCTSSearch search(game, action_space, 1.5, 101);
+    std::vector<float> logits(action_space.size(), 0.0F);
+    search.initialize_root(logits);
+    search.add_root_dirichlet_noise(0.3, 0.25);
+
+    constexpr int kSimulations = 32;
+    for (int simulation = 0; simulation < kSimulations; ++simulation) {
+        const Game* leaf = search.select_leaf();
+        if (leaf != nullptr) {
+            require(search.has_pending_leaf(), "selected leaf must become pending");
+            require(
+                search.pending_player_index() == leaf->current_player_index(),
+                "pending leaf player index must match its game");
+            search.evaluate_leaf(logits, 0.0);
+        }
+    }
+
+    const auto visits = search.root_visits();
+    const auto total = std::accumulate(
+        visits.begin(), visits.end(), std::uint32_t{0});
+    require(total == kSimulations, "every MCTS simulation must reach one root action");
+    for (std::size_t index = 0; index < visits.size(); ++index) {
+        if (visits[index] == 0) {
+            continue;
+        }
+        const auto decoded =
+            action_space.decode(index, game.current_color(), game.colors());
+        require(
+            std::find(
+                game.playable_actions().begin(),
+                game.playable_actions().end(),
+                decoded) != game.playable_actions().end(),
+            "MCTS root visits must only target legal actions");
+    }
 }
 
 void test_seven_discard_and_robber_transition() {
@@ -654,6 +721,8 @@ int main() {
         test_connected_roads_and_city();
         test_two_player_initial_setup_and_turn();
         test_flat_action_space_contract();
+        test_mcts_dice_outcomes_are_exact();
+        test_mcts_visits_only_legal_actions();
         test_seven_discard_and_robber_transition();
         test_friendly_robber_filters_low_score_opponents();
         test_tournament_setup_differential_fixture();

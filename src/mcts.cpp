@@ -1,0 +1,372 @@
+#include "cppanatron/mcts.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <map>
+#include <numeric>
+#include <stdexcept>
+#include <utility>
+
+namespace cppanatron {
+namespace {
+
+constexpr double kProbabilityTolerance = 1e-12;
+
+std::size_t color_index(const Game& game, Color color) {
+    const auto it = std::find(game.colors().begin(), game.colors().end(), color);
+    if (it == game.colors().end()) {
+        throw std::logic_error("game current color is absent from its color list");
+    }
+    return static_cast<std::size_t>(std::distance(game.colors().begin(), it));
+}
+
+void normalize_probabilities(std::vector<ChanceOutcome>& outcomes) {
+    const double total = std::accumulate(
+        outcomes.begin(), outcomes.end(), 0.0,
+        [](double sum, const ChanceOutcome& outcome) { return sum + outcome.probability; });
+    if (outcomes.empty() || total <= kProbabilityTolerance) {
+        throw std::logic_error("action produced no positive-probability outcomes");
+    }
+    for (auto& outcome : outcomes) {
+        outcome.probability /= total;
+    }
+}
+
+} // namespace
+
+std::vector<ChanceOutcome> action_outcomes(const Game& game, const Action& action) {
+    std::vector<ChanceOutcome> outcomes;
+
+    if (action.type == ActionType::roll) {
+        constexpr std::array<int, 11> multiplicities{1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1};
+        for (int total = 2; total <= 12; ++total) {
+            Game next = game;
+            const Dice dice = total <= 7 ? Dice{1, total - 1} : Dice{6, total - 6};
+            next.execute(action, dice);
+            outcomes.push_back(
+                {std::move(next),
+                 static_cast<double>(multiplicities[static_cast<std::size_t>(total - 2)]) / 36.0});
+        }
+        return outcomes;
+    }
+
+    if (action.type == ActionType::buy_development_card) {
+        std::map<DevelopmentCard, int> counts;
+        for (DevelopmentCard card : game.development_deck()) {
+            ++counts[card];
+        }
+        const double total = static_cast<double>(game.development_cards_remaining());
+        for (const auto& [card, count] : counts) {
+            Game next = game;
+            next.execute(action, std::nullopt, card);
+            outcomes.push_back({std::move(next), static_cast<double>(count) / total});
+        }
+        normalize_probabilities(outcomes);
+        return outcomes;
+    }
+
+    if (action.type == ActionType::move_robber) {
+        const auto& move = std::get<RobberMove>(action.value);
+        if (move.victim.has_value()) {
+            const auto& resources = game.player(*move.victim).resources;
+            const int total = std::accumulate(resources.begin(), resources.end(), 0);
+            if (total > 0) {
+                for (std::size_t index = 0; index < resources.size(); ++index) {
+                    if (resources[index] <= 0) {
+                        continue;
+                    }
+                    Game next = game;
+                    next.execute(action, std::nullopt, std::nullopt, static_cast<Resource>(index));
+                    outcomes.push_back({std::move(next), static_cast<double>(resources[index]) /
+                                                             static_cast<double>(total)});
+                }
+                normalize_probabilities(outcomes);
+                return outcomes;
+            }
+        }
+    }
+
+    Game next = game;
+    next.execute(action);
+    outcomes.push_back({std::move(next), 1.0});
+    return outcomes;
+}
+
+struct MCTSSearch::Impl {
+    struct Node;
+
+    struct OutcomeEdge {
+        std::unique_ptr<Node> child;
+        double probability{};
+    };
+
+    struct ActionEdge {
+        std::size_t action_index{};
+        double prior{};
+        std::vector<OutcomeEdge> outcomes;
+
+        [[nodiscard]] std::uint32_t visits() const {
+            return std::accumulate(outcomes.begin(), outcomes.end(), std::uint32_t{0},
+                                   [](std::uint32_t sum, const OutcomeEdge& outcome) {
+                                       return sum + outcome.child->visits;
+                                   });
+        }
+    };
+
+    struct Node {
+        explicit Node(Game state) : game(std::move(state)), to_play(game.current_color()) {}
+
+        Game game;
+        Color to_play;
+        std::uint32_t visits{};
+        double value_sum{};
+        bool expanded{};
+        std::vector<ActionEdge> actions;
+
+        [[nodiscard]] double value() const noexcept {
+            return visits == 0 ? 0.0 : value_sum / static_cast<double>(visits);
+        }
+    };
+
+    Impl(const Game& game, FlatActionSpace flat_action_space, double exploration,
+         std::uint64_t seed)
+        : root(game), action_space(std::move(flat_action_space)), c_puct(exploration),
+          random(seed) {
+        if (!std::isfinite(c_puct) || c_puct < 0.0) {
+            throw std::invalid_argument("c_puct must be finite and non-negative");
+        }
+    }
+
+    Node root;
+    FlatActionSpace action_space;
+    double c_puct;
+    std::mt19937_64 random;
+    Node* pending_leaf{};
+    std::vector<Node*> pending_path;
+
+    void validate_logits(std::span<const float> logits) const {
+        if (logits.size() != action_space.size()) {
+            throw std::invalid_argument("policy logits have incorrect size");
+        }
+    }
+
+    void expand(Node& node, std::span<const float> logits) {
+        validate_logits(logits);
+        if (node.expanded) {
+            throw std::logic_error("cannot expand a node twice");
+        }
+        if (node.game.winning_color().has_value()) {
+            throw std::logic_error("cannot expand a terminal node");
+        }
+
+        const auto& playable_actions = node.game.playable_actions();
+        if (playable_actions.empty()) {
+            node.expanded = true;
+            return;
+        }
+
+        std::vector<std::size_t> indices;
+        indices.reserve(playable_actions.size());
+        float max_logit = -std::numeric_limits<float>::infinity();
+        for (const Action& action : playable_actions) {
+            const std::size_t index = action_space.index(action, node.game.colors());
+            indices.push_back(index);
+            max_logit = std::max(max_logit, logits[index]);
+        }
+
+        std::vector<double> weights;
+        weights.reserve(indices.size());
+        double weight_sum = 0.0;
+        for (std::size_t index : indices) {
+            const double weight =
+                std::isfinite(logits[index])
+                    ? std::exp(static_cast<double>(logits[index]) - static_cast<double>(max_logit))
+                    : 0.0;
+            weights.push_back(weight);
+            weight_sum += weight;
+        }
+        if (!std::isfinite(weight_sum) || weight_sum <= kProbabilityTolerance) {
+            std::fill(weights.begin(), weights.end(), 1.0);
+            weight_sum = static_cast<double>(weights.size());
+        }
+
+        node.actions.reserve(playable_actions.size());
+        for (std::size_t i = 0; i < playable_actions.size(); ++i) {
+            ActionEdge edge;
+            edge.action_index = indices[i];
+            edge.prior = weights[i] / weight_sum;
+            auto outcomes = action_outcomes(node.game, playable_actions[i]);
+            edge.outcomes.reserve(outcomes.size());
+            for (auto& outcome : outcomes) {
+                edge.outcomes.push_back(
+                    {std::make_unique<Node>(std::move(outcome.game)), outcome.probability});
+            }
+            node.actions.push_back(std::move(edge));
+        }
+        node.expanded = true;
+    }
+
+    [[nodiscard]] Node& select_child(Node& node) {
+        const std::uint32_t total_visits = std::accumulate(
+            node.actions.begin(), node.actions.end(), std::uint32_t{0},
+            [](std::uint32_t sum, const ActionEdge& action) { return sum + action.visits(); });
+        ActionEdge* best_action = nullptr;
+        double best_score = -std::numeric_limits<double>::infinity();
+        for (auto& action : node.actions) {
+            const std::uint32_t action_visits = action.visits();
+            double q_value = 0.0;
+            if (action_visits > 0) {
+                for (const auto& outcome : action.outcomes) {
+                    const Node& child = *outcome.child;
+                    const double oriented_value =
+                        child.to_play == node.to_play ? child.value() : -child.value();
+                    q_value += outcome.probability * oriented_value;
+                }
+            }
+            const double u_value = c_puct * action.prior *
+                                   std::sqrt(static_cast<double>(total_visits) + 1.0) /
+                                   (1.0 + static_cast<double>(action_visits));
+            const double score = q_value + u_value;
+            if (score > best_score) {
+                best_score = score;
+                best_action = &action;
+            }
+        }
+        if (best_action == nullptr || best_action->outcomes.empty()) {
+            throw std::logic_error("expanded search node has no outcomes");
+        }
+
+        std::vector<double> probabilities;
+        probabilities.reserve(best_action->outcomes.size());
+        for (const auto& outcome : best_action->outcomes) {
+            probabilities.push_back(outcome.probability);
+        }
+        std::discrete_distribution<std::size_t> distribution(probabilities.begin(),
+                                                             probabilities.end());
+        return *best_action->outcomes[distribution(random)].child;
+    }
+
+    void backup(const std::vector<Node*>& path, double leaf_value) {
+        double value = std::clamp(leaf_value, -1.0, 1.0);
+        for (std::size_t index = path.size(); index-- > 0;) {
+            Node& node = *path[index];
+            ++node.visits;
+            node.value_sum += value;
+            if (index > 0 && path[index - 1]->to_play != node.to_play) {
+                value = -value;
+            }
+        }
+    }
+};
+
+MCTSSearch::MCTSSearch(const Game& root_game, FlatActionSpace action_space, double c_puct,
+                       std::uint64_t seed)
+    : impl_(std::make_unique<Impl>(root_game, std::move(action_space), c_puct, seed)) {}
+
+MCTSSearch::~MCTSSearch() = default;
+MCTSSearch::MCTSSearch(MCTSSearch&&) noexcept = default;
+MCTSSearch& MCTSSearch::operator=(MCTSSearch&&) noexcept = default;
+
+void MCTSSearch::initialize_root(std::span<const float> policy_logits) {
+    if (impl_->pending_leaf != nullptr) {
+        throw std::logic_error("cannot initialize root with a pending leaf");
+    }
+    impl_->expand(impl_->root, policy_logits);
+}
+
+const Game* MCTSSearch::select_leaf() {
+    if (impl_->pending_leaf != nullptr) {
+        throw std::logic_error("previous leaf has not been evaluated");
+    }
+    if (!impl_->root.expanded) {
+        throw std::logic_error("search root has not been initialized");
+    }
+
+    Impl::Node* node = &impl_->root;
+    std::vector<Impl::Node*> path{node};
+    while (node->expanded && !node->game.winning_color().has_value() && !node->actions.empty()) {
+        node = &impl_->select_child(*node);
+        path.push_back(node);
+    }
+
+    const auto winner = node->game.winning_color();
+    if (winner.has_value()) {
+        impl_->backup(path, *winner == node->to_play ? 1.0 : -1.0);
+        return nullptr;
+    }
+    if (node->expanded && node->actions.empty()) {
+        impl_->backup(path, 0.0);
+        return nullptr;
+    }
+
+    impl_->pending_leaf = node;
+    impl_->pending_path = std::move(path);
+    return &node->game;
+}
+
+void MCTSSearch::evaluate_leaf(std::span<const float> policy_logits, double value) {
+    if (impl_->pending_leaf == nullptr) {
+        throw std::logic_error("no pending search leaf");
+    }
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument("leaf value must be finite");
+    }
+    impl_->expand(*impl_->pending_leaf, policy_logits);
+    impl_->backup(impl_->pending_path, value);
+    impl_->pending_leaf = nullptr;
+    impl_->pending_path.clear();
+}
+
+bool MCTSSearch::has_pending_leaf() const noexcept { return impl_->pending_leaf != nullptr; }
+
+int MCTSSearch::pending_player_index() const {
+    if (impl_->pending_leaf == nullptr) {
+        throw std::logic_error("no pending search leaf");
+    }
+    return static_cast<int>(color_index(impl_->pending_leaf->game, impl_->pending_leaf->to_play));
+}
+
+const Game& MCTSSearch::root_game() const noexcept { return impl_->root.game; }
+
+std::vector<std::uint32_t> MCTSSearch::root_visits() const {
+    std::vector<std::uint32_t> visits(impl_->action_space.size(), 0);
+    for (const auto& action : impl_->root.actions) {
+        visits[action.action_index] = action.visits();
+    }
+    return visits;
+}
+
+void MCTSSearch::add_root_dirichlet_noise(double alpha, double fraction) {
+    if (!impl_->root.expanded) {
+        throw std::logic_error("cannot add noise before root initialization");
+    }
+    if (!std::isfinite(alpha) || alpha <= 0.0) {
+        throw std::invalid_argument("Dirichlet alpha must be positive and finite");
+    }
+    if (!std::isfinite(fraction) || fraction < 0.0 || fraction > 1.0) {
+        throw std::invalid_argument("Dirichlet fraction must be in [0, 1]");
+    }
+    if (impl_->root.actions.empty() || fraction == 0.0) {
+        return;
+    }
+
+    std::gamma_distribution<double> gamma(alpha, 1.0);
+    std::vector<double> noise;
+    noise.reserve(impl_->root.actions.size());
+    for (std::size_t i = 0; i < impl_->root.actions.size(); ++i) {
+        noise.push_back(gamma(impl_->random));
+    }
+    const double total = std::accumulate(noise.begin(), noise.end(), 0.0);
+    if (total <= kProbabilityTolerance) {
+        std::fill(noise.begin(), noise.end(), 1.0);
+    }
+    const double denominator = std::accumulate(noise.begin(), noise.end(), 0.0);
+    for (std::size_t i = 0; i < impl_->root.actions.size(); ++i) {
+        auto& action = impl_->root.actions[i];
+        action.prior = (1.0 - fraction) * action.prior + fraction * noise[i] / denominator;
+    }
+}
+
+} // namespace cppanatron

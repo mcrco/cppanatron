@@ -78,6 +78,9 @@ public:
     [[nodiscard]] std::size_t development_cards_remaining() const noexcept {
         return development_deck_.size();
     }
+    [[nodiscard]] const std::vector<DevelopmentCard>& development_deck() const noexcept {
+        return development_deck_;
+    }
     [[nodiscard]] const std::vector<Action>& playable_actions() const noexcept {
         return playable_actions_;
     }

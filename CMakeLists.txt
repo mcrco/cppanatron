@@ -11,6 +11,7 @@ add_library(cppanatron
     src/value_player.cpp
     src/observation.cpp
     src/batch.cpp
+    src/mcts.cpp
 )
 add_library(cppanatron::cppanatron ALIAS cppanatron)
 

@@ -11,6 +11,7 @@
 #include "cppanatron/action_space.hpp"
 #include "cppanatron/batch.hpp"
 #include "cppanatron/game.hpp"
+#include "cppanatron/mcts.hpp"
 #include "cppanatron/value_player.hpp"
 
 using cppanatron::Color;
@@ -20,6 +21,7 @@ using cppanatron::FlatActionSpace;
 using cppanatron::Game;
 using cppanatron::GameBatch;
 using cppanatron::MapType;
+using cppanatron::MCTSSearch;
 using cppanatron::NumberPlacement;
 using cppanatron::ObservationLayout;
 using cppanatron::RewardFunction;
@@ -82,6 +84,23 @@ struct cppanatron_batch {
         : batch(config, std::move(layout)) {}
 };
 
+struct cppanatron_search {
+    ObservationLayout observation_layout;
+    MCTSSearch search;
+    std::size_t observation_size{};
+
+    cppanatron_search(
+        const cppanatron_game& game,
+        double c_puct,
+        std::uint64_t search_seed,
+        ObservationLayout layout)
+        : observation_layout(std::move(layout)),
+          search(*game.game, game.action_space, c_puct, search_seed),
+          observation_size(cppanatron::full_observation_size(
+              game.num_players,
+              observation_layout)) {}
+};
+
 namespace {
 
 thread_local std::string last_error;
@@ -119,6 +138,63 @@ RewardFunction parse_reward_function(int value) {
         default:
             throw std::invalid_argument("invalid reward function");
     }
+}
+
+ObservationLayout make_observation_layout(
+    int board_width,
+    int board_height,
+    const cppanatron_node_position* node_positions,
+    std::size_t node_position_count,
+    const cppanatron_edge_position* edge_positions,
+    std::size_t edge_position_count,
+    const cppanatron_tile_position* tile_positions,
+    std::size_t tile_position_count) {
+    if ((node_position_count > 0 && node_positions == nullptr) ||
+        (edge_position_count > 0 && edge_positions == nullptr) ||
+        (tile_position_count > 0 && tile_positions == nullptr)) {
+        throw std::invalid_argument("null observation position array");
+    }
+    std::vector<cppanatron::NodePosition> nodes;
+    nodes.reserve(node_position_count);
+    for (std::size_t index = 0; index < node_position_count; ++index) {
+        nodes.push_back({
+            node_positions[index].node,
+            node_positions[index].x,
+            node_positions[index].y,
+        });
+    }
+    std::vector<cppanatron::EdgePosition> edges;
+    edges.reserve(edge_position_count);
+    for (std::size_t index = 0; index < edge_position_count; ++index) {
+        edges.push_back({
+            {
+                edge_positions[index].a,
+                edge_positions[index].b,
+            },
+            edge_positions[index].x,
+            edge_positions[index].y,
+        });
+    }
+    std::vector<cppanatron::TilePosition> tiles;
+    tiles.reserve(tile_position_count);
+    for (std::size_t index = 0; index < tile_position_count; ++index) {
+        tiles.push_back({
+            {
+                tile_positions[index].x,
+                tile_positions[index].y,
+                tile_positions[index].z,
+            },
+            tile_positions[index].board_x,
+            tile_positions[index].board_y,
+        });
+    }
+    return {
+        board_width,
+        board_height,
+        std::move(nodes),
+        std::move(edges),
+        std::move(tiles),
+    };
 }
 
 template <typename Callable>
@@ -615,6 +691,130 @@ int32_t cppanatron_game_tiles(
     });
 }
 
+cppanatron_search* cppanatron_search_create(
+    const cppanatron_game* game,
+    double c_puct,
+    uint64_t search_seed,
+    int32_t board_width,
+    int32_t board_height,
+    const cppanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cppanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cppanatron_tile_position* tile_positions,
+    size_t tile_position_count) {
+    try {
+        if (game == nullptr) {
+            throw std::invalid_argument("null game handle");
+        }
+        auto* result = new cppanatron_search(
+            *game,
+            c_puct,
+            search_seed,
+            make_observation_layout(
+                board_width,
+                board_height,
+                node_positions,
+                node_position_count,
+                edge_positions,
+                edge_position_count,
+                tile_positions,
+                tile_position_count));
+        last_error.clear();
+        return result;
+    } catch (const std::exception& error) {
+        last_error = error.what();
+        return nullptr;
+    } catch (...) {
+        last_error = "unknown C++ exception";
+        return nullptr;
+    }
+}
+
+void cppanatron_search_destroy(cppanatron_search* handle) {
+    delete handle;
+}
+
+int32_t cppanatron_search_initialize_root(
+    cppanatron_search* handle,
+    const float* policy_logits,
+    size_t policy_size) {
+    return guard([&] {
+        if (handle == nullptr || policy_logits == nullptr) {
+            throw std::invalid_argument("null search handle or policy logits");
+        }
+        handle->search.initialize_root({policy_logits, policy_size});
+    });
+}
+
+int32_t cppanatron_search_add_root_dirichlet_noise(
+    cppanatron_search* handle,
+    double alpha,
+    double fraction) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null search handle");
+        }
+        handle->search.add_root_dirichlet_noise(alpha, fraction);
+    });
+}
+
+int32_t cppanatron_search_select_leaf(
+    cppanatron_search* handle,
+    float* observation,
+    size_t observation_size,
+    int32_t* player) {
+    return guarded_value([&] {
+        if (handle == nullptr || observation == nullptr || player == nullptr) {
+            throw std::invalid_argument("null search handle or leaf output");
+        }
+        if (observation_size != handle->observation_size) {
+            throw std::invalid_argument("leaf observation has incorrect size");
+        }
+        const Game* leaf = handle->search.select_leaf();
+        if (leaf == nullptr) {
+            return 0;
+        }
+        *player = handle->search.pending_player_index();
+        cppanatron::write_full_observation(
+            *leaf,
+            *player,
+            handle->observation_layout,
+            observation,
+            observation_size);
+        return 1;
+    });
+}
+
+int32_t cppanatron_search_evaluate_leaf(
+    cppanatron_search* handle,
+    const float* policy_logits,
+    size_t policy_size,
+    double value) {
+    return guard([&] {
+        if (handle == nullptr || policy_logits == nullptr) {
+            throw std::invalid_argument("null search handle or policy logits");
+        }
+        handle->search.evaluate_leaf({policy_logits, policy_size}, value);
+    });
+}
+
+int32_t cppanatron_search_root_visits(
+    const cppanatron_search* handle,
+    uint32_t* visits,
+    size_t visit_count) {
+    return guard([&] {
+        if (handle == nullptr || visits == nullptr) {
+            throw std::invalid_argument("null search handle or visit output");
+        }
+        const auto root_visits = handle->search.root_visits();
+        if (visit_count != root_visits.size()) {
+            throw std::invalid_argument("root visit output has incorrect size");
+        }
+        std::copy(root_visits.begin(), root_visits.end(), visits);
+    });
+}
+
 cppanatron_batch* cppanatron_batch_create(
     int32_t num_envs,
     int32_t num_players,
@@ -634,45 +834,6 @@ cppanatron_batch* cppanatron_batch_create(
     const cppanatron_tile_position* tile_positions,
     size_t tile_position_count) {
     try {
-        if ((node_position_count > 0 && node_positions == nullptr) ||
-            (edge_position_count > 0 && edge_positions == nullptr) ||
-            (tile_position_count > 0 && tile_positions == nullptr)) {
-            throw std::invalid_argument("null observation position array");
-        }
-        std::vector<cppanatron::NodePosition> nodes;
-        nodes.reserve(node_position_count);
-        for (std::size_t index = 0; index < node_position_count; ++index) {
-            nodes.push_back({
-                node_positions[index].node,
-                node_positions[index].x,
-                node_positions[index].y,
-            });
-        }
-        std::vector<cppanatron::EdgePosition> edges;
-        edges.reserve(edge_position_count);
-        for (std::size_t index = 0; index < edge_position_count; ++index) {
-            edges.push_back({
-                {
-                    edge_positions[index].a,
-                    edge_positions[index].b,
-                },
-                edge_positions[index].x,
-                edge_positions[index].y,
-            });
-        }
-        std::vector<cppanatron::TilePosition> tiles;
-        tiles.reserve(tile_position_count);
-        for (std::size_t index = 0; index < tile_position_count; ++index) {
-            tiles.push_back({
-                {
-                    tile_positions[index].x,
-                    tile_positions[index].y,
-                    tile_positions[index].z,
-                },
-                tile_positions[index].board_x,
-                tile_positions[index].board_y,
-            });
-        }
         auto* result = new cppanatron_batch(
             BatchConfig{
                 num_envs,
@@ -685,13 +846,15 @@ cppanatron_batch* cppanatron_batch_create(
                 parse_reward_function(reward_function),
                 turns_limit,
             },
-            ObservationLayout{
+            make_observation_layout(
                 board_width,
                 board_height,
-                std::move(nodes),
-                std::move(edges),
-                std::move(tiles),
-            });
+                node_positions,
+                node_position_count,
+                edge_positions,
+                edge_position_count,
+                tile_positions,
+                tile_position_count));
         last_error.clear();
         return result;
     } catch (const std::exception& error) {

@@ -15,6 +15,7 @@ extern "C" {
 
 typedef struct cppanatron_game cppanatron_game;
 typedef struct cppanatron_batch cppanatron_batch;
+typedef struct cppanatron_search cppanatron_search;
 
 enum cppanatron_map_type {
     CPPANATRON_MAP_BASE = 0,
@@ -175,6 +176,49 @@ CPPANATRON_API int32_t cppanatron_game_tiles(
     const cppanatron_game* handle,
     cppanatron_tile* output,
     size_t capacity);
+
+CPPANATRON_API cppanatron_search* cppanatron_search_create(
+    const cppanatron_game* game,
+    double c_puct,
+    uint64_t search_seed,
+    int32_t board_width,
+    int32_t board_height,
+    const cppanatron_node_position* node_positions,
+    size_t node_position_count,
+    const cppanatron_edge_position* edge_positions,
+    size_t edge_position_count,
+    const cppanatron_tile_position* tile_positions,
+    size_t tile_position_count);
+CPPANATRON_API void cppanatron_search_destroy(cppanatron_search* handle);
+CPPANATRON_API int32_t cppanatron_search_initialize_root(
+    cppanatron_search* handle,
+    const float* policy_logits,
+    size_t policy_size);
+CPPANATRON_API int32_t cppanatron_search_add_root_dirichlet_noise(
+    cppanatron_search* handle,
+    double alpha,
+    double fraction);
+/**
+ * Select one simulation leaf.
+ *
+ * Returns 1 and writes a full observation when neural evaluation is needed,
+ * returns 0 when a terminal/dead-end simulation was completed internally, and
+ * returns -1 on error.
+ */
+CPPANATRON_API int32_t cppanatron_search_select_leaf(
+    cppanatron_search* handle,
+    float* observation,
+    size_t observation_size,
+    int32_t* player);
+CPPANATRON_API int32_t cppanatron_search_evaluate_leaf(
+    cppanatron_search* handle,
+    const float* policy_logits,
+    size_t policy_size,
+    double value);
+CPPANATRON_API int32_t cppanatron_search_root_visits(
+    const cppanatron_search* handle,
+    uint32_t* visits,
+    size_t visit_count);
 
 CPPANATRON_API cppanatron_batch* cppanatron_batch_create(
     int32_t num_envs,

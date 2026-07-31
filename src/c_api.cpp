@@ -232,7 +232,7 @@ int guarded_value(Callable&& callable, int error_value = -1) noexcept {
 extern "C" {
 
 const char* cppanatron_version(void) {
-    return "0.2.0";
+    return "0.3.0";
 }
 
 const char* cppanatron_last_error(void) {

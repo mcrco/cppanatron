@@ -18,6 +18,18 @@ stochastic transitions, observations, state inspection, independent map/game
 seeds, selectable official-spiral or random number placement, and native expert
 actions.
 
+The engine also includes a policy/value-guided stochastic PUCT implementation.
+It keeps cloned game states, tree traversal, exact dice/development-card/robber
+chance outcomes, and value backup in C++. Its pull-based C ABI returns native
+root/leaf observations to the caller and accepts flat policy logits plus a
+current-player value, allowing CatanRL to retain centrally batched PyTorch
+inference. Root visit counts are exposed in the same flat action space used by
+the Python AlphaZero replay buffer.
+
+Native search is currently perfect-information MCTS. Information-set
+determinization and CatanRL's optional Python action-pruning heuristic remain
+Python-only.
+
 The parent CatanRL repository supplies the `ctypes` binding, exact full-feature
 adapter, and multiprocessing PufferLib environment. Its differential suite
 reconstructs native random boards in Python and compares legal actions, state,

@@ -759,6 +759,29 @@ int32_t cppanatron_search_add_root_dirichlet_noise(
     });
 }
 
+int32_t cppanatron_search_root_observation(
+    const cppanatron_search* handle,
+    float* observation,
+    size_t observation_size,
+    int32_t* player) {
+    return guard([&] {
+        if (handle == nullptr || observation == nullptr || player == nullptr) {
+            throw std::invalid_argument("null search handle or root output");
+        }
+        if (observation_size != handle->observation_size) {
+            throw std::invalid_argument("root observation has incorrect size");
+        }
+        const Game& root = handle->search.root_game();
+        *player = root.current_player_index();
+        cppanatron::write_full_observation(
+            root,
+            *player,
+            handle->observation_layout,
+            observation,
+            observation_size);
+    });
+}
+
 int32_t cppanatron_search_select_leaf(
     cppanatron_search* handle,
     float* observation,

@@ -198,6 +198,11 @@ CPPANATRON_API int32_t cppanatron_search_add_root_dirichlet_noise(
     cppanatron_search* handle,
     double alpha,
     double fraction);
+CPPANATRON_API int32_t cppanatron_search_root_observation(
+    const cppanatron_search* handle,
+    float* observation,
+    size_t observation_size,
+    int32_t* player);
 /**
  * Select one simulation leaf.
  *

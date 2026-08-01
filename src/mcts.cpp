@@ -145,6 +145,9 @@ struct MCTSSearch::Impl {
     std::mt19937_64 random;
     Node* pending_leaf{};
     std::vector<Node*> pending_path;
+    std::uint64_t completed_simulations{};
+    std::uint64_t depth_sum{};
+    std::uint32_t maximum_depth{};
 
     void validate_logits(std::span<const float> logits) const {
         if (logits.size() != action_space.size()) {
@@ -259,6 +262,40 @@ struct MCTSSearch::Impl {
             }
         }
     }
+
+    void record_simulation(const std::vector<Node*>& path) noexcept {
+        const auto depth =
+            path.empty() ? std::uint32_t{0} : static_cast<std::uint32_t>(path.size() - 1);
+        ++completed_simulations;
+        depth_sum += depth;
+        maximum_depth = std::max(maximum_depth, depth);
+    }
+
+    [[nodiscard]] std::uint32_t principal_variation_depth() const noexcept {
+        const Node* node = &root;
+        std::uint32_t depth = 0;
+        while (node->expanded && !node->actions.empty()) {
+            const auto best_action = std::max_element(
+                node->actions.begin(), node->actions.end(),
+                [](const ActionEdge& lhs, const ActionEdge& rhs) {
+                    return lhs.visits() < rhs.visits();
+                });
+            if (best_action == node->actions.end() || best_action->visits() == 0) {
+                break;
+            }
+            const auto best_outcome = std::max_element(
+                best_action->outcomes.begin(), best_action->outcomes.end(),
+                [](const OutcomeEdge& lhs, const OutcomeEdge& rhs) {
+                    return lhs.child->visits < rhs.child->visits;
+                });
+            if (best_outcome == best_action->outcomes.end() || best_outcome->child->visits == 0) {
+                break;
+            }
+            node = best_outcome->child.get();
+            ++depth;
+        }
+        return depth;
+    }
 };
 
 MCTSSearch::MCTSSearch(const Game& root_game, FlatActionSpace action_space, double c_puct,
@@ -293,10 +330,12 @@ const Game* MCTSSearch::select_leaf() {
 
     const auto winner = node->game.winning_color();
     if (winner.has_value()) {
+        impl_->record_simulation(path);
         impl_->backup(path, *winner == node->to_play ? 1.0 : -1.0);
         return nullptr;
     }
     if (node->expanded && node->actions.empty()) {
+        impl_->record_simulation(path);
         impl_->backup(path, 0.0);
         return nullptr;
     }
@@ -314,6 +353,7 @@ void MCTSSearch::evaluate_leaf(std::span<const float> policy_logits, double valu
         throw std::invalid_argument("leaf value must be finite");
     }
     impl_->expand(*impl_->pending_leaf, policy_logits);
+    impl_->record_simulation(impl_->pending_path);
     impl_->backup(impl_->pending_path, value);
     impl_->pending_leaf = nullptr;
     impl_->pending_path.clear();
@@ -336,6 +376,19 @@ std::vector<std::uint32_t> MCTSSearch::root_visits() const {
         visits[action.action_index] = action.visits();
     }
     return visits;
+}
+
+MCTSSearchMetrics MCTSSearch::metrics() const noexcept {
+    return {
+        impl_->completed_simulations,
+        impl_->principal_variation_depth(),
+        impl_->maximum_depth,
+        impl_->completed_simulations == 0
+            ? 0.0
+            : static_cast<double>(impl_->depth_sum) /
+                  static_cast<double>(impl_->completed_simulations),
+        impl_->root.value(),
+    };
 }
 
 void MCTSSearch::add_root_dirichlet_noise(double alpha, double fraction) {

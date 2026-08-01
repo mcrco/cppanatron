@@ -17,6 +17,14 @@ typedef struct cppanatron_game cppanatron_game;
 typedef struct cppanatron_batch cppanatron_batch;
 typedef struct cppanatron_search cppanatron_search;
 
+typedef struct cppanatron_search_metrics {
+    uint64_t simulations;
+    uint32_t principal_variation_depth;
+    uint32_t maximum_depth;
+    double mean_depth;
+    double root_value;
+} cppanatron_search_metrics;
+
 enum cppanatron_map_type {
     CPPANATRON_MAP_BASE = 0,
     CPPANATRON_MAP_MINI = 1,
@@ -224,6 +232,9 @@ CPPANATRON_API int32_t cppanatron_search_root_visits(
     const cppanatron_search* handle,
     uint32_t* visits,
     size_t visit_count);
+CPPANATRON_API int32_t cppanatron_search_get_metrics(
+    const cppanatron_search* handle,
+    cppanatron_search_metrics* output);
 
 CPPANATRON_API cppanatron_batch* cppanatron_batch_create(
     int32_t num_envs,

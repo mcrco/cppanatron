@@ -838,6 +838,22 @@ int32_t cppanatron_search_root_visits(
     });
 }
 
+int32_t cppanatron_search_get_metrics(
+    const cppanatron_search* handle,
+    cppanatron_search_metrics* output) {
+    return guard([&] {
+        if (handle == nullptr || output == nullptr) {
+            throw std::invalid_argument("null search handle or metrics output");
+        }
+        const auto metrics = handle->search.metrics();
+        output->simulations = metrics.simulations;
+        output->principal_variation_depth = metrics.principal_variation_depth;
+        output->maximum_depth = metrics.maximum_depth;
+        output->mean_depth = metrics.mean_depth;
+        output->root_value = metrics.root_value;
+    });
+}
+
 cppanatron_batch* cppanatron_batch_create(
     int32_t num_envs,
     int32_t num_players,

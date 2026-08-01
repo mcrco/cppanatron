@@ -18,6 +18,14 @@ struct ChanceOutcome {
     double probability{};
 };
 
+struct MCTSSearchMetrics {
+    std::uint64_t simulations{};
+    std::uint32_t principal_variation_depth{};
+    std::uint32_t maximum_depth{};
+    double mean_depth{};
+    double root_value{};
+};
+
 /**
  * Enumerate the random outcomes of an action.
  *
@@ -73,6 +81,7 @@ class MCTSSearch {
     [[nodiscard]] int pending_player_index() const;
     [[nodiscard]] const Game& root_game() const noexcept;
     [[nodiscard]] std::vector<std::uint32_t> root_visits() const;
+    [[nodiscard]] MCTSSearchMetrics metrics() const noexcept;
 
     /**
      * Blend Dirichlet noise into root priors.

@@ -23,6 +23,10 @@ typedef struct cppanatron_search_metrics {
     uint32_t maximum_depth;
     double mean_depth;
     double root_value;
+    uint32_t retained_root_visits;
+    uint64_t pruned_actions;
+    uint64_t coalesced_outcomes;
+    int32_t tree_reused;
 } cppanatron_search_metrics;
 
 enum cppanatron_map_type {
@@ -189,6 +193,7 @@ CPPANATRON_API cppanatron_search* cppanatron_search_create(
     const cppanatron_game* game,
     double c_puct,
     uint64_t search_seed,
+    int32_t canonical_pruning,
     int32_t board_width,
     int32_t board_height,
     const cppanatron_node_position* node_positions,
@@ -235,6 +240,14 @@ CPPANATRON_API int32_t cppanatron_search_root_visits(
 CPPANATRON_API int32_t cppanatron_search_get_metrics(
     const cppanatron_search* handle,
     cppanatron_search_metrics* output);
+CPPANATRON_API int32_t cppanatron_search_root_expanded(
+    const cppanatron_search* handle);
+CPPANATRON_API int32_t cppanatron_search_reset_metrics(
+    cppanatron_search* handle);
+/** Returns 1 when the tree was reused, 0 when it must be rebuilt, -1 on error. */
+CPPANATRON_API int32_t cppanatron_search_advance(
+    cppanatron_search* handle,
+    size_t action_index);
 
 CPPANATRON_API cppanatron_batch* cppanatron_batch_create(
     int32_t num_envs,

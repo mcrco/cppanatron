@@ -105,6 +105,7 @@ struct MCTSSearch::Impl {
     struct ActionEdge {
         std::size_t action_index{};
         double prior{};
+        bool stochastic{};
         std::vector<OutcomeEdge> outcomes;
 
         [[nodiscard]] std::uint32_t visits() const {
@@ -116,13 +117,16 @@ struct MCTSSearch::Impl {
     };
 
     struct Node {
-        explicit Node(Game state) : game(std::move(state)), to_play(game.current_color()) {}
+        explicit Node(Game state, int minimum_discard = -1)
+            : game(std::move(state)), to_play(game.current_color()),
+              min_discard_resource(minimum_discard) {}
 
         Game game;
         Color to_play;
         std::uint32_t visits{};
         double value_sum{};
         bool expanded{};
+        int min_discard_resource{-1};
         std::vector<ActionEdge> actions;
 
         [[nodiscard]] double value() const noexcept {
@@ -131,9 +135,9 @@ struct MCTSSearch::Impl {
     };
 
     Impl(const Game& game, FlatActionSpace flat_action_space, double exploration,
-         std::uint64_t seed)
+         std::uint64_t seed, bool prune)
         : root(game), action_space(std::move(flat_action_space)), c_puct(exploration),
-          random(seed) {
+          random(seed), canonical_pruning(prune) {
         if (!std::isfinite(c_puct) || c_puct < 0.0) {
             throw std::invalid_argument("c_puct must be finite and non-negative");
         }
@@ -143,11 +147,73 @@ struct MCTSSearch::Impl {
     FlatActionSpace action_space;
     double c_puct;
     std::mt19937_64 random;
+    bool canonical_pruning{};
     Node* pending_leaf{};
     std::vector<Node*> pending_path;
     std::uint64_t completed_simulations{};
     std::uint64_t depth_sum{};
     std::uint32_t maximum_depth{};
+    std::uint32_t retained_root_visits{};
+    std::uint64_t pruned_actions{};
+    std::uint64_t coalesced_outcomes{};
+    bool tree_reused{};
+
+    [[nodiscard]] static bool is_stochastic(const Game& game, const Action& action) {
+        if (action.type == ActionType::roll ||
+            action.type == ActionType::buy_development_card) {
+            return true;
+        }
+        if (action.type != ActionType::move_robber) {
+            return false;
+        }
+        const auto& move = std::get<RobberMove>(action.value);
+        if (!move.victim.has_value()) {
+            return false;
+        }
+        const auto& resources = game.player(*move.victim).resources;
+        return std::accumulate(resources.begin(), resources.end(), 0) > 0;
+    }
+
+    [[nodiscard]] static int child_minimum_discard(
+        const Node& parent,
+        const Action& action,
+        const Game& child) {
+        if (action.type != ActionType::discard_resource ||
+            child.current_prompt() != ActionPrompt::discard ||
+            child.current_color() != parent.to_play) {
+            return -1;
+        }
+        return std::max(
+            parent.min_discard_resource,
+            static_cast<int>(std::get<Resource>(action.value)));
+    }
+
+    [[nodiscard]] static bool equivalent_edges(
+        const ActionEdge& lhs,
+        const ActionEdge& rhs) {
+        if (lhs.stochastic != rhs.stochastic ||
+            lhs.outcomes.size() != rhs.outcomes.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < lhs.outcomes.size(); ++i) {
+            if (std::abs(lhs.outcomes[i].probability - rhs.outcomes[i].probability) >
+                    kProbabilityTolerance ||
+                !lhs.outcomes[i].child->game.search_equivalent(
+                    rhs.outcomes[i].child->game)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void clear_metrics() noexcept {
+        completed_simulations = 0;
+        depth_sum = 0;
+        maximum_depth = 0;
+        retained_root_visits = root.visits;
+        pruned_actions = 0;
+        coalesced_outcomes = 0;
+    }
 
     void validate_logits(std::span<const float> logits) const {
         if (logits.size() != action_space.size()) {
@@ -164,17 +230,34 @@ struct MCTSSearch::Impl {
             throw std::logic_error("cannot expand a terminal node");
         }
 
-        const auto& playable_actions = node.game.playable_actions();
-        if (playable_actions.empty()) {
+        const auto& all_playable_actions = node.game.playable_actions();
+        if (all_playable_actions.empty()) {
             node.expanded = true;
             return;
+        }
+
+        std::vector<const Action*> playable_actions;
+        playable_actions.reserve(all_playable_actions.size());
+        for (const Action& action : all_playable_actions) {
+            if (canonical_pruning &&
+                node.game.current_prompt() == ActionPrompt::discard &&
+                action.type == ActionType::discard_resource &&
+                static_cast<int>(std::get<Resource>(action.value)) <
+                    node.min_discard_resource) {
+                ++pruned_actions;
+                continue;
+            }
+            playable_actions.push_back(&action);
+        }
+        if (playable_actions.empty()) {
+            throw std::logic_error("canonical pruning removed every legal action");
         }
 
         std::vector<std::size_t> indices;
         indices.reserve(playable_actions.size());
         float max_logit = -std::numeric_limits<float>::infinity();
-        for (const Action& action : playable_actions) {
-            const std::size_t index = action_space.index(action, node.game.colors());
+        for (const Action* action : playable_actions) {
+            const std::size_t index = action_space.index(*action, node.game.colors());
             indices.push_back(index);
             max_logit = std::max(max_logit, logits[index]);
         }
@@ -200,11 +283,41 @@ struct MCTSSearch::Impl {
             ActionEdge edge;
             edge.action_index = indices[i];
             edge.prior = weights[i] / weight_sum;
-            auto outcomes = action_outcomes(node.game, playable_actions[i]);
+            const Action& action = *playable_actions[i];
+            edge.stochastic = is_stochastic(node.game, action);
+            auto outcomes = action_outcomes(node.game, action);
             edge.outcomes.reserve(outcomes.size());
             for (auto& outcome : outcomes) {
+                const auto duplicate = std::find_if(
+                    edge.outcomes.begin(),
+                    edge.outcomes.end(),
+                    [&](const OutcomeEdge& existing) {
+                        return existing.child->game.search_equivalent(outcome.game);
+                    });
+                if (canonical_pruning && duplicate != edge.outcomes.end()) {
+                    duplicate->probability += outcome.probability;
+                    ++coalesced_outcomes;
+                    continue;
+                }
+                const int minimum_discard = canonical_pruning
+                    ? child_minimum_discard(node, action, outcome.game)
+                    : -1;
                 edge.outcomes.push_back(
-                    {std::make_unique<Node>(std::move(outcome.game)), outcome.probability});
+                    {std::make_unique<Node>(std::move(outcome.game), minimum_discard),
+                     outcome.probability});
+            }
+            if (canonical_pruning) {
+                const auto duplicate = std::find_if(
+                    node.actions.begin(),
+                    node.actions.end(),
+                    [&](const ActionEdge& existing) {
+                        return equivalent_edges(existing, edge);
+                    });
+                if (duplicate != node.actions.end()) {
+                    duplicate->prior += edge.prior;
+                    ++pruned_actions;
+                    continue;
+                }
             }
             node.actions.push_back(std::move(edge));
         }
@@ -299,8 +412,13 @@ struct MCTSSearch::Impl {
 };
 
 MCTSSearch::MCTSSearch(const Game& root_game, FlatActionSpace action_space, double c_puct,
-                       std::uint64_t seed)
-    : impl_(std::make_unique<Impl>(root_game, std::move(action_space), c_puct, seed)) {}
+                       std::uint64_t seed, bool canonical_pruning)
+    : impl_(std::make_unique<Impl>(
+          root_game,
+          std::move(action_space),
+          c_puct,
+          seed,
+          canonical_pruning)) {}
 
 MCTSSearch::~MCTSSearch() = default;
 MCTSSearch::MCTSSearch(MCTSSearch&&) noexcept = default;
@@ -361,6 +479,8 @@ void MCTSSearch::evaluate_leaf(std::span<const float> policy_logits, double valu
 
 bool MCTSSearch::has_pending_leaf() const noexcept { return impl_->pending_leaf != nullptr; }
 
+bool MCTSSearch::root_expanded() const noexcept { return impl_->root.expanded; }
+
 int MCTSSearch::pending_player_index() const {
     if (impl_->pending_leaf == nullptr) {
         throw std::logic_error("no pending search leaf");
@@ -388,7 +508,37 @@ MCTSSearchMetrics MCTSSearch::metrics() const noexcept {
             : static_cast<double>(impl_->depth_sum) /
                   static_cast<double>(impl_->completed_simulations),
         impl_->root.value(),
+        impl_->retained_root_visits,
+        impl_->pruned_actions,
+        impl_->coalesced_outcomes,
+        impl_->tree_reused,
     };
+}
+
+void MCTSSearch::reset_metrics() noexcept { impl_->clear_metrics(); }
+
+bool MCTSSearch::advance(std::size_t action_index) {
+    if (impl_->pending_leaf != nullptr) {
+        throw std::logic_error("cannot advance with a pending leaf");
+    }
+    if (!impl_->root.expanded) {
+        return false;
+    }
+    const auto edge = std::find_if(
+        impl_->root.actions.begin(),
+        impl_->root.actions.end(),
+        [action_index](const Impl::ActionEdge& action) {
+            return action.action_index == action_index;
+        });
+    if (edge == impl_->root.actions.end() || edge->stochastic ||
+        edge->outcomes.size() != 1) {
+        return false;
+    }
+    std::unique_ptr<Impl::Node> next = std::move(edge->outcomes.front().child);
+    impl_->root = std::move(*next);
+    impl_->tree_reused = true;
+    impl_->clear_metrics();
+    return true;
 }
 
 void MCTSSearch::add_root_dirichlet_noise(double alpha, double fraction) {

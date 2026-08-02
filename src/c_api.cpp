@@ -93,9 +93,10 @@ struct cppanatron_search {
         const cppanatron_game& game,
         double c_puct,
         std::uint64_t search_seed,
+        bool canonical_pruning,
         ObservationLayout layout)
         : observation_layout(std::move(layout)),
-          search(*game.game, game.action_space, c_puct, search_seed),
+          search(*game.game, game.action_space, c_puct, search_seed, canonical_pruning),
           observation_size(cppanatron::full_observation_size(
               game.num_players,
               observation_layout)) {}
@@ -695,6 +696,7 @@ cppanatron_search* cppanatron_search_create(
     const cppanatron_game* game,
     double c_puct,
     uint64_t search_seed,
+    int32_t canonical_pruning,
     int32_t board_width,
     int32_t board_height,
     const cppanatron_node_position* node_positions,
@@ -711,6 +713,7 @@ cppanatron_search* cppanatron_search_create(
             *game,
             c_puct,
             search_seed,
+            canonical_pruning != 0,
             make_observation_layout(
                 board_width,
                 board_height,
@@ -851,6 +854,37 @@ int32_t cppanatron_search_get_metrics(
         output->maximum_depth = metrics.maximum_depth;
         output->mean_depth = metrics.mean_depth;
         output->root_value = metrics.root_value;
+        output->retained_root_visits = metrics.retained_root_visits;
+        output->pruned_actions = metrics.pruned_actions;
+        output->coalesced_outcomes = metrics.coalesced_outcomes;
+        output->tree_reused = metrics.tree_reused ? 1 : 0;
+    });
+}
+
+int32_t cppanatron_search_root_expanded(const cppanatron_search* handle) {
+    return guarded_value([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null search handle");
+        }
+        return handle->search.root_expanded() ? 1 : 0;
+    });
+}
+
+int32_t cppanatron_search_reset_metrics(cppanatron_search* handle) {
+    return guard([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null search handle");
+        }
+        handle->search.reset_metrics();
+    });
+}
+
+int32_t cppanatron_search_advance(cppanatron_search* handle, size_t action_index) {
+    return guarded_value([&] {
+        if (handle == nullptr) {
+            throw std::invalid_argument("null search handle");
+        }
+        return handle->search.advance(action_index) ? 1 : 0;
     });
 }
 

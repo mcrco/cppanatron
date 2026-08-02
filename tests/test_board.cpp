@@ -341,6 +341,40 @@ void test_mcts_visits_only_legal_actions() {
     }
 }
 
+void test_mcts_reuses_only_deterministic_subtrees() {
+    Game game({Color::red, Color::blue}, MapType::mini, 49);
+    const FlatActionSpace action_space(2, MapType::mini);
+    std::vector<float> logits(action_space.size(), 0.0F);
+    MCTSSearch search(game, action_space, 1.5, 103, true);
+    search.initialize_root(logits);
+    for (int simulation = 0; simulation < 8; ++simulation) {
+        const Game* leaf = search.select_leaf();
+        if (leaf != nullptr) {
+            search.evaluate_leaf(logits, 0.0);
+        }
+    }
+
+    const auto deterministic = game.playable_actions().front();
+    const auto deterministic_index = action_space.index(deterministic, game.colors());
+    require(search.advance(deterministic_index), "setup action must reuse its subtree");
+    game.execute(deterministic);
+    require(
+        search.root_game().search_equivalent(game),
+        "reused root must exactly match the played deterministic state");
+    require(search.metrics().tree_reused, "reuse must be visible in search metrics");
+
+    Game roll_game({Color::red, Color::blue}, MapType::mini, 51);
+    while (roll_game.is_initial_build_phase()) {
+        roll_game.execute(roll_game.playable_actions().front());
+    }
+    MCTSSearch roll_search(roll_game, action_space, 1.5, 107, true);
+    roll_search.initialize_root(logits);
+    const auto roll = find_action(roll_game, ActionType::roll);
+    require(
+        !roll_search.advance(action_space.index(roll, roll_game.colors())),
+        "dice action must invalidate rather than reuse a sampled chance child");
+}
+
 void test_seven_discard_and_robber_transition() {
     Game game({Color::red, Color::blue}, MapType::base, 31);
     while (game.is_initial_build_phase()) {
@@ -782,6 +816,7 @@ int main() {
         test_mcts_dice_outcomes_are_exact();
         test_mcts_card_and_robber_outcomes_are_exact();
         test_mcts_visits_only_legal_actions();
+        test_mcts_reuses_only_deterministic_subtrees();
         test_seven_discard_and_robber_transition();
         test_friendly_robber_filters_low_score_opponents();
         test_tournament_setup_differential_fixture();

@@ -24,6 +24,10 @@ struct MCTSSearchMetrics {
     std::uint32_t maximum_depth{};
     double mean_depth{};
     double root_value{};
+    std::uint32_t retained_root_visits{};
+    std::uint64_t pruned_actions{};
+    std::uint64_t coalesced_outcomes{};
+    bool tree_reused{};
 };
 
 /**
@@ -48,7 +52,7 @@ struct MCTSSearchMetrics {
 class MCTSSearch {
   public:
     MCTSSearch(const Game& root_game, FlatActionSpace action_space, double c_puct = 1.5,
-               std::uint64_t seed = 0);
+               std::uint64_t seed = 0, bool canonical_pruning = false);
     ~MCTSSearch();
 
     MCTSSearch(const MCTSSearch&) = delete;
@@ -78,10 +82,22 @@ class MCTSSearch {
     void evaluate_leaf(std::span<const float> policy_logits, double value);
 
     [[nodiscard]] bool has_pending_leaf() const noexcept;
+    [[nodiscard]] bool root_expanded() const noexcept;
     [[nodiscard]] int pending_player_index() const;
     [[nodiscard]] const Game& root_game() const noexcept;
     [[nodiscard]] std::vector<std::uint32_t> root_visits() const;
     [[nodiscard]] MCTSSearchMetrics metrics() const noexcept;
+
+    /** Reset per-decision counters while preserving the current tree. */
+    void reset_metrics() noexcept;
+
+    /**
+     * Re-root at a deterministic action child.
+     *
+     * Returns false for chance actions or actions absent from the current
+     * root. The caller must then rebuild from the actual post-action game.
+     */
+    [[nodiscard]] bool advance(std::size_t action_index);
 
     /**
      * Blend Dirichlet noise into root priors.

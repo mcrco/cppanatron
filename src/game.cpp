@@ -88,6 +88,32 @@ std::optional<Color> Game::winning_color() const {
     return winner;
 }
 
+bool Game::search_equivalent(const Game& other) const noexcept {
+    return colors_ == other.colors_ && players_ == other.players_ &&
+           board_.buildings() == other.board_.buildings() &&
+           board_.roads() == other.board_.roads() &&
+           board_.robber_coordinate() == other.board_.robber_coordinate() &&
+           board_.longest_road_color() == other.board_.longest_road_color() &&
+           random_ == other.random_ && discard_limit_ == other.discard_limit_ &&
+           friendly_robber_ == other.friendly_robber_ &&
+           victory_points_to_win_ == other.victory_points_to_win_ &&
+           resource_bank_ == other.resource_bank_ &&
+           development_deck_ == other.development_deck_ &&
+           current_player_index_ == other.current_player_index_ &&
+           current_turn_index_ == other.current_turn_index_ &&
+           num_turns_ == other.num_turns_ && completed_turns_ == other.completed_turns_ &&
+           current_prompt_ == other.current_prompt_ &&
+           is_initial_build_phase_ == other.is_initial_build_phase_ &&
+           is_discarding_ == other.is_discarding_ &&
+           is_moving_knight_ == other.is_moving_knight_ &&
+           is_road_building_ == other.is_road_building_ &&
+           free_roads_available_ == other.free_roads_available_ &&
+           is_resolving_trade_ == other.is_resolving_trade_ &&
+           current_trade_ == other.current_trade_ && acceptees_ == other.acceptees_ &&
+           discard_counts_ == other.discard_counts_ &&
+           playable_actions_ == other.playable_actions_;
+}
+
 bool Game::can_afford(Color color, const std::array<int, 5>& cost) const {
     const auto& hand = player(color).resources;
     for (std::size_t i = 0; i < hand.size(); ++i) {

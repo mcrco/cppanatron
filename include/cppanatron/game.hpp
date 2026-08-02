@@ -31,6 +31,8 @@ struct PlayerState {
     std::vector<Edge> roads;
     int last_knight_completed_turn{-1};
     int last_development_card_bought_completed_turn{-1};
+
+    auto operator<=>(const PlayerState&) const = default;
 };
 
 class Game {
@@ -85,6 +87,15 @@ public:
         return playable_actions_;
     }
     [[nodiscard]] std::optional<Color> winning_color() const;
+
+    /**
+     * Exact logical-state equality for search deduplication.
+     *
+     * This deliberately includes hidden state and RNG state. It is stricter
+     * than equality of observations, so merging equivalent search branches
+     * cannot change any future transition distribution.
+     */
+    [[nodiscard]] bool search_equivalent(const Game& other) const noexcept;
 
     void execute(
         const Action& action,

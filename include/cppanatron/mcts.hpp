@@ -86,6 +86,14 @@ class MCTSSearch {
     [[nodiscard]] int pending_player_index() const;
     [[nodiscard]] const Game& root_game() const noexcept;
     [[nodiscard]] std::vector<std::uint32_t> root_visits() const;
+    /**
+     * Expected root action values from the root player's perspective.
+     *
+     * Unvisited and unavailable flat actions are returned as NaN so callers
+     * can apply a completed-Q fallback without confusing missing estimates
+     * with a genuine zero value.
+     */
+    [[nodiscard]] std::vector<double> root_action_values() const;
     [[nodiscard]] MCTSSearchMetrics metrics() const noexcept;
 
     /** Reset per-decision counters while preserving the current tree. */

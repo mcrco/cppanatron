@@ -323,13 +323,23 @@ void test_mcts_visits_only_legal_actions() {
     }
 
     const auto visits = search.root_visits();
+    const auto action_values = search.root_action_values();
+    require(
+        action_values.size() == visits.size(),
+        "root action values must cover the flat action space");
     const auto total = std::accumulate(
         visits.begin(), visits.end(), std::uint32_t{0});
     require(total == kSimulations, "every MCTS simulation must reach one root action");
     for (std::size_t index = 0; index < visits.size(); ++index) {
         if (visits[index] == 0) {
+            require(
+                std::isnan(action_values[index]),
+                "unvisited root actions must not masquerade as zero-value estimates");
             continue;
         }
+        require(
+            std::abs(action_values[index]) < 1e-12,
+            "zero-valued leaf evaluations must produce zero root action values");
         const auto decoded =
             action_space.decode(index, game.current_color(), game.colors());
         require(

@@ -841,6 +841,22 @@ int32_t cppanatron_search_root_visits(
     });
 }
 
+int32_t cppanatron_search_root_action_values(
+    const cppanatron_search* handle,
+    double* values,
+    size_t value_count) {
+    return guard([&] {
+        if (handle == nullptr || values == nullptr) {
+            throw std::invalid_argument("null search handle or action-value output");
+        }
+        const auto root_values = handle->search.root_action_values();
+        if (value_count != root_values.size()) {
+            throw std::invalid_argument("root action-value output has incorrect size");
+        }
+        std::copy(root_values.begin(), root_values.end(), values);
+    });
+}
+
 int32_t cppanatron_search_get_metrics(
     const cppanatron_search* handle,
     cppanatron_search_metrics* output) {

@@ -512,6 +512,26 @@ std::vector<std::uint32_t> MCTSSearch::root_visits() const {
     return visits;
 }
 
+std::vector<double> MCTSSearch::root_action_values() const {
+    std::vector<double> values(
+        impl_->action_space.size(),
+        std::numeric_limits<double>::quiet_NaN());
+    for (const auto& action : impl_->root.actions) {
+        if (action.visits() == 0) {
+            continue;
+        }
+        double expected_value = 0.0;
+        for (const auto& outcome : action.outcomes) {
+            const auto& child = *outcome.child;
+            const double oriented_value =
+                child.to_play == impl_->root.to_play ? child.value() : -child.value();
+            expected_value += outcome.probability * oriented_value;
+        }
+        values[action.action_index] = expected_value;
+    }
+    return values;
+}
+
 MCTSSearchMetrics MCTSSearch::metrics() const noexcept {
     return {
         impl_->completed_simulations,

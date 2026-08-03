@@ -237,6 +237,10 @@ CPPANATRON_API int32_t cppanatron_search_root_visits(
     const cppanatron_search* handle,
     uint32_t* visits,
     size_t visit_count);
+CPPANATRON_API int32_t cppanatron_search_root_action_values(
+    const cppanatron_search* handle,
+    double* values,
+    size_t value_count);
 CPPANATRON_API int32_t cppanatron_search_get_metrics(
     const cppanatron_search* handle,
     cppanatron_search_metrics* output);

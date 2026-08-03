@@ -73,6 +73,7 @@ public:
     [[nodiscard]] bool is_road_building() const noexcept {
         return is_road_building_;
     }
+    [[nodiscard]] int remaining_discards(Color color) const;
     [[nodiscard]] int completed_turns() const noexcept { return completed_turns_; }
     [[nodiscard]] const std::array<int, 5>& resource_bank() const noexcept {
         return resource_bank_;

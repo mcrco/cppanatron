@@ -375,6 +375,42 @@ void test_mcts_reuses_only_deterministic_subtrees() {
         "dice action must invalidate rather than reuse a sampled chance child");
 }
 
+void test_mcts_canonical_discard_prunes_infeasible_suffixes() {
+    Game game({Color::red, Color::blue}, MapType::mini, 53);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    const Color roller = game.current_color();
+    game.player(roller).resources = {6, 0, 0, 0, 2};
+    game.execute(find_action(game, ActionType::roll), Dice{3, 4});
+
+    const FlatActionSpace action_space(2, MapType::mini);
+    const auto ore_discard = std::find_if(
+        game.playable_actions().begin(),
+        game.playable_actions().end(),
+        [](const auto& action) {
+            return action.type == ActionType::discard_resource &&
+                   std::get<Resource>(action.value) == Resource::ore;
+        });
+    require(ore_discard != game.playable_actions().end(), "fixture must permit discarding ore");
+    const auto ore_index = action_space.index(*ore_discard, game.colors());
+    std::vector<float> logits(action_space.size(), -100.0F);
+    logits[ore_index] = 100.0F;
+    MCTSSearch search(game, action_space, 1.5, 109, true);
+    search.initialize_root(logits);
+    for (int simulation = 0; simulation < 8; ++simulation) {
+        const Game* leaf = search.select_leaf();
+        if (leaf != nullptr) {
+            search.evaluate_leaf(logits, 0.0);
+        }
+    }
+
+    require(
+        search.root_visits()[ore_index] == 0,
+        "discard ordering must reject a suffix that cannot finish the discard");
+    require(search.metrics().pruned_actions > 0, "discard pruning must be observable");
+}
+
 void test_seven_discard_and_robber_transition() {
     Game game({Color::red, Color::blue}, MapType::base, 31);
     while (game.is_initial_build_phase()) {
@@ -817,6 +853,7 @@ int main() {
         test_mcts_card_and_robber_outcomes_are_exact();
         test_mcts_visits_only_legal_actions();
         test_mcts_reuses_only_deterministic_subtrees();
+        test_mcts_canonical_discard_prunes_infeasible_suffixes();
         test_seven_discard_and_robber_transition();
         test_friendly_robber_filters_low_score_opponents();
         test_tournament_setup_differential_fixture();

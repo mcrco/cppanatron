@@ -78,6 +78,10 @@ PlayerState& Game::player(Color color) {
     return players_.at(static_cast<std::size_t>(player_index(color)));
 }
 
+int Game::remaining_discards(Color color) const {
+    return discard_counts_.at(static_cast<std::size_t>(player_index(color)));
+}
+
 std::optional<Color> Game::winning_color() const {
     std::optional<Color> winner;
     for (std::size_t i = 0; i < colors_.size(); ++i) {

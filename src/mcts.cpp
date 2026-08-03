@@ -215,6 +215,21 @@ struct MCTSSearch::Impl {
         coalesced_outcomes = 0;
     }
 
+    [[nodiscard]] static bool canonical_discard_action_allowed(
+        const Node& node,
+        const Action& action) {
+        const auto resource = static_cast<std::size_t>(std::get<Resource>(action.value));
+        if (static_cast<int>(resource) < node.min_discard_resource) {
+            return false;
+        }
+        const auto& hand = node.game.player(action.color).resources;
+        const int suffix_cards = std::accumulate(
+            hand.begin() + static_cast<std::ptrdiff_t>(resource),
+            hand.end(),
+            0);
+        return suffix_cards >= node.game.remaining_discards(action.color);
+    }
+
     void validate_logits(std::span<const float> logits) const {
         if (logits.size() != action_space.size()) {
             throw std::invalid_argument("policy logits have incorrect size");
@@ -242,8 +257,7 @@ struct MCTSSearch::Impl {
             if (canonical_pruning &&
                 node.game.current_prompt() == ActionPrompt::discard &&
                 action.type == ActionType::discard_resource &&
-                static_cast<int>(std::get<Resource>(action.value)) <
-                    node.min_discard_resource) {
+                !canonical_discard_action_allowed(node, action)) {
                 ++pruned_actions;
                 continue;
             }

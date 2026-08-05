@@ -1,6 +1,6 @@
 # cppanatron
 
-`cppanatron` is a C++20 rewrite of the Catanatron game engine. Its compatibility
+`cppanatron` is a completely Codex'ed C++20 rewrite of the Catanatron game engine. Its compatibility
 target is the Catanatron revision pinned by the parent `catanrl` repository.
 
 The project is intentionally split into:

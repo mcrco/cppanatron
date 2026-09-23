@@ -139,7 +139,7 @@ void bind_observation(nb::module_& module) {
            OutputVector<float> out) {
             write_full_observation(game, base_player, layout, out.data(), out.shape(0));
         },
-        nb::arg("game"), nb::arg("base_player"), nb::arg("layout"), nb::arg("out"),
+        nb::arg("game"), nb::arg("base_player"), nb::arg("layout"), nb::arg("out").noconvert(),
         nb::call_guard<nb::gil_scoped_release>(),
         "Write numeric features then the flattened board tensor from base_player's view.");
     module.def(
@@ -179,9 +179,11 @@ void bind_observation(nb::module_& module) {
         .def_prop_ro("action_space_size", [](const Batch& self) { return self.action_space_size; })
         .def_prop_ro("observation_size", [](const Batch& self) { return self.observation_size; })
         .def(
-            "bind", &bind_buffers, nb::arg("observations"), nb::arg("action_mask_offset"),
-            nb::arg("observation_offset"), nb::arg("actions"), nb::arg("rewards"),
-            nb::arg("terminals"), nb::arg("truncations"), nb::arg("masks"),
+            "bind", &bind_buffers, nb::arg("observations").noconvert(),
+            nb::arg("action_mask_offset"), nb::arg("observation_offset"),
+            nb::arg("actions").noconvert(), nb::arg("rewards").noconvert(),
+            nb::arg("terminals").noconvert(), nb::arg("truncations").noconvert(),
+            nb::arg("masks").noconvert(),
             nb::keep_alive<1, 2>(), nb::keep_alive<1, 5>(), nb::keep_alive<1, 6>(),
             nb::keep_alive<1, 7>(), nb::keep_alive<1, 8>(), nb::keep_alive<1, 9>(),
             "Bind per-agent buffers (one row per env and seat). ``observations`` holds\n"

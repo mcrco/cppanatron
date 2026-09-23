@@ -93,7 +93,7 @@ void bind_search(nb::module_& module) {
                 self.write(root, root.current_player_index(), out);
                 return root.current_player_index();
             },
-            nb::arg("out"), nb::call_guard<nb::gil_scoped_release>(),
+            nb::arg("out").noconvert(), nb::call_guard<nb::gil_scoped_release>(),
             "Write the root observation into ``out`` and return the player to move.")
         .def(
             "select_leaf",
@@ -109,7 +109,7 @@ void bind_search(nb::module_& module) {
                 self.write(*leaf, player, out);
                 return player;
             },
-            nb::arg("out"), nb::call_guard<nb::gil_scoped_release>(),
+            nb::arg("out").noconvert(), nb::call_guard<nb::gil_scoped_release>(),
             "Start a simulation. Returns the leaf's player to move after writing its\n"
             "observation into ``out``, or None when the simulation ended at a\n"
             "terminal or dead-end node and was backed up internally.")

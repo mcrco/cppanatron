@@ -159,6 +159,19 @@ def test_full_observations_fill_caller_buffers():
     np.testing.assert_array_equal(out, cpp.full_observation(game, 0, LAYOUT))
 
 
+def test_output_buffers_must_already_have_the_written_dtype():
+    """A converted temporary would swallow the writes, so conversion is refused."""
+    game = cpp.Game(2, seed=5)
+    size = cpp.full_observation_size(2, LAYOUT)
+    with pytest.raises(TypeError):
+        cpp.write_full_observation(game, 0, LAYOUT, np.zeros(size, dtype=np.float64))
+    search = cpp.MCTSSearch(game, cpp.FlatActionSpace(2, cpp.MapType.BASE), LAYOUT)
+    with pytest.raises(TypeError):
+        search.root_observation(np.zeros(size, dtype=np.float64))
+    with pytest.raises(TypeError):
+        search.root_observation(np.zeros((2, size), dtype=np.float32)[:, 0])  # Strided view.
+
+
 def test_batches_validate_and_fill_bound_buffers():
     batch = cpp.GameBatch(2, 2, cpp.MapType.MINI, LAYOUT, vps_to_win=6)
     agents = 4
@@ -176,6 +189,8 @@ def test_batches_validate_and_fill_bound_buffers():
     )
     with pytest.raises(ValueError, match="one row per agent"):
         batch.bind(**{**buffers, "rewards": np.zeros(3, dtype=np.float32)})
+    with pytest.raises(TypeError):
+        batch.bind(**{**buffers, "actions": np.zeros(agents, dtype=np.int64)})
     batch.bind(**buffers)
     batch.reset_all(np.array([1, 2], dtype=np.uint64), np.array([3, 4], dtype=np.uint64))
 

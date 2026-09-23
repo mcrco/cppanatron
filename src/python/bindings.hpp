@@ -61,6 +61,10 @@ template <typename T>
 template <typename T>
 using InputVector = nb::ndarray<const T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
+/**
+ * A caller buffer the engine writes into. Bind these arguments with
+ * ``.noconvert()``: a converted temporary would silently swallow the writes.
+ */
 template <typename T>
 using OutputVector = nb::ndarray<T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 

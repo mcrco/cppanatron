@@ -58,7 +58,7 @@ private:
     [[nodiscard]] std::optional<std::size_t> connected_component_index(
         int node_id,
         Color color) const;
-    [[nodiscard]] std::set<int> dfs_walk(int node_id, Color color) const;
+    void rebuild_connected_components(Color color);
     [[nodiscard]] int longest_acyclic_path(
         const std::set<int>& component,
         Color color) const;

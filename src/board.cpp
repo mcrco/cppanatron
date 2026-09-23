@@ -114,8 +114,13 @@ std::vector<Edge> Board::buildable_edges(Color color) const {
         if (roads_.contains(edge)) {
             continue;
         }
-        if (player_network_contains(color, edge.a) ||
-            player_network_contains(color, edge.b)) {
+        // Roads extend from the player's network but never through an
+        // opponent's building.
+        const auto expandable = [&](int node_id) {
+            return player_network_contains(color, node_id) &&
+                   !is_enemy_node(node_id, color);
+        };
+        if (expandable(edge.a) || expandable(edge.b)) {
             result.push_back(edge);
         }
     }
@@ -177,27 +182,18 @@ void Board::build_settlement(Color color, int node_id, bool initial_build_phase)
                 adjacent_roads[*owner].push_back(edge);
             }
         }
+        // An opponent's settlement can split a road network. Rebuild the cut
+        // player's components from the authoritative roads and buildings rather
+        // than editing the cache incrementally, which earlier cuts and cycles
+        // can leave with overlapping or missing nodes.
         for (const auto& [road_color, edges] : adjacent_roads) {
-            if (edges.size() != 2) {
+            if (edges.size() < 2) {
                 continue;
             }
-            const int a = edges[0].a == node_id ? edges[0].b : edges[0].a;
-            const int c = edges[1].a == node_id ? edges[1].b : edges[1].a;
-            const auto component_index =
-                connected_component_index(node_id, road_color);
-            if (!component_index.has_value()) {
-                throw std::logic_error(
-                    "road component is missing settlement node");
-            }
-            auto& components = connected_components_[road_color];
-            components.erase(
-                components.begin() +
-                static_cast<std::ptrdiff_t>(*component_index));
-            components.push_back(dfs_walk(a, road_color));
-            components.push_back(dfs_walk(c, road_color));
+            rebuild_connected_components(road_color);
 
             int best = 0;
-            for (const auto& component : components) {
+            for (const auto& component : connected_components_[road_color]) {
                 best = std::max(
                     best, longest_acyclic_path(component, road_color));
             }
@@ -300,23 +296,53 @@ std::optional<std::size_t> Board::connected_component_index(
     return std::nullopt;
 }
 
-std::set<int> Board::dfs_walk(int node_id, Color color) const {
-    std::vector<int> agenda{node_id};
-    std::set<int> visited;
-    while (!agenda.empty()) {
-        const int current = agenda.back();
-        agenda.pop_back();
-        if (!visited.insert(current).second || is_enemy_node(current, color)) {
-            continue;
-        }
-        for (int neighbor : neighbors(current)) {
-            if (!visited.contains(neighbor) &&
-                is_friendly_road({current, neighbor}, color)) {
-                agenda.push_back(neighbor);
-            }
+void Board::rebuild_connected_components(Color color) {
+    std::set<Edge> unvisited;
+    for (const auto& [edge, owner] : roads_) {
+        if (owner == color) {
+            unvisited.insert(edge);
         }
     }
-    return visited;
+
+    std::vector<std::set<int>> components;
+    while (!unvisited.empty()) {
+        std::vector<Edge> agenda{*unvisited.begin()};
+        unvisited.erase(unvisited.begin());
+        std::set<int> component{agenda.front().a, agenda.front().b};
+        while (!agenda.empty()) {
+            const Edge edge = agenda.back();
+            agenda.pop_back();
+            for (int node_id : {edge.a, edge.b}) {
+                if (is_enemy_node(node_id, color)) {
+                    continue;
+                }
+                for (int neighbor : neighbors(node_id)) {
+                    const auto next = unvisited.find(Edge{node_id, neighbor}.normalized());
+                    if (next == unvisited.end()) {
+                        continue;
+                    }
+                    component.insert({next->a, next->b});
+                    agenda.push_back(*next);
+                    unvisited.erase(next);
+                }
+            }
+        }
+        components.push_back(std::move(component));
+    }
+
+    // Isolated friendly buildings still anchor future roads.
+    for (const auto& [node_id, building] : buildings_) {
+        const bool connected = std::any_of(
+            components.begin(),
+            components.end(),
+            [node_id](const std::set<int>& component) {
+                return component.contains(node_id);
+            });
+        if (building.color == color && !connected) {
+            components.push_back({node_id});
+        }
+    }
+    connected_components_[color] = std::move(components);
 }
 
 int Board::longest_acyclic_path(

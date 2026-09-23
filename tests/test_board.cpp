@@ -751,6 +751,48 @@ void test_enemy_endpoint_road_matches_reference_component_cache() {
         "reference connected-component cache");
 }
 
+std::vector<Edge> sorted_buildable_edges(const Board& board, Color color) {
+    auto edges = board.buildable_edges(color);
+    std::sort(edges.begin(), edges.end());
+    return edges;
+}
+
+void test_settlement_cut_rebuilds_road_components() {
+    Board board(CatanMap::build(
+        MapType::base, 19, cppanatron::NumberPlacement::official_spiral));
+    board.build_settlement(Color::red, 3, true);
+    board.build_road(Color::red, {3, 4});
+    board.build_road(Color::red, {4, 15});
+    board.build_road(Color::red, {15, 17});
+    board.build_settlement(Color::blue, 13, true);
+    board.build_road(Color::blue, {13, 14});
+    board.build_road(Color::blue, {14, 15});
+
+    board.build_settlement(Color::blue, 15);
+
+    require(
+        board.longest_road(Color::red) == 2,
+        "a settlement cut splits the road network at the enemy node");
+    require(
+        sorted_buildable_edges(board, Color::red) ==
+            std::vector<Edge>{{2, 3}, {3, 12}, {4, 5}, {17, 18}, {17, 39}},
+        "both halves of a cut network stay buildable, matching the reference");
+}
+
+void test_cannot_build_road_through_enemy_settlement() {
+    Board board(CatanMap::build(
+        MapType::base, 23, cppanatron::NumberPlacement::official_spiral));
+    board.build_settlement(Color::red, 3, true);
+    board.build_road(Color::red, {2, 3});
+    board.build_road(Color::red, {1, 2});
+    board.build_settlement(Color::blue, 1, true);
+
+    require(
+        sorted_buildable_edges(board, Color::red) ==
+            std::vector<Edge>{{2, 9}, {3, 4}, {3, 12}},
+        "roads cannot extend through an opponent's settlement");
+}
+
 void test_maritime_trade_and_other_development_cards() {
     Game game({Color::red, Color::blue}, MapType::tournament, 51);
     while (game.is_initial_build_phase()) {
@@ -900,6 +942,8 @@ int main() {
         test_victory_point_card_is_hidden_and_terminal();
         test_longest_road_award();
         test_enemy_endpoint_road_matches_reference_component_cache();
+        test_settlement_cut_rebuilds_road_components();
+        test_cannot_build_road_through_enemy_settlement();
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
         test_domestic_trade_reject_and_cancel();

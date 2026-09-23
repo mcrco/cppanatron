@@ -88,6 +88,28 @@ public:
         return playable_actions_;
     }
     [[nodiscard]] std::optional<Color> winning_color() const;
+    [[nodiscard]] int victory_points_to_win() const noexcept {
+        return victory_points_to_win_;
+    }
+    [[nodiscard]] int discard_limit() const noexcept { return discard_limit_; }
+    [[nodiscard]] bool friendly_robber() const noexcept { return friendly_robber_; }
+
+    /**
+     * Scenario setup: overwrite a player's resource hand.
+     *
+     * Like Catanatron's player_deck_replenish-style test setup, the bank is not
+     * debited. Playable actions are regenerated for the new hand.
+     */
+    void set_resources(Color color, const std::array<int, 5>& resources);
+
+    /**
+     * Scenario setup: overwrite a player's development-card hand.
+     *
+     * Cards held this way count as owned at the start of the turn, so they are
+     * playable immediately. Victory point cards must be bought instead, which
+     * keeps actual victory points consistent.
+     */
+    void set_development_cards(Color color, const std::array<int, 5>& cards);
 
     /**
      * Exact logical-state equality for search deduplication.

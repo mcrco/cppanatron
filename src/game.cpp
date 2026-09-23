@@ -390,6 +390,31 @@ std::vector<Action> Game::generate_playable_actions() const {
     return result;
 }
 
+void Game::set_resources(Color color, const std::array<int, 5>& resources) {
+    if (std::any_of(resources.begin(), resources.end(), [](int count) { return count < 0; })) {
+        throw std::invalid_argument("resource counts must be non-negative");
+    }
+    player(color).resources = resources;
+    playable_actions_ = generate_playable_actions();
+}
+
+void Game::set_development_cards(Color color, const std::array<int, 5>& cards) {
+    if (std::any_of(cards.begin(), cards.end(), [](int count) { return count < 0; })) {
+        throw std::invalid_argument("development card counts must be non-negative");
+    }
+    auto& state = player(color);
+    constexpr auto victory_point = static_cast<std::size_t>(DevelopmentCard::victory_point);
+    if (cards[victory_point] != state.development_cards[victory_point]) {
+        throw std::invalid_argument(
+            "victory point cards must be bought so victory points stay consistent");
+    }
+    state.development_cards = cards;
+    for (std::size_t i = 0; i < state.development_card_owned_at_start.size(); ++i) {
+        state.development_card_owned_at_start[i] = cards[i] > 0;
+    }
+    playable_actions_ = generate_playable_actions();
+}
+
 void Game::execute(
     const Action& action,
     std::optional<Dice> replay_dice,

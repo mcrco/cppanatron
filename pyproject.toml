@@ -1,0 +1,43 @@
+[build-system]
+requires = ["scikit-build-core>=0.11", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cppanatron"
+version = "0.4.0"
+description = "C++20 Catan rules engine with Catanatron-compatible Python bindings"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+# Conversions to Catanatron types and the cross-engine parity harness.
+catanatron = ["catanatron"]
+
+[dependency-groups]
+test = ["pytest>=7", "catanatron"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+cmake.build-type = "Release"
+wheel.packages = ["python/cppanatron"]
+
+[tool.scikit-build.cmake.define]
+CPPANATRON_BUILD_PYTHON = "ON"
+CPPANATRON_BUILD_TESTS = "OFF"
+
+[tool.uv]
+# Rebuild the extension on `uv sync`/`uv run` whenever engine sources change.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "CMakeLists.txt" },
+    { file = "include/**/*.hpp" },
+    { file = "src/**/*.cpp" },
+    { file = "src/**/*.hpp" },
+    { file = "python/**/*.py" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

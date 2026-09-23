@@ -338,6 +338,32 @@ struct MCTSSearch::Impl {
         node.expanded = true;
     }
 
+    /**
+     * Probability-weighted Q of one action from `perspective`'s point of view.
+     *
+     * Unvisited chance outcomes carry no estimate, so they are excluded and the
+     * visited probability mass is renormalized. Scoring them as zero would
+     * shrink rolls, robber steals and development-card purchases toward zero
+     * relative to their deterministic siblings.
+     */
+    [[nodiscard]] static double action_value(Color perspective, const ActionEdge& action) noexcept {
+        double weighted_value = 0.0;
+        double visited_probability = 0.0;
+        for (const auto& outcome : action.outcomes) {
+            const Node& child = *outcome.child;
+            if (child.visits == 0) {
+                continue;
+            }
+            const double oriented_value =
+                child.to_play == perspective ? child.value() : -child.value();
+            weighted_value += outcome.probability * oriented_value;
+            visited_probability += outcome.probability;
+        }
+        return visited_probability > kProbabilityTolerance
+            ? weighted_value / visited_probability
+            : 0.0;
+    }
+
     [[nodiscard]] Node& select_child(Node& node) {
         const std::uint32_t total_visits = std::accumulate(
             node.actions.begin(), node.actions.end(), std::uint32_t{0},
@@ -346,15 +372,7 @@ struct MCTSSearch::Impl {
         double best_score = -std::numeric_limits<double>::infinity();
         for (auto& action : node.actions) {
             const std::uint32_t action_visits = action.visits();
-            double q_value = 0.0;
-            if (action_visits > 0) {
-                for (const auto& outcome : action.outcomes) {
-                    const Node& child = *outcome.child;
-                    const double oriented_value =
-                        child.to_play == node.to_play ? child.value() : -child.value();
-                    q_value += outcome.probability * oriented_value;
-                }
-            }
+            const double q_value = action_value(node.to_play, action);
             const double u_value = c_puct * action.prior *
                                    std::sqrt(static_cast<double>(total_visits) + 1.0) /
                                    (1.0 + static_cast<double>(action_visits));
@@ -520,14 +538,7 @@ std::vector<double> MCTSSearch::root_action_values() const {
         if (action.visits() == 0) {
             continue;
         }
-        double expected_value = 0.0;
-        for (const auto& outcome : action.outcomes) {
-            const auto& child = *outcome.child;
-            const double oriented_value =
-                child.to_play == impl_->root.to_play ? child.value() : -child.value();
-            expected_value += outcome.probability * oriented_value;
-        }
-        values[action.action_index] = expected_value;
+        values[action.action_index] = Impl::action_value(impl_->root.to_play, action);
     }
     return values;
 }

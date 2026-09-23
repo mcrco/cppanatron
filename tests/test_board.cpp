@@ -351,6 +351,32 @@ void test_mcts_visits_only_legal_actions() {
     }
 }
 
+void test_mcts_chance_values_ignore_unvisited_outcomes() {
+    Game game({Color::red, Color::blue}, MapType::mini, 53);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    require(
+        game.playable_actions().size() == 1 &&
+            game.playable_actions().front().type == ActionType::roll,
+        "chance-value fixture must start with ROLL as the only legal action");
+    const FlatActionSpace action_space(2, MapType::mini);
+    const std::vector<float> logits(action_space.size(), 0.0F);
+    MCTSSearch search(game, action_space, 1.5, 109);
+    search.initialize_root(logits);
+
+    constexpr double kLeafValue = 0.5;
+    require(search.select_leaf() != nullptr, "first simulation must reach a dice outcome");
+    search.evaluate_leaf(logits, kLeafValue);
+
+    const auto roll_index =
+        action_space.index(game.playable_actions().front(), game.colors());
+    require(
+        std::abs(std::abs(search.root_action_values()[roll_index]) - kLeafValue) < 1e-12,
+        "one visited dice outcome must define the roll Q instead of being "
+        "diluted by the ten unvisited outcomes");
+}
+
 void test_mcts_reuses_only_deterministic_subtrees() {
     Game game({Color::red, Color::blue}, MapType::mini, 49);
     const FlatActionSpace action_space(2, MapType::mini);
@@ -862,6 +888,7 @@ int main() {
         test_mcts_dice_outcomes_are_exact();
         test_mcts_card_and_robber_outcomes_are_exact();
         test_mcts_visits_only_legal_actions();
+        test_mcts_chance_values_ignore_unvisited_outcomes();
         test_mcts_reuses_only_deterministic_subtrees();
         test_mcts_canonical_discard_prunes_infeasible_suffixes();
         test_seven_discard_and_robber_transition();

@@ -112,6 +112,20 @@ public:
     void set_development_cards(Color color, const std::array<int, 5>& cards);
 
     /**
+     * Information-set determinization: replace a player's hidden development
+     * cards with `cards` drawn from the cards that player could be holding.
+     *
+     * The player's current hand is pooled with the remaining deck, `cards` is
+     * dealt from that pool, and the rest becomes the deck in an order shuffled
+     * by `seed`. Victory points follow any change in victory point cards, so
+     * the deck, hands and scores stay a consistent game. Meant for players
+     * other than the one to move: the new cards count as owned at the start
+     * of that player's next turn, when they could first be played.
+     */
+    void determinize_development_cards(
+        Color color, const std::array<int, 5>& cards, std::uint64_t seed);
+
+    /**
      * Exact logical-state equality for search deduplication.
      *
      * This deliberately includes hidden state and RNG state. It is stricter

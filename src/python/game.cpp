@@ -378,7 +378,17 @@ void bind_game(nb::module_& module) {
             },
             nb::arg("player"), nb::arg("cards"),
             "Scenario setup: overwrite unplayed development cards, playable this turn.\n"
-            "Victory point cards must be bought instead.");
+            "Victory point cards must be bought instead.")
+        .def(
+            "determinize_development_cards",
+            [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,
+               std::uint64_t seed) {
+                game.determinize_development_cards(resolve_color(game, player), cards, seed);
+            },
+            nb::arg("player"), nb::arg("cards"), nb::arg("seed") = 0,
+            "Information-set determinization: deal a player's hidden development cards\n"
+            "from the cards they could hold (their hand plus the deck), return the rest\n"
+            "to a reshuffled deck, and keep victory points consistent.");
 
     nb::class_<FlatActionSpace>(
         module, "FlatActionSpace",

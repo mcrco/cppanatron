@@ -415,6 +415,45 @@ void Game::set_development_cards(Color color, const std::array<int, 5>& cards) {
     playable_actions_ = generate_playable_actions();
 }
 
+void Game::determinize_development_cards(
+    Color color, const std::array<int, 5>& cards, std::uint64_t seed) {
+    if (std::any_of(cards.begin(), cards.end(), [](int count) { return count < 0; })) {
+        throw std::invalid_argument("development card counts must be non-negative");
+    }
+    auto& state = player(color);
+    std::array<int, 5> pool = state.development_cards;
+    for (DevelopmentCard card : development_deck_) {
+        ++pool[static_cast<std::size_t>(card)];
+    }
+    int held = 0;
+    int requested = 0;
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+        held += state.development_cards[i];
+        requested += cards[i];
+        if (cards[i] > pool[i]) {
+            throw std::invalid_argument("determinized hand is not drawable from the unseen cards");
+        }
+    }
+    if (requested != held) {
+        throw std::invalid_argument("determinized hand must keep the hand size");
+    }
+    constexpr auto victory_point = static_cast<std::size_t>(DevelopmentCard::victory_point);
+    state.actual_victory_points += cards[victory_point] - state.development_cards[victory_point];
+    state.development_cards = cards;
+    for (std::size_t i = 0; i < state.development_card_owned_at_start.size(); ++i) {
+        state.development_card_owned_at_start[i] = cards[i] > 0;
+    }
+    development_deck_.clear();
+    for (std::size_t i = 0; i < pool.size(); ++i) {
+        for (int count = pool[i] - cards[i]; count > 0; --count) {
+            development_deck_.push_back(static_cast<DevelopmentCard>(i));
+        }
+    }
+    std::mt19937_64 shuffle_random(seed);
+    std::shuffle(development_deck_.begin(), development_deck_.end(), shuffle_random);
+    playable_actions_ = generate_playable_actions();
+}
+
 void Game::execute(
     const Action& action,
     std::optional<Dice> replay_dice,

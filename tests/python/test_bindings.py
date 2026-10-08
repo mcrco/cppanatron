@@ -140,6 +140,44 @@ def test_scenario_setters_refresh_playable_actions():
         game.set_development_cards(0, (0, 0, 0, 0, 1))
 
 
+def test_determinization_redeals_hidden_cards_from_the_unseen_pool():
+    game = cpp.Game(2, map_type=cpp.MapType.TOURNAMENT, seed=42)
+    space = cpp.FlatActionSpace(2, cpp.MapType.TOURNAMENT)
+    finish_setup(game, space)
+    game.execute(game.playable_actions[0], dice=(1, 1))
+    for card in ("KNIGHT", "VICTORY_POINT"):
+        game.set_resources(0, (0, 0, 1, 1, 1))
+        buy = next(
+            a for a in game.playable_actions if a.action_type == cpp.ActionType.BUY_DEVELOPMENT_CARD
+        )
+        game.execute(buy, development_card=cpp.DevelopmentCard[card])
+    red = game.player(0)
+    public = red.victory_points
+    remaining = game.development_cards_remaining
+    assert red.development_cards == (1, 0, 0, 0, 1)
+    assert red.actual_victory_points == public + 1
+
+    world = game.copy()
+    world.determinize_development_cards(0, (1, 1, 0, 0, 0), seed=7)
+    red = world.player(0)
+    assert red.development_cards == (1, 1, 0, 0, 0)
+    assert red.actual_victory_points == public
+    assert world.development_cards_remaining == remaining
+    # The swapped-out victory point card went back to the deck.
+    world.set_resources(0, (0, 0, 5, 5, 5))
+    while world.development_cards_remaining:
+        buy = next(
+            a for a in world.playable_actions if a.action_type == cpp.ActionType.BUY_DEVELOPMENT_CARD
+        )
+        world.execute(buy)
+        world.set_resources(0, (0, 0, 5, 5, 5))
+    assert sum(world.player(0).development_cards) + sum(world.player(1).development_cards) == 25
+    assert world.player(0).development_cards[4] + world.player(1).development_cards[4] == 5
+
+    with pytest.raises(ValueError, match="hand size"):
+        game.copy().determinize_development_cards(0, (1, 0, 0, 0, 0), seed=0)
+
+
 def test_board_views_follow_the_live_game():
     game = cpp.Game(2, map_type=cpp.MapType.TOURNAMENT)
     board = game.board

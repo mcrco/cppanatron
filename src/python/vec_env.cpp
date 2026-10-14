@@ -155,8 +155,10 @@ void bind_vec_env(nb::module_& module) {
         "``bind`` (or ``allocate``) and ``reset``, every ``step`` reads the actions\n"
         "of acting rows, plays forced moves and bot seats until a learner must\n"
         "decide, and writes every row. A finished game sets rewards (1 to the\n"
-        "winner) and terminal or truncation flags on all of the env's rows, and\n"
-        "the same step's observations are already the next game's.")
+        "winner) and terminal flags on all of the env's rows; a game cut off at\n"
+        "the turn limit pays nothing and sets both terminal and truncation flags\n"
+        "(PufferLib's GAE reads terminals only). Either way the same step's\n"
+        "observations are already the next game's.")
         .def(
             "__init__",
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,

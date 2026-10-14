@@ -106,10 +106,14 @@ struct EpisodeStats {
  * row of the learner seat to move acts; step() applies its action, then plays
  * forced moves (a single legal action) and bot seats until a learner seat
  * must decide or the game ends, and writes every row. A finished game writes
- * its rewards (1 to the winner's row, 0 to the others; 0 everywhere and the
- * truncation flag at the turn limit) together with terminal flags for all of
- * the env's rows and is replaced at once: the same step's observations are
- * the next game's, as in PufferLib's C environments.
+ * its rewards (1 to the winner's row, 0 to the others) and sets terminal
+ * flags on all of the env's rows. A game cut off at the turn limit pays 0
+ * and sets both the terminal and the truncation flags: PufferLib 3 learns
+ * from terminals only (its GAE ignores truncations, and its own C envs report
+ * timeouts as terminals), so a truncation must also end the trajectory
+ * there; the truncation flag tells the two apart for logging. Either way the
+ * game is replaced at once, so the same step's observations are the next
+ * game's, as in PufferLib's C environments (e.g. breakout).
  *
  * Each env draws scenarios, maps, seats and game seeds from its own random
  * stream seeded from the config seed, so results do not depend on threading.

@@ -119,7 +119,8 @@ def test_self_play_steps_match_a_replayed_game():
                 assert np.array_equal(buffers["rewards"][rows], rewards)
                 finished += 1
             elif game.num_turns >= 400:
-                assert buffers["truncations"][rows].all() and not buffers["terminals"][rows].any()
+                # PufferLib reads terminals only: a truncation ends the trajectory too.
+                assert buffers["truncations"][rows].all() and buffers["terminals"][rows].all()
                 assert not buffers["rewards"][rows].any()
             else:
                 assert not buffers["terminals"][rows].any()
@@ -138,6 +139,7 @@ def test_truncation_at_the_turn_limit():
         sample_actions(env, buffers, rng)
         env.step()
         truncations += int(buffers["truncations"].sum())
+        assert np.array_equal(buffers["terminals"], buffers["truncations"])
         assert not buffers["rewards"].any()
         for e in range(env.num_envs):
             assert env.game(e).num_turns < 12
@@ -185,7 +187,7 @@ def test_vp_shaping_rewards_learner_points():
     for _ in range(400):
         sample_actions(env, buffers, rng)
         env.step()
-        live = ~(buffers["terminals"].astype(bool) | buffers["truncations"].astype(bool))
+        live = ~buffers["terminals"].astype(bool)
         shaped += float(buffers["rewards"][live].sum())
     assert shaped > 0
 

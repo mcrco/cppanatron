@@ -308,7 +308,8 @@ void VecEnv::finish_game(int env_index, bool truncated) {
     }
     for (int seat = 0; seat < max_players(); ++seat) {
         const std::size_t index = row(env_index, seat);
-        buffers_.terminals[index] = truncated ? 0 : 1;
+        // Terminal either way: PufferLib's advantages only read terminals.
+        buffers_.terminals[index] = 1;
         buffers_.truncations[index] = truncated ? 1 : 0;
     }
     env.stats.total.add(episode);

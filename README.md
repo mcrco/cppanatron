@@ -94,8 +94,9 @@ rewards float32, terminals/truncations/acting/learner uint8, seat/env_index
 int32, num_players int32 per env) sets up the buffers. `step()` releases the
 GIL, applies the acting rows' actions, plays forced moves and bot seats until
 a learner must decide, and writes every row; a finished game pays 1 to the
-winner's row, flags every row of its env terminal (or truncated at the turn
-limit, with no reward) and is replaced in the same step. `pop_stats()` returns
+winner's row, flags every row of its env terminal (a game cut off at the turn
+limit pays nothing and is flagged both terminal and truncated, since PufferLib
+learns from terminals only) and is replaced in the same step. `pop_stats()` returns
 episode aggregates. `tools/bench_vec_env.py` measures throughput.
 
 `cppanatron.catanatron` converts actions, colors and boards to and from

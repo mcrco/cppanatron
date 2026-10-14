@@ -103,6 +103,9 @@ struct VecEnv::Env {
     std::vector<int> victory_points;
     std::uint64_t decisions{};
     EpisodeStats stats;
+    /** The acting row's decoded action, or why it cannot be played. */
+    Action pending;
+    std::string refusal;
 };
 
 /**
@@ -247,15 +250,30 @@ void VecEnv::reset(std::optional<std::uint64_t> seed) {
         }
         seeded_ = true;
     }
+    ready_ = false;
     for_each_env(&VecEnv::start_env);
-    started_ = true;
+    ready_ = true;
 }
 
 void VecEnv::step() {
-    if (!started_) {
-        throw std::logic_error("reset the VecEnv before stepping it");
+    if (!ready_) {
+        throw std::logic_error(
+            "reset the VecEnv before stepping it (first, or after a step failed mid-way)");
     }
-    for_each_env(&VecEnv::step_env);
+    // Every action is checked before any env changes, so a bad action leaves
+    // all of them as they were and the caller may fix it and step again.
+    for_each_env(&VecEnv::check_action);
+    for (const Env& env : envs_) {
+        if (!env.refusal.empty()) {
+            throw std::invalid_argument(env.refusal);
+        }
+    }
+    try {
+        for_each_env(&VecEnv::step_env);
+    } catch (...) {
+        ready_ = false;
+        throw;
+    }
 }
 
 void VecEnv::start_game(Env& env) {
@@ -384,6 +402,33 @@ void VecEnv::start_env(int env_index) {
     write_rows(env_index);
 }
 
+void VecEnv::check_action(int env_index) {
+    Env& env = envs_[static_cast<std::size_t>(env_index)];
+    env.refusal.clear();
+    const Game& game = *env.game;
+    const int seat = game.current_player_index();
+    const std::int32_t index = buffers_.actions[row(env_index, seat)];
+    const GraphActionSpace& space = encoder_.action_space();
+    const auto refuse = [&](const std::string& why) {
+        env.refusal = "env " + std::to_string(env_index) + ", seat " + std::to_string(seat) +
+                      ": action " + std::to_string(index) + " " + why;
+    };
+    if (index < 0 || static_cast<std::size_t>(index) >= space.noop()) {
+        refuse("is not a game action");
+        return;
+    }
+    try {
+        env.pending = space.decode(game, static_cast<std::size_t>(index));
+    } catch (const std::exception& error) {
+        refuse(std::string("does not decode: ") + error.what());
+        return;
+    }
+    const auto& playable = game.playable_actions();
+    if (std::find(playable.begin(), playable.end(), env.pending) == playable.end()) {
+        refuse("(" + space.name(static_cast<std::size_t>(index)) + ") is not playable");
+    }
+}
+
 void VecEnv::step_env(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     for (int seat = 0; seat < max_players(); ++seat) {
@@ -392,29 +437,7 @@ void VecEnv::step_env(int env_index) {
         buffers_.terminals[index] = 0;
         buffers_.truncations[index] = 0;
     }
-    Game& game = *env.game;
-    const int seat = game.current_player_index();
-    const std::int32_t index = buffers_.actions[row(env_index, seat)];
-    const GraphActionSpace& space = encoder_.action_space();
-    const auto refuse = [&](const std::string& why) {
-        throw std::invalid_argument(
-            "env " + std::to_string(env_index) + ", seat " + std::to_string(seat) +
-            ": action " + std::to_string(index) + " " + why);
-    };
-    if (index < 0 || static_cast<std::size_t>(index) >= space.noop()) {
-        refuse("is not a game action");
-    }
-    Action action;
-    try {
-        action = space.decode(game, static_cast<std::size_t>(index));
-    } catch (const std::exception& error) {
-        refuse(std::string("does not decode: ") + error.what());
-    }
-    const auto& playable = game.playable_actions();
-    if (std::find(playable.begin(), playable.end(), action) == playable.end()) {
-        refuse("(" + space.name(static_cast<std::size_t>(index)) + ") is not playable");
-    }
-    game.execute(action);
+    env.game->execute(env.pending);
     ++env.decisions;
 
     const std::uint64_t episodes = env.stats.total.episodes;

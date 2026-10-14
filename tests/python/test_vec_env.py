@@ -227,16 +227,35 @@ def test_vp_shaping_rewards_learner_points():
     assert shaped > 0
 
 
-def test_unplayable_actions_are_refused():
-    env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=1, seed=1)
+def test_unplayable_actions_are_refused_before_any_env_moves():
+    env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=8, seed=1, num_threads=3)
     buffers = env.allocate()
     env.reset()
-    buffers["actions"][:] = env.encoder.action_space.noop
-    with pytest.raises(ValueError, match="not a game action"):
+    rng = np.random.default_rng(5)
+    for _ in range(30):
+        sample_actions(env, buffers, rng)
         env.step()
-    buffers["actions"][:] = 0  # ROLL during the initial build phase
+    before = [env.game(e) for e in range(8)]
+    sample_actions(env, buffers, rng)
+    bad = int(np.flatnonzero(buffers["acting"])[5])
+    good = buffers["actions"][bad]
+    for action, message in ((env.encoder.action_space.noop, "not a game action"),
+                            (len(env.encoder.action_space) + 3, "not a game action")):
+        buffers["actions"][bad] = action
+        with pytest.raises(ValueError, match=message):
+            env.step()
+        assert all(env.game(e).search_equivalent(before[e]) for e in range(8))
+    # A legal-looking index that is not playable now.
+    offset, (size,) = env.encoder.layout()["action_mask"]
+    illegal = np.flatnonzero(buffers["observations"][bad, offset: offset + size] == 0)[0]
+    buffers["actions"][bad] = illegal
     with pytest.raises(ValueError, match="not playable"):
         env.step()
+    assert all(env.game(e).search_equivalent(before[e]) for e in range(8))
+    # Fixing the action lets the same step go through.
+    buffers["actions"][bad] = good
+    env.step()
+    assert sum(not env.game(e).search_equivalent(before[e]) for e in range(8)) == 8
 
 
 def test_waiting_rows_can_be_encoded():

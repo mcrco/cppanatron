@@ -143,6 +143,12 @@ public:
      * as in Gymnasium.
      */
     void reset(std::optional<std::uint64_t> seed = std::nullopt);
+    /**
+     * Throws std::invalid_argument, before changing any env, if an acting
+     * row's action is not playable. If the engine fails later in the step,
+     * some envs may have advanced: the VecEnv then refuses to step until the
+     * next reset().
+     */
     void step();
     /** Aggregates of the episodes finished since the last call. */
     [[nodiscard]] EpisodeStats pop_stats();
@@ -157,6 +163,7 @@ private:
 
     void for_each_env(void (VecEnv::*method)(int));
     void start_env(int env_index);
+    void check_action(int env_index);
     void step_env(int env_index);
     void start_game(Env& env);
     void play_until_learner(int env_index);
@@ -171,7 +178,8 @@ private:
     std::unique_ptr<ThreadPool> pool_;
     VecEnvBuffers buffers_{};
     bool seeded_{false};
-    bool started_{false};
+    /** Every env holds a game waiting for a learner: set by reset, cleared by failures. */
+    bool ready_{false};
 };
 
 }  // namespace cppanatron

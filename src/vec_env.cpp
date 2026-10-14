@@ -5,7 +5,9 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -93,7 +95,9 @@ void validate(const VecEnvConfig& config) {
             if (static_cast<int>(scenario.seats.size()) != scenario.num_players) {
                 throw std::invalid_argument(where + "give one seat kind per player");
             }
-            if (std::none_of(scenario.seats.begin(), scenario.seats.end(),
+            // Schedule mode gives every game its seats, bots-only included.
+            if (config.auto_reset &&
+                std::none_of(scenario.seats.begin(), scenario.seats.end(),
                              [](SeatKind kind) { return kind == SeatKind::learner; })) {
                 throw std::invalid_argument(where + "at least one seat must be a learner");
             }
@@ -160,9 +164,14 @@ struct VecEnv::Env {
     std::mt19937_64 bots;
     std::uint64_t bot_seed{};
     std::uint64_t game_seed{};
+    /** Null while idle (schedule mode). */
     std::unique_ptr<Game> game;
     int scenario{};
     std::vector<SeatKind> seats;
+    std::vector<int> lineup_slots;
+    std::vector<std::uint64_t> seat_decisions;
+    /** Schedule mode: games finished since the last pop_finished. */
+    std::vector<FinishedGame> finished;
     /** Actual victory points at the last reward, for shaping. */
     std::vector<int> victory_points;
     std::uint64_t decisions{};
@@ -380,8 +389,8 @@ void VecEnv::start_game(Env& env) {
     for (const Scenario& scenario : config_.scenarios) {
         weights.push_back(scenario.weight);
     }
-    env.scenario = std::discrete_distribution<int>(weights.begin(), weights.end())(env.random);
-    const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(env.scenario)];
+    const int index = std::discrete_distribution<int>(weights.begin(), weights.end())(env.random);
+    const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(index)];
 
     std::shared_ptr<const CatanMap> map;
     if (!scenario.maps.empty()) {
@@ -391,19 +400,39 @@ void VecEnv::start_game(Env& env) {
             CatanMap::build(scenario.map_type, env.random(), scenario.number_placement));
     }
     const auto num_players = static_cast<std::size_t>(scenario.num_players);
-    env.game_seed = env.random();
-    env.game = std::make_unique<Game>(
-        std::vector<Color>(kColors.begin(), kColors.begin() + scenario.num_players), map,
-        env.game_seed, scenario.rules);
-    env.seats = scenario.seats.empty()
-                    ? std::vector<SeatKind>(num_players, SeatKind::learner)
-                    : scenario.seats;
+    const std::uint64_t game_seed = env.random();
+    // Lineup slots are positions in the scenario's seat list, so they tell
+    // who plays where after a shuffle.
+    std::vector<int> slots(num_players);
+    std::iota(slots.begin(), slots.end(), 0);
     if (scenario.shuffle_seats) {
-        std::shuffle(env.seats.begin(), env.seats.end(), env.random);
+        std::shuffle(slots.begin(), slots.end(), env.random);
     }
-    env.bot_seed = env.random();
-    env.bots.seed(env.bot_seed);
-    env.victory_points.assign(num_players, 0);
+    std::vector<SeatKind> seats(num_players, SeatKind::learner);
+    if (!scenario.seats.empty()) {
+        for (std::size_t seat = 0; seat < num_players; ++seat) {
+            seats[seat] = scenario.seats[static_cast<std::size_t>(slots[seat])];
+        }
+    }
+    const std::uint64_t bot_seed = env.random();
+    begin_game(env, index, std::move(map), game_seed, std::move(seats), std::move(slots), bot_seed);
+}
+
+void VecEnv::begin_game(
+    Env& env, int scenario_index, std::shared_ptr<const CatanMap> map, std::uint64_t game_seed,
+    std::vector<SeatKind> seats, std::vector<int> lineup_slots, std::uint64_t bot_seed) {
+    const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(scenario_index)];
+    env.scenario = scenario_index;
+    env.game_seed = game_seed;
+    env.game = std::make_unique<Game>(
+        std::vector<Color>(kColors.begin(), kColors.begin() + scenario.num_players),
+        std::move(map), game_seed, scenario.rules);
+    env.seats = std::move(seats);
+    env.lineup_slots = std::move(lineup_slots);
+    env.bot_seed = bot_seed;
+    env.bots.seed(bot_seed);
+    env.victory_points.assign(env.seats.size(), 0);
+    env.seat_decisions.assign(env.seats.size(), 0);
     env.decisions = 0;
 }
 
@@ -440,6 +469,26 @@ void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
         env.stats.scenarios.resize(config_.scenarios.size());
     }
     env.stats.scenarios[static_cast<std::size_t>(env.scenario)].add(episode);
+
+    if (!config_.auto_reset) {
+        FinishedGame finished;
+        finished.env = env_index;
+        finished.scenario = env.scenario;
+        finished.game_seed = env.game_seed;
+        finished.bot_seed = env.bot_seed;
+        finished.seats = env.seats;
+        finished.lineup_slots = env.lineup_slots;
+        if (!truncated) {
+            const auto& colors = game.colors();
+            finished.winner = static_cast<int>(
+                std::find(colors.begin(), colors.end(), *game.winning_color()) - colors.begin());
+        }
+        finished.turns = game.num_turns();
+        finished.truncated = truncated;
+        finished.stuck = stuck;
+        finished.decisions = env.seat_decisions;
+        env.finished.push_back(std::move(finished));
+    }
 }
 
 void VecEnv::shape_rewards(int env_index, bool pay) {
@@ -470,23 +519,35 @@ void VecEnv::next_game(int env_index) {
 
 void VecEnv::play_until_learner(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
+    // After a game ends: the next one (auto-reset), or an idle env.
+    const auto end_game = [&](bool truncated, bool stuck) {
+        finish_game(env_index, truncated, stuck);
+        if (config_.auto_reset) {
+            next_game(env_index);
+            return true;
+        }
+        env.game.reset();
+        return false;
+    };
     for (;;) {
         Game& game = *env.game;
         const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(env.scenario)];
         const bool won = game.winning_color().has_value();
         if (won || game.num_turns() >= scenario.turn_limit) {
-            finish_game(env_index, !won);
-            next_game(env_index);
-            continue;
+            if (end_game(!won, false)) {
+                continue;
+            }
+            return;
         }
         const auto& actions = game.playable_actions();
         if (actions.empty()) {
             // Possible on crowded maps: the initial placements can leave a
             // seat no open node. The game cannot go on; count it as a
-            // truncated (stuck) episode and start another.
-            finish_game(env_index, true, true);
-            next_game(env_index);
-            continue;
+            // truncated (stuck) episode.
+            if (end_game(true, true)) {
+                continue;
+            }
+            return;
         }
         switch (env.seats[static_cast<std::size_t>(game.current_player_index())]) {
             case SeatKind::learner:
@@ -506,25 +567,37 @@ void VecEnv::play_until_learner(int env_index) {
     }
 }
 
-void VecEnv::start_env(int env_index) {
-    Env& env = envs_[static_cast<std::size_t>(env_index)];
-    env.waiting_written.assign(static_cast<std::size_t>(max_players()), false);
+void VecEnv::clear_transition(int env_index) {
     for (int seat = 0; seat < max_players(); ++seat) {
         const std::size_t index = row(env_index, seat);
         buffers_.rewards[index] = 0.0F;
         buffers_.terminals[index] = 0;
         buffers_.truncations[index] = 0;
     }
-    start_game(env);
-    play_until_learner(env_index);
-    // Pieces placed before the first decision are not rewarded.
-    shape_rewards(env_index, false);
+}
+
+void VecEnv::start_env(int env_index) {
+    Env& env = envs_[static_cast<std::size_t>(env_index)];
+    env.waiting_written.assign(static_cast<std::size_t>(max_players()), false);
+    clear_transition(env_index);
+    if (config_.auto_reset) {
+        start_game(env);
+        play_until_learner(env_index);
+        // Pieces placed before the first decision are not rewarded.
+        shape_rewards(env_index, false);
+    } else {
+        env.game.reset();
+        env.finished.clear();
+    }
     write_rows(env_index);
 }
 
 void VecEnv::check_action(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     env.refusal.clear();
+    if (env.game == nullptr) {
+        return;  // idle: no row acts
+    }
     const Game& game = *env.game;
     const int seat = game.current_player_index();
     const std::int32_t index = buffers_.actions[row(env_index, seat)];
@@ -551,27 +624,109 @@ void VecEnv::check_action(int env_index) {
 
 void VecEnv::step_env(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
-    for (int seat = 0; seat < max_players(); ++seat) {
-        const std::size_t index = row(env_index, seat);
-        buffers_.rewards[index] = 0.0F;
-        buffers_.terminals[index] = 0;
-        buffers_.truncations[index] = 0;
+    clear_transition(env_index);
+    if (env.game == nullptr) {
+        return;  // idle since its game ended; its rows already say so
     }
+    ++env.seat_decisions[static_cast<std::size_t>(env.game->current_player_index())];
     env.game->execute(env.pending);
     ++env.decisions;
 
     const std::uint64_t episodes = env.stats.total.episodes;
     play_until_learner(env_index);
     // A finished game was paid in finish_game; the next one starts unpaid.
-    shape_rewards(env_index, env.stats.total.episodes == episodes);
+    if (env.game != nullptr) {
+        shape_rewards(env_index, env.stats.total.episodes == episodes);
+    }
     write_rows(env_index);
+}
+
+void VecEnv::start_games(const std::vector<GameStart>& games) {
+    if (config_.auto_reset) {
+        throw std::logic_error("start_games needs a VecEnv in schedule mode (auto_reset off)");
+    }
+    if (!ready_) {
+        throw std::logic_error(
+            "reset the VecEnv before starting games (first, or after a step failed mid-way)");
+    }
+    std::vector<bool> taken(envs_.size(), false);
+    for (const GameStart& start : games) {
+        const std::string where = "game for env " + std::to_string(start.env) + ": ";
+        if (start.env < 0 || start.env >= num_envs()) {
+            throw std::invalid_argument(where + "no such env");
+        }
+        if (taken[static_cast<std::size_t>(start.env)] ||
+            envs_[static_cast<std::size_t>(start.env)].game != nullptr) {
+            throw std::invalid_argument(where + "the env is busy");
+        }
+        taken[static_cast<std::size_t>(start.env)] = true;
+        if (start.scenario < 0 ||
+            static_cast<std::size_t>(start.scenario) >= config_.scenarios.size()) {
+            throw std::invalid_argument(where + "no such scenario");
+        }
+        const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(start.scenario)];
+        const auto num_players = static_cast<std::size_t>(scenario.num_players);
+        if (start.map == nullptr || !config_.dims.fits(*start.map, scenario.num_players)) {
+            throw std::invalid_argument(where + "the map is missing or does not fit the dims");
+        }
+        if (settlement_capacity(*start.map) < 2 * scenario.num_players) {
+            throw std::invalid_argument(where + "the map cannot seat the scenario's players");
+        }
+        if (start.seats.size() != num_players ||
+            (!start.lineup_slots.empty() && start.lineup_slots.size() != num_players)) {
+            throw std::invalid_argument(
+                where + "give a seat kind (and lineup slot) for each of the scenario's " +
+                std::to_string(num_players) + " players");
+        }
+    }
+    const std::function<void(int)> task = [&](int index) {
+        const GameStart& start = games[static_cast<std::size_t>(index)];
+        Env& env = envs_[static_cast<std::size_t>(start.env)];
+        std::vector<int> slots = start.lineup_slots;
+        if (slots.empty()) {
+            slots.resize(start.seats.size());
+            std::iota(slots.begin(), slots.end(), 0);
+        }
+        clear_transition(start.env);
+        begin_game(env, start.scenario, start.map, start.game_seed, start.seats,
+                   std::move(slots), start.bot_seed);
+        play_until_learner(start.env);
+        if (env.game != nullptr) {
+            shape_rewards(start.env, false);
+        }
+        write_rows(start.env);
+    };
+    try {
+        pool_->run(static_cast<int>(games.size()), task);
+    } catch (...) {
+        ready_ = false;
+        throw;
+    }
+}
+
+std::vector<FinishedGame> VecEnv::pop_finished() {
+    std::vector<FinishedGame> result;
+    for (Env& env : envs_) {
+        std::move(env.finished.begin(), env.finished.end(), std::back_inserter(result));
+        env.finished.clear();
+    }
+    return result;
+}
+
+bool VecEnv::active(int env_index) const {
+    return envs_.at(static_cast<std::size_t>(env_index)).game != nullptr;
+}
+
+const std::vector<int>& VecEnv::lineup_slots(int env_index) const {
+    return envs_.at(static_cast<std::size_t>(env_index)).lineup_slots;
 }
 
 void VecEnv::write_rows(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
-    const Game& game = *env.game;
-    const int num_players = static_cast<int>(game.colors().size());
-    const int current = game.current_player_index();
+    // An idle env (schedule mode) writes padding rows.
+    const Game* const game = env.game.get();
+    const int num_players = game == nullptr ? 0 : static_cast<int>(game->colors().size());
+    const int current = game == nullptr ? -1 : game->current_player_index();
     const std::size_t size = encoder_.size();
     buffers_.num_players[env_index] = num_players;
     for (int seat = 0; seat < max_players(); ++seat) {
@@ -584,10 +739,14 @@ void VecEnv::write_rows(int env_index) {
         buffers_.env_index[index] = env_index;
         buffers_.learner[index] = learns ? 1 : 0;
         buffers_.acting[index] = acts ? 1 : 0;
+        if (buffers_.lineup_slot != nullptr) {
+            buffers_.lineup_slot[index] =
+                present ? env.lineup_slots[static_cast<std::size_t>(seat)] : -1;
+        }
         const std::span<float> observation(buffers_.observations + index * size, size);
         const auto slot = static_cast<std::size_t>(seat);
         if (acts || (learns && config_.encode_waiting)) {
-            encoder_.encode(game, seat, observation);
+            encoder_.encode(*game, seat, observation);
             env.waiting_written[slot] = false;
         } else if (!env.waiting_written[slot]) {
             // Waiting and padded rows only change when a row stops acting.
@@ -613,7 +772,7 @@ EpisodeStats VecEnv::pop_stats() {
 const Game& VecEnv::game(int env_index) const {
     const Env& env = envs_.at(static_cast<std::size_t>(env_index));
     if (env.game == nullptr) {
-        throw std::logic_error("reset the VecEnv first");
+        throw std::logic_error("env " + std::to_string(env_index) + " holds no game");
     }
     return *env.game;
 }

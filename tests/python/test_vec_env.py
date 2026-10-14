@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pytest
 
@@ -348,3 +350,128 @@ def test_waiting_rows_can_be_encoded():
         for seat in range(3):
             assert np.array_equal(buffers["observations"][e * 3 + seat],
                                   env.encoder.encode(game, seat))
+
+
+# ---------------------------------------------------------------- schedule mode
+
+
+def row_policy(buffers: dict, offset: int, size: int) -> None:
+    """A legal action for each acting row that depends on that row alone."""
+    for row in np.flatnonzero(buffers["acting"]):
+        observation = buffers["observations"][row]
+        legal = np.flatnonzero(observation[offset: offset + size])
+        digest = hashlib.blake2b(observation.tobytes(), digest_size=8).digest()
+        buffers["actions"][row] = legal[int.from_bytes(digest, "little") % len(legal)]
+
+
+def schedule(count: int) -> list[dict]:
+    """Mixed games: maps, player counts, learners and bots (some bots only)."""
+    maps = [cpp.MapSpec.build(cpp.MapType.BASE, seed) for seed in range(3)] + [
+        cpp.MapSpec.from_dict(SHAPES["lake"][0](1))]
+    kinds = [["learner", "R"], ["F", "learner"], ["R", "F"], ["learner", "learner"]]
+    games = []
+    for index in range(count):
+        scenario = index % 2
+        seats = kinds[index % len(kinds)] if scenario == 0 else ["R", "learner", "R", "learner"]
+        games.append(dict(map=maps[index % len(maps)], game_seed=1_000 + index,
+                          bot_seed=7 * index, seats=seats, scenario=scenario,
+                          lineup_slots=list(range(len(seats)))[::-1]))
+    return games
+
+
+def play_schedule(num_envs: int, threads: int, games: list[dict]) -> dict:
+    env = cpp.VecEnv(
+        [cpp.Scenario(num_players=2, turn_limit=300), cpp.Scenario(num_players=4, turn_limit=300)],
+        num_envs=num_envs, num_threads=threads, auto_reset=False,
+        dims=cpp.EncoderDims(max_players=4, max_tiles=19, max_nodes=54, max_edges=72),
+    )
+    buffers = env.allocate()
+    env.reset()
+    assert env.idle_envs() == list(range(num_envs))
+    offset, (size,) = env.encoder.layout()["action_mask"]
+    pending = list(games)
+    results = {}
+    while pending or any(env.active(e) for e in range(num_envs)):
+        idle = env.idle_envs()
+        batch = [dict(game, env=e) for e, game in zip(idle, pending)]
+        pending = pending[len(batch):]
+        if batch:
+            env.start_games(batch)
+        for game in env.pop_finished():
+            results[game["game_seed"]] = game
+        row_policy(buffers, offset, size)
+        env.step()
+        for game in env.pop_finished():
+            results[game["game_seed"]] = game
+    return {seed: {k: v for k, v in game.items() if k != "env"} for seed, game in results.items()}
+
+
+def test_scheduled_games_do_not_depend_on_envs_threads_or_history():
+    games = schedule(24)
+    reference = play_schedule(3, 1, games)
+    assert sorted(reference) == sorted(g["game_seed"] for g in games)
+    assert play_schedule(7, 4, games) == reference
+    assert play_schedule(24, 3, games) == reference
+    bots_only = [r for r in reference.values()
+                 if cpp.SeatKind.LEARNER not in r["seats"]]
+    assert bots_only and all(sum(r["decisions"]) == 0 for r in bots_only)
+    for result in reference.values():
+        assert result["winner_slot"] == (
+            -1 if result["winner"] < 0 else result["lineup_slots"][result["winner"]])
+
+
+def test_idle_envs_wait_and_scheduled_rows_carry_lineup_slots():
+    env = cpp.VecEnv([cpp.Scenario(num_players=3)], num_envs=2, auto_reset=False)
+    buffers = env.allocate()
+    env.reset()
+    noop = env.encoder.action_space.noop
+    offset, _ = env.encoder.layout()["action_mask"]
+    for name, value in (("acting", 0), ("learner", 0), ("seat", -1), ("lineup_slot", -1)):
+        assert (buffers[name] == value).all(), name
+    assert (buffers["num_players"] == 0).all()
+    assert all(np.flatnonzero(row).tolist() == [offset + noop] for row in buffers["observations"])
+    env.step()  # nothing to do
+    with pytest.raises(RuntimeError, match="holds no game"):
+        env.game(0)
+
+    env.start_game(1, map=cpp.CatanMap.build(cpp.MapType.BASE, 4), game_seed=3,
+                   seats=["R", "learner", cpp.SeatKind.VALUE], lineup_slots=[2, 0, 1])
+    assert env.idle_envs() == [0] and env.lineup_slots(1) == [2, 0, 1]
+    rows = slice(env.max_players, 2 * env.max_players)
+    assert buffers["lineup_slot"][rows].tolist() == [2, 0, 1]
+    assert buffers["learner"][rows].tolist() == [0, 1, 0]
+    assert buffers["acting"][rows].tolist() == [0, 1, 0] and buffers["num_players"][1] == 3
+
+    with pytest.raises(ValueError, match="busy"):
+        env.start_game(1, map=cpp.CatanMap.build(cpp.MapType.BASE), game_seed=1,
+                       seats=["learner"] * 3)
+    with pytest.raises(ValueError, match="each of the scenario's 3 players"):
+        env.start_game(0, map=cpp.CatanMap.build(cpp.MapType.BASE), game_seed=1,
+                       seats=["learner"] * 2)
+    with pytest.raises(ValueError, match="busy"):
+        env.start_games([dict(env=0, map=cpp.MapSpec.build(cpp.MapType.BASE), game_seed=1,
+                              seats=["learner"] * 3)] * 2)
+    assert env.idle_envs() == [0]
+    with pytest.raises(RuntimeError, match="schedule mode"):
+        auto = cpp.VecEnv([cpp.Scenario()])
+        auto.allocate()
+        auto.reset()
+        auto.start_game(0, map=cpp.CatanMap.build(cpp.MapType.BASE), game_seed=1,
+                        seats=["learner", "R"])
+
+
+def test_auto_reset_lineup_slots_name_the_scenario_seats():
+    kinds = ["learner", "R", "F"]
+    env = cpp.VecEnv([cpp.Scenario(num_players=3, seats=kinds, shuffle_seats=True)],
+                     num_envs=6, seed=5)
+    buffers = env.allocate()
+    env.reset()
+    names = {cpp.SeatKind.LEARNER: "learner", cpp.SeatKind.RANDOM: "R", cpp.SeatKind.VALUE: "F"}
+    orders = set()
+    for e in range(6):
+        slots = env.lineup_slots(e)
+        assert sorted(slots) == [0, 1, 2]
+        assert [names[k] for k in env.seat_kinds(e)] == [kinds[s] for s in slots]
+        assert buffers["lineup_slot"][e * 3: e * 3 + 3].tolist() == slots
+        orders.add(tuple(slots))
+    assert len(orders) > 1

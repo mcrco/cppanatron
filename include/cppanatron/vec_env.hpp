@@ -62,6 +62,47 @@ struct VecEnvConfig {
      * act (and estimate every seat's value) from the acting row.
      */
     bool encode_waiting{false};
+    /**
+     * Start the next game as soon as one ends (training). When false
+     * (schedule mode, for evaluation) a finished env stays idle until the
+     * caller puts an exact game into it with start_games, so the games
+     * played do not depend on num_envs, threads or finishing order.
+     */
+    bool auto_reset{true};
+};
+
+/** An exact game for VecEnv::start_games (schedule mode). */
+struct GameStart {
+    int env{};
+    /** The scenario whose player count, rules, turn limit and F settings apply. */
+    int scenario{};
+    std::shared_ptr<const CatanMap> map;
+    /** Dice, development cards and steals. */
+    std::uint64_t game_seed{};
+    /** This game's random bots. */
+    std::uint64_t bot_seed{};
+    /** Who plays each seat, in seating order; every seat may be a bot. */
+    std::vector<SeatKind> seats;
+    /** The caller's label for each seat (its lineup slot); default 0..n-1. */
+    std::vector<int> lineup_slots;
+};
+
+/** How a game ended, as schedule mode reports it. */
+struct FinishedGame {
+    int env{};
+    int scenario{};
+    std::uint64_t game_seed{};
+    std::uint64_t bot_seed{};
+    std::vector<SeatKind> seats;
+    std::vector<int> lineup_slots;
+    /** The winning seat, or -1 for a truncated game. */
+    int winner{-1};
+    int turns{};
+    bool truncated{};
+    /** Truncated because no action was playable (crowded maps). */
+    bool stuck{};
+    /** Learner decisions per seat (forced moves are not decisions). */
+    std::vector<std::uint64_t> decisions;
 };
 
 /**
@@ -80,7 +121,9 @@ struct VecEnvBuffers {
     std::uint8_t* learner{};      // [rows] 1 if a learner plays the row's seat
     std::int32_t* seat{};         // [rows] absolute seat, -1 for padding
     std::int32_t* env_index{};    // [rows]
-    std::int32_t* num_players{};  // [num_envs]
+    std::int32_t* num_players{};  // [num_envs], 0 for an idle env
+    /** Optional: [rows] the lineup slot of the row's seat, -1 for padding. */
+    std::int32_t* lineup_slot{};
 };
 
 /** Episode aggregates since the last pop. */
@@ -123,6 +166,10 @@ struct EpisodeStats {
  * no playable action (initial placements can crowd a small map) ends the
  * same way as a truncation.
  *
+ * In schedule mode (auto_reset false) envs instead wait idle (no rows act)
+ * until start_games gives them an exact game, and finished games are
+ * reported by pop_finished.
+ *
  * Each env draws scenarios, maps, seats, game seeds and bot seeds from its
  * own random stream seeded from the config seed, so results do not depend on
  * threading. Random bots play from a stream seeded per game by its bot seed,
@@ -163,10 +210,24 @@ public:
     /** Aggregates of the episodes finished since the last call. */
     [[nodiscard]] EpisodeStats pop_stats();
 
+    /**
+     * Schedule mode: put exact games into idle envs and play each until a
+     * learner must decide (or, with bots only, to the end), in parallel, then
+     * write those envs' rows. Throws std::invalid_argument, before starting
+     * any, for a busy or repeated env, a bad scenario, a map that does not
+     * fit, or seats that do not match the scenario's player count.
+     */
+    void start_games(const std::vector<GameStart>& games);
+    /** Schedule mode: the games finished since the last call, by env. */
+    [[nodiscard]] std::vector<FinishedGame> pop_finished();
+    /** Whether an env holds a game (always, unless in schedule mode). */
+    [[nodiscard]] bool active(int env_index) const;
+    [[nodiscard]] const std::vector<int>& lineup_slots(int env_index) const;
+
     [[nodiscard]] const Game& game(int env_index) const;
     [[nodiscard]] int scenario_index(int env_index) const;
     [[nodiscard]] const std::vector<SeatKind>& seat_kinds(int env_index) const;
-    /** Seeds of an env's current game: its dice, cards and steals, and its bots. */
+    /** Seeds of an env's current (or last) game: dice, cards and steals, and bots. */
     [[nodiscard]] std::uint64_t game_seed(int env_index) const;
     [[nodiscard]] std::uint64_t bot_seed(int env_index) const;
 
@@ -179,6 +240,10 @@ private:
     void check_action(int env_index);
     void step_env(int env_index);
     void start_game(Env& env);
+    void begin_game(
+        Env& env, int scenario, std::shared_ptr<const CatanMap> map, std::uint64_t game_seed,
+        std::vector<SeatKind> seats, std::vector<int> lineup_slots, std::uint64_t bot_seed);
+    void clear_transition(int env_index);
     void play_until_learner(int env_index);
     void next_game(int env_index);
     void finish_game(int env_index, bool truncated, bool stuck = false);

@@ -99,6 +99,15 @@ limit pays nothing and is flagged both terminal and truncated, since PufferLib
 learns from terminals only) and is replaced in the same step. `pop_stats()` returns
 episode aggregates. `tools/bench_vec_env.py` measures throughput.
 
+For evaluation, `cpp.VecEnv(..., auto_reset=False)` is schedule mode: envs
+sit idle until `start_games([{"env": e, "map": ..., "game_seed": ...,
+"seats": ["learner", "F", ...], "bot_seed": ..., "lineup_slots": [...]}])`
+puts exact games into them, a finished env stays idle, and `pop_finished()`
+reports each game's winner (seat and lineup slot), turns, truncation and
+decisions per seat, so the games played do not depend on `num_envs`, threads
+or finishing order. Random bots draw from a stream seeded per game, and the
+optional `lineup_slot` buffer says who plays each row's seat.
+
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
 the observation layout of Catanatron's board tensor. Our Catanatron fork gives

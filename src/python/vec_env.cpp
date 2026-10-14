@@ -41,6 +41,48 @@ SeatKind seat_kind(const SeatSpec& spec) {
 template <typename T, int Dims>
 using Buffer = nb::ndarray<T, nb::ndim<Dims>, nb::c_contig, nb::device::cpu>;
 
+/** A shared map from a CatanMap, a MapSpec or its dict. */
+std::shared_ptr<const CatanMap> map_from_python(nb::handle value) {
+    if (nb::isinstance<CatanMap>(value)) {
+        return nb::cast<std::shared_ptr<const CatanMap>>(value);
+    }
+    nb::object module = nb::module_::import_("cppanatron._core");
+    return nb::cast<std::shared_ptr<const CatanMap>>(module.attr("CatanMap").attr("from_spec")(value));
+}
+
+GameStart game_start(const nb::dict& game) {
+    for (auto [key, value] : game) {
+        (void)value;
+        const std::string name = nb::cast<std::string>(key);
+        if (name != "env" && name != "map" && name != "game_seed" && name != "seats" &&
+            name != "bot_seed" && name != "scenario" && name != "lineup_slots") {
+            throw std::invalid_argument("unknown scheduled game field " + name);
+        }
+    }
+    for (const char* required : {"env", "map", "game_seed", "seats"}) {
+        if (!game.contains(required)) {
+            throw std::invalid_argument(std::string("a scheduled game needs ") + required);
+        }
+    }
+    GameStart start;
+    start.env = nb::cast<int>(game["env"]);
+    start.map = map_from_python(game["map"]);
+    start.game_seed = nb::cast<std::uint64_t>(game["game_seed"]);
+    for (const SeatSpec& seat : nb::cast<std::vector<SeatSpec>>(game["seats"])) {
+        start.seats.push_back(seat_kind(seat));
+    }
+    if (game.contains("bot_seed")) {
+        start.bot_seed = nb::cast<std::uint64_t>(game["bot_seed"]);
+    }
+    if (game.contains("scenario")) {
+        start.scenario = nb::cast<int>(game["scenario"]);
+    }
+    if (game.contains("lineup_slots") && !game["lineup_slots"].is_none()) {
+        start.lineup_slots = nb::cast<std::vector<int>>(game["lineup_slots"]);
+    }
+    return start;
+}
+
 /** A VecEnv and the NumPy buffers it writes, which it keeps alive. */
 struct PyVecEnv {
     explicit PyVecEnv(VecEnvConfig config) : env(std::move(config)) {}
@@ -175,7 +217,7 @@ void bind_vec_env(nb::module_& module) {
             "__init__",
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
                std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
-               int num_threads, float vp_reward, bool encode_waiting) {
+               int num_threads, float vp_reward, bool encode_waiting, bool auto_reset) {
                 VecEnvConfig config;
                 if (!dims.has_value()) {
                     std::vector<std::shared_ptr<const CatanMap>> maps;
@@ -198,16 +240,21 @@ void bind_vec_env(nb::module_& module) {
                 config.num_threads = num_threads;
                 config.vp_reward = vp_reward;
                 config.encode_waiting = encode_waiting;
+                config.auto_reset = auto_reset;
                 new (self) PyVecEnv(std::move(config));
             },
             nb::arg("scenarios"), nb::kw_only(), nb::arg("num_envs") = 1,
             nb::arg("dims") = nb::none(), nb::arg("level") = InfoLevel::private_,
             nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
-            nb::arg("encode_waiting") = false,
+            nb::arg("encode_waiting") = false, nb::arg("auto_reset") = true,
             "``dims`` defaults to the smallest covering every scenario's maps and\n"
             "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
             "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
-            "wait (otherwise zeros with the no-op mask).")
+            "wait (otherwise zeros with the no-op mask).\n\n"
+            "``auto_reset=False`` is schedule mode, for evaluation: ``reset`` leaves\n"
+            "every env idle, ``start_games`` puts exact games (map, seeds, seats) into\n"
+            "idle envs, a finished env stays idle, and ``pop_finished`` reports how\n"
+            "each game ended. Pass ``dims`` covering the maps you will schedule.")
         .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
         .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
         .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })
@@ -228,7 +275,7 @@ void bind_vec_env(nb::module_& module) {
             [](PyVecEnv& self, nb::handle observations, nb::handle actions, nb::handle rewards,
                nb::handle terminals, nb::handle truncations, nb::handle acting,
                nb::handle learner, nb::handle seat, nb::handle env_index,
-               nb::handle num_players) {
+               nb::handle num_players, nb::handle lineup_slot) {
                 const std::size_t rows = self.env.num_rows();
                 VecEnvBuffers buffers;
                 buffers.observations = checked<float, 2>(
@@ -246,6 +293,10 @@ void bind_vec_env(nb::module_& module) {
                 buffers.num_players = checked<std::int32_t, 1>(
                     num_players, "num_players (int32)",
                     static_cast<std::size_t>(self.env.num_envs()));
+                if (!lineup_slot.is_none()) {
+                    buffers.lineup_slot =
+                        checked<std::int32_t, 1>(lineup_slot, "lineup_slot (int32)", rows);
+                }
                 self.env.bind(buffers);
                 nb::dict bound;
                 bound["observations"] = observations;
@@ -258,16 +309,21 @@ void bind_vec_env(nb::module_& module) {
                 bound["seat"] = seat;
                 bound["env_index"] = env_index;
                 bound["num_players"] = num_players;
+                if (!lineup_slot.is_none()) {
+                    bound["lineup_slot"] = lineup_slot;
+                }
                 self.buffers = bound;
             },
             nb::kw_only(), nb::arg("observations"), nb::arg("actions"), nb::arg("rewards"),
             nb::arg("terminals"), nb::arg("truncations"), nb::arg("acting"),
             nb::arg("learner"), nb::arg("seat"), nb::arg("env_index"),
-            nb::arg("num_players"),
+            nb::arg("num_players"), nb::arg("lineup_slot") = nb::none(),
             "Bind caller-owned arrays (no conversion; wrong dtypes raise):\n"
             "observations float32 [rows, observation_size], actions int32 [rows],\n"
             "rewards float32 [rows], terminals/truncations/acting/learner uint8 or\n"
-            "bool [rows], seat/env_index int32 [rows], num_players int32 [num_envs].")
+            "bool [rows], seat/env_index int32 [rows], num_players int32 [num_envs];\n"
+            "optionally lineup_slot int32 [rows] (who plays each row's seat, -1 for\n"
+            "padding).")
         .def(
             "allocate",
             [](nb::handle self) {
@@ -288,6 +344,7 @@ void bind_vec_env(nb::module_& module) {
                 arrays["seat"] = zeros(nb::make_tuple(rows), "int32");
                 arrays["env_index"] = zeros(nb::make_tuple(rows), "int32");
                 arrays["num_players"] = zeros(nb::make_tuple(env.env.num_envs()), "int32");
+                arrays["lineup_slot"] = zeros(nb::make_tuple(rows), "int32");
                 self.attr("bind")(**arrays);
                 return arrays;
             },
@@ -338,6 +395,95 @@ void bind_vec_env(nb::module_& module) {
             "seat_kinds",
             [](const PyVecEnv& self, int env_index) { return self.env.seat_kinds(env_index); },
             nb::arg("env_index"))
+        .def(
+            "start_games",
+            [](PyVecEnv& self, const std::vector<nb::dict>& games) {
+                std::vector<GameStart> starts;
+                for (const nb::dict& game : games) {
+                    starts.push_back(game_start(game));
+                }
+                nb::gil_scoped_release release;
+                self.env.start_games(starts);
+            },
+            nb::arg("games"),
+            "Schedule mode: start exact games in idle envs, in parallel. Each game is a\n"
+            "dict: ``env``, ``map`` (CatanMap, MapSpec or its dict), ``game_seed``,\n"
+            "``seats`` (SeatKind or 'learner'/'value'/'F'/'random'/'R' per seat),\n"
+            "and optionally ``bot_seed`` (0), ``scenario`` (0: players, rules, turn\n"
+            "limit) and ``lineup_slots`` (who plays each seat; default 0..n-1). Each\n"
+            "plays until a learner must decide (bots-only games play to the end).")
+        .def(
+            "start_game",
+            [](PyVecEnv& self, int env_index, nb::handle map, std::uint64_t game_seed,
+               std::vector<SeatSpec> seats, std::uint64_t bot_seed, int scenario,
+               std::optional<std::vector<int>> lineup_slots) {
+                GameStart start;
+                start.env = env_index;
+                start.scenario = scenario;
+                start.map = map_from_python(map);
+                start.game_seed = game_seed;
+                start.bot_seed = bot_seed;
+                for (const SeatSpec& seat : seats) {
+                    start.seats.push_back(seat_kind(seat));
+                }
+                start.lineup_slots = lineup_slots.value_or(std::vector<int>{});
+                nb::gil_scoped_release release;
+                self.env.start_games({start});
+            },
+            nb::arg("env_index"), nb::kw_only(), nb::arg("map"), nb::arg("game_seed"),
+            nb::arg("seats"), nb::arg("bot_seed") = 0, nb::arg("scenario") = 0,
+            nb::arg("lineup_slots") = nb::none(),
+            "Schedule mode: start one exact game (see start_games).")
+        .def(
+            "pop_finished",
+            [](PyVecEnv& self) {
+                nb::list result;
+                for (const FinishedGame& game : self.env.pop_finished()) {
+                    nb::dict row;
+                    row["env"] = game.env;
+                    row["scenario"] = game.scenario;
+                    row["game_seed"] = game.game_seed;
+                    row["bot_seed"] = game.bot_seed;
+                    row["seats"] = nb::cast(game.seats);
+                    row["lineup_slots"] = nb::cast(game.lineup_slots);
+                    row["winner"] = game.winner;
+                    row["winner_slot"] =
+                        game.winner < 0
+                            ? -1
+                            : game.lineup_slots[static_cast<std::size_t>(game.winner)];
+                    row["turns"] = game.turns;
+                    row["truncated"] = game.truncated;
+                    row["stuck"] = game.stuck;
+                    row["decisions"] = nb::cast(game.decisions);
+                    result.append(row);
+                }
+                return result;
+            },
+            "Schedule mode: games finished since the last call, by env: ``env``,\n"
+            "``scenario``, ``game_seed``, ``bot_seed``, ``seats``, ``lineup_slots``,\n"
+            "``winner`` (seat, -1 if truncated) and ``winner_slot``, ``turns``,\n"
+            "``truncated``, ``stuck`` and learner ``decisions`` per seat.")
+        .def(
+            "active", [](const PyVecEnv& self, int env_index) { return self.env.active(env_index); },
+            nb::arg("env_index"), "Whether the env holds a game (always, outside schedule mode).")
+        .def(
+            "idle_envs",
+            [](const PyVecEnv& self) {
+                std::vector<int> idle;
+                for (int env = 0; env < self.env.num_envs(); ++env) {
+                    if (!self.env.active(env)) {
+                        idle.push_back(env);
+                    }
+                }
+                return idle;
+            },
+            "Schedule mode: envs without a game, ready for start_games.")
+        .def(
+            "lineup_slots",
+            [](const PyVecEnv& self, int env_index) { return self.env.lineup_slots(env_index); },
+            nb::arg("env_index"),
+            "Who plays each seat of the env's game: the scheduled lineup slots, or\n"
+            "positions in the scenario's seat list for auto-reset games.")
         .def(
             "game_seed",
             [](const PyVecEnv& self, int env_index) { return self.env.game_seed(env_index); },

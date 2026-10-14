@@ -6,12 +6,14 @@
 #include <string>
 #include <vector>
 
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include "cppanatron/graph_action_space.hpp"
 #include "cppanatron/graph_dims.hpp"
+#include "cppanatron/graph_encoder.hpp"
 
 namespace cppanatron::python {
 namespace {
@@ -29,6 +31,24 @@ nb::dict action_layout(const GraphActionSpace& space) {
         span(space.robber_offset(), nb::make_tuple(dims.max_tiles, dims.max_players));
     result["noop"] = span(space.noop(), nb::make_tuple(1));
     return result;
+}
+
+nb::dict encoder_layout(const GraphEncoder& encoder) {
+    nb::dict result;
+    for (const auto& block : encoder.layout()) {
+        nb::list shape;
+        for (std::size_t extent : block.shape) {
+            shape.append(extent);
+        }
+        result[block.name.c_str()] = span(block.offset, nb::tuple(shape));
+    }
+    return result;
+}
+
+void check_observer(const Game& game, int observer) {
+    if (observer < 0 || static_cast<std::size_t>(observer) >= game.colors().size()) {
+        throw std::out_of_range("observer is not a seat of this game");
+    }
 }
 
 }  // namespace
@@ -117,6 +137,70 @@ void bind_graph(nb::module_& module) {
                 return names;
             },
             "A readable name for every index.");
+
+    nb::enum_<InfoLevel>(
+        module, "InfoLevel",
+        "What an encoded seat sees of the others: PRIVATE (its own hand and the\n"
+        "table), PUBLIC (plus everyone's resource hands), FULL (plus development\n"
+        "cards and actual victory points).")
+        .value("PRIVATE", InfoLevel::private_)
+        .value("PUBLIC", InfoLevel::public_)
+        .value("FULL", InfoLevel::full);
+
+    nb::class_<GraphEncoder>(
+        module, "GraphEncoder",
+        "Seat-relative graph observations padded to EncoderDims. A row is\n"
+        "[global | players | tiles | nodes | edges | edge_nodes | tile_nodes |\n"
+        "action_mask]; layout() gives every block's (offset, shape) and\n"
+        "feature_names(block) the per-slot features. The mask block is the\n"
+        "action space's mask for the seat to act and the no-op for the others.")
+        .def(nb::init<EncoderDims, InfoLevel>(), nb::arg("dims"),
+             nb::arg("level") = InfoLevel::private_)
+        .def_prop_ro("size", &GraphEncoder::size)
+        .def("__len__", &GraphEncoder::size)
+        .def_prop_ro("dims", &GraphEncoder::dims)
+        .def_prop_ro("level", &GraphEncoder::level)
+        .def_prop_ro(
+            "action_space", [](const GraphEncoder& encoder) { return encoder.action_space(); },
+            "The GraphActionSpace whose mask ends each row.")
+        .def("layout", &encoder_layout, "``{block: (offset, shape)}`` in row order.")
+        .def(
+            "feature_names",
+            [](const GraphEncoder& encoder, std::optional<std::string> block) -> nb::object {
+                if (block.has_value()) {
+                    return nb::cast(encoder.feature_names(*block));
+                }
+                nb::dict result;
+                for (const char* name : {"global", "players", "tiles", "nodes", "edges"}) {
+                    result[name] = nb::cast(encoder.feature_names(name));
+                }
+                return result;
+            },
+            nb::arg("block") = nb::none(),
+            "Per-slot feature names of one block, or a dict of every block's.")
+        .def(
+            "encode",
+            [](const GraphEncoder& encoder, const Game& game, int observer) {
+                check_observer(game, observer);
+                std::vector<float> row(encoder.size());
+                {
+                    nb::gil_scoped_release release;
+                    encoder.encode(game, observer, row);
+                }
+                return to_numpy(std::move(row));
+            },
+            nb::arg("game"), nb::arg("observer"),
+            "A fresh float32 row for seat ``observer`` (an index into game.colors).")
+        .def(
+            "encode_into",
+            [](const GraphEncoder& encoder, const Game& game, int observer,
+               OutputVector<float> out) {
+                check_observer(game, observer);
+                nb::gil_scoped_release release;
+                encoder.encode(game, observer, std::span<float>(out.data(), out.shape(0)));
+            },
+            nb::arg("game"), nb::arg("observer"), nb::arg("out").noconvert(),
+            "Write the row into a caller-owned float32 buffer of size ``size``.");
 }
 
 }  // namespace cppanatron::python

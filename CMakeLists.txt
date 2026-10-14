@@ -12,6 +12,7 @@ add_library(cppanatron
     src/action_space.cpp
     src/graph_dims.cpp
     src/graph_action_space.cpp
+    src/graph_encoder.cpp
     src/value_player.cpp
     src/observation.cpp
     src/batch.cpp

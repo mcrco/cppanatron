@@ -73,6 +73,16 @@ slot, a robber move per tile and relative victim seat, and a final no-op for
 waiting seats. `index`, `decode`, `mask` and `layout()` work on any map within
 the dims; domestic trades are outside it.
 
+`cpp.GraphEncoder(dims, cpp.InfoLevel.PRIVATE)` writes one float32 row per
+(game, seat), relative to that seat and padded to the dims: `[global | players
+| tiles | nodes | edges | edge_nodes | tile_nodes | action_mask]`, where the
+topology blocks hold node slots (-1 padding) and the mask is the action
+space's for the seat to act (only the no-op for the others). `layout()` maps
+each block to `(offset, shape)`, `feature_names()` names every per-slot
+feature, and the header documents them. `PUBLIC` adds opponents' resource
+hands and `FULL` their development cards and actual victory points; tests
+check that hidden changes leave lower levels' rows unchanged.
+
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
 the observation layout of Catanatron's board tensor. Stock Catanatron takes

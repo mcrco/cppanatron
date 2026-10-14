@@ -256,13 +256,11 @@ void VecEnv::step() {
 }
 
 void VecEnv::start_game(Env& env) {
-    const std::vector<double> weights = [this] {
-        std::vector<double> result;
-        for (const Scenario& scenario : config_.scenarios) {
-            result.push_back(scenario.weight);
-        }
-        return result;
-    }();
+    std::vector<double> weights;
+    weights.reserve(config_.scenarios.size());
+    for (const Scenario& scenario : config_.scenarios) {
+        weights.push_back(scenario.weight);
+    }
     env.scenario = std::discrete_distribution<int>(weights.begin(), weights.end())(env.random);
     const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(env.scenario)];
 

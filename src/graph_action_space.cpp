@@ -184,6 +184,7 @@ Action GraphActionSpace::decode(const Game& game, std::size_t index) const {
                 }
                 position -= row;
             }
+            throw std::logic_error("year of plenty index out of range");
         }
         const std::size_t position = index - kMaritimeTrade;
         const std::size_t pair = position / kTradeRatios.size();

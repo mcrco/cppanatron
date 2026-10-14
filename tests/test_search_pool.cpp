@@ -505,6 +505,60 @@ void test_edge_cases() {
 
 }  // namespace
 
+/**
+ * Friendly robber: the root player's robber options depend on others' VP
+ * cards. Determinized roots must offer exactly the real options, also when
+ * the tracker is misled and no world can.
+ */
+void test_determinized_roots_offer_the_real_options() {
+    GameRules rules;
+    rules.friendly_robber = true;
+    auto players = random_placements(4, 31);
+    players[0].development_cards = {1, 0, 0, 0, 0};
+    players[1].development_cards = {0, 0, 0, 0, 1};  // 2 public points, 3 actual: robbable
+    players[2].development_cards = {1, 0, 0, 0, 0};
+    Game game(seats(4), MapType::base, 31, rules);
+    GameSetup setup;
+    setup.players = players;
+    game.apply_setup(setup);
+    const Game before = game;
+    const Action knight{Color::red, ActionType::play_knight_card, std::monostate{}};
+    game.execute(knight);
+
+    HandTracker informed(before, 0);
+    informed.observe(before, knight, game);
+    // Misled: it believes seat 1 holds no VP card, so every world spares seat 1.
+    HandTracker misled(before, 0);
+    for (const auto& event : HandTracker::events(before, knight, game, 0)) {
+        if (event.type != TrackerEventType::victory_point_cards) {
+            misled.apply(event);
+        }
+    }
+    misled.apply(TrackerEvent::victory_point_cards(1, 0, 0));
+
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    std::vector<std::uint8_t> legal(codec->size());
+    codec->mask(game, legal);
+    for (const HandTracker* tracker : {&informed, &misled}) {
+        SearchConfig config;
+        config.simulations = 64;
+        config.max_players = 4;
+        config.determinizations = 4;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 3, tracker);
+        run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+            hashed_logits(leaf, logits);
+            std::fill(values.begin(), values.end(), 0.25F);
+        });
+        const auto visits = pool.visits(id);
+        for (std::size_t i = 0; i < visits.size(); ++i) {
+            require(visits[i] == 0 || legal[i] != 0, "determinized roots only search real options");
+        }
+        require(legal[pool.select(id)] != 0, "the chosen move is legal in the real game");
+        require(std::accumulate(visits.begin(), visits.end(), 0U) == 64, "every simulation ran");
+    }
+}
+
 int main() {
     try {
         test_two_player_matches_mcts_search();
@@ -513,6 +567,7 @@ int main() {
         test_determinized_search_ignores_hidden_truth();
         test_parallel_and_batched_runs_agree();
         test_edge_cases();
+        test_determinized_roots_offer_the_real_options();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

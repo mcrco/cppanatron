@@ -23,6 +23,8 @@ namespace {
 constexpr std::uint32_t kNone = std::numeric_limits<std::uint32_t>::max();
 constexpr std::size_t kMaxSeats = kColors.size();
 constexpr double kTiny = 1e-12;
+/** Samples tried per determinized root world before settling for a partial one. */
+constexpr int kWorldAttempts = 64;
 /** Log-priors of masked-out or underflowed actions, for Gumbel scores. */
 constexpr double kMinLogPrior = -69.0;
 
@@ -314,6 +316,11 @@ struct Search {
     int players{};
     int root_player{};
     bool determinized{};
+    /**
+     * Determinized roots: the real game's legal actions (the root player
+     * knows its own options), to which every world's root is restricted.
+     */
+    std::vector<std::uint8_t> root_mask;
     std::vector<Tree> worlds;
     /** World of each simulation, cyclically; merged samples appear repeatedly. */
     std::vector<std::uint32_t> schedule;
@@ -576,11 +583,18 @@ struct SearchPool::Impl {
              kNone});
     }
 
-    void expand(Tree& tree, std::uint32_t node, std::span<const float> logits) const {
+    void expand(
+        Tree& tree, std::uint32_t node, std::span<const float> logits,
+        const std::vector<std::uint8_t>* restrict_to = nullptr) const {
         thread_local std::vector<std::uint8_t> mask;
         mask.assign(codec->size(), 0);
         Node& target = tree.nodes[node];
         codec->mask(*target.game, mask);
+        if (restrict_to != nullptr && !restrict_to->empty()) {
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                mask[i] &= (*restrict_to)[i];
+            }
+        }
         std::vector<std::uint32_t> legal;
         double top = -std::numeric_limits<double>::infinity();
         for (std::uint32_t i = 0; i < mask.size(); ++i) {
@@ -1042,7 +1056,7 @@ struct SearchPool::Impl {
             absolute[static_cast<std::size_t>((node.to_play + slot) % search.players)] =
                 std::clamp(static_cast<double>(value), 0.0, 1.0);
         }
-        expand(tree, leaf.node, logits);
+        expand(tree, leaf.node, logits, leaf.node == 0 ? &search.root_mask : nullptr);
         if (config.release_games && leaf.node != 0) {
             tree.nodes[leaf.node].game.reset();
         }
@@ -1237,6 +1251,7 @@ struct SearchPool::Impl {
             search.worlds[w] = extract(search.worlds[w], children[w]);
         }
         search.root_player = search.worlds.front().nodes.front().to_play;
+        search.root_mask.clear();
         search.started = 0;
         search.completed = 0;
         search.done = false;
@@ -1452,8 +1467,34 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
                 throw std::invalid_argument("the tracker must follow the player to move");
             }
             search->determinized = true;
+            // The root player knows its own options; they can depend on hidden
+            // cards (the friendly robber spares seats under 3 actual points).
+            // Prefer worlds that offer every real option, and search only those.
+            const auto mask_of = [&](const Game& world) {
+                std::vector<std::uint8_t> mask(impl_->codec->size());
+                impl_->codec->mask(world, mask);
+                return mask;
+            };
+            search->root_mask = mask_of(game);
+            const auto covers = [&](const std::vector<std::uint8_t>& mask) {
+                for (std::size_t i = 0; i < mask.size(); ++i) {
+                    if (search->root_mask[i] != 0 && mask[i] == 0) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            std::vector<std::uint8_t> common = search->root_mask;
             for (int k = 0; k < impl_->config.determinizations; ++k) {
                 Game world = sample_world(game, *tracker, search->rng);
+                auto mask = mask_of(world);
+                for (int attempt = 1; attempt < kWorldAttempts && !covers(mask); ++attempt) {
+                    world = sample_world(game, *tracker, search->rng);
+                    mask = mask_of(world);
+                }
+                for (std::size_t i = 0; i < common.size(); ++i) {
+                    common[i] &= mask[i];
+                }
                 const auto same = std::find_if(worlds.begin(), worlds.end(), [&](const Game& other) {
                     return same_hidden_state(other, world);
                 });
@@ -1464,6 +1505,10 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
                     worlds.push_back(std::move(world));
                 }
             }
+            if (std::none_of(common.begin(), common.end(), [](std::uint8_t legal) { return legal != 0; })) {
+                throw std::invalid_argument("no sampled world allows any of the real legal actions");
+            }
+            search->root_mask = std::move(common);
         } else {
             worlds.push_back(game);
             search->schedule.push_back(0);

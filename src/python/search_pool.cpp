@@ -207,7 +207,10 @@ void bind_search_pool(nb::module_& module) {
             nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(),
             "Start a search for ``game``'s player to move; returns its id. With\n"
             "determinizations the root worlds are sampled from ``tracker``, which\n"
-            "must follow that player. A finished game's search is done at once.")
+            "must follow that player, and the root offers exactly ``game``'s legal\n"
+            "actions (the player's own knowledge): worlds that do not offer them all\n"
+            "are resampled, and every root is restricted to them. A finished game's\n"
+            "search is done at once.")
         .def(
             "collect",
             [](SearchPool& pool, OutputMatrix<float> observations, OutputVector<std::int64_t> ids) {

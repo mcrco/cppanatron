@@ -35,6 +35,11 @@ enum class TrackerEventType : std::uint8_t {
      * holds enough victory point cards to have won yet.
      */
     public_victory_points,
+    /**
+     * `player` holds at least `amounts[0]` and at most `amounts[1]` victory
+     * point cards (for example, learned from friendly-robber options).
+     */
+    victory_point_cards,
 };
 
 /**
@@ -63,6 +68,7 @@ struct TrackerEvent {
     [[nodiscard]] static TrackerEvent play_development_card(int player, DevelopmentCard card);
     [[nodiscard]] static TrackerEvent end_turn(int player);
     [[nodiscard]] static TrackerEvent public_victory_points(std::vector<int> points);
+    [[nodiscard]] static TrackerEvent victory_point_cards(int player, int at_least, int at_most);
 
     auto operator<=>(const TrackerEvent&) const = default;
 };
@@ -116,6 +122,15 @@ public:
      */
     [[nodiscard]] static std::vector<TrackerEvent> events(
         const Game& before, const Action& action, const Game& after, int observer);
+    /**
+     * What the observer's own legal actions in `game` (where it is to move)
+     * reveal. With the friendly robber, Catanatron protects tiles of seats
+     * under 3 actual points, so the robber options bound other seats'
+     * victory point cards. `legal` is the observer's legal action list (a
+     * view's game may not reproduce it); `game` supplies the public board.
+     */
+    [[nodiscard]] static std::vector<TrackerEvent> option_events(
+        const Game& game, const std::vector<Action>& legal, int observer);
 
     void gain(int player, const std::array<int, 5>& cards);
     void lose(int player, const std::array<int, 5>& cards);
@@ -134,6 +149,8 @@ public:
     void end_turn(int player);
     /** The game goes on at these public victory points (see public_victory_points). */
     void public_victory_points(const std::vector<int>& points);
+    /** Apply option_events(game, legal, observer()). */
+    void observe_options(const Game& game, const std::vector<Action>& legal);
 
     [[nodiscard]] int hand_size(int seat) const;
     /** Lower bound per resource; the exact hand for the observer. */
@@ -156,6 +173,8 @@ public:
     [[nodiscard]] int bought_this_turn(int seat) const;
     /** The most victory point cards `seat` can hold, from the game's history. */
     [[nodiscard]] int victory_point_card_cap(int seat) const;
+    /** The fewest victory point cards `seat` can hold (they are never played). */
+    [[nodiscard]] int victory_point_card_floor(int seat) const;
 
     /**
      * Expected hand: known cards plus the unknown cards' share of the
@@ -199,6 +218,7 @@ private:
     std::vector<int> bought_this_turn_;
     /** Victory point cards each seat can hold at most (before capping by its card count). */
     std::vector<int> victory_point_caps_;
+    std::vector<int> victory_point_floors_;
 };
 
 /**
@@ -210,7 +230,7 @@ private:
  * random deal of the unknown pool to the unknown slots; their development
  * cards are a uniformly random deal of the unseen cards, conditioned on no
  * seat holding more victory point cards than its cap (so nobody could have
- * won already, now or earlier); the rest is
+ * won already, now or earlier) or fewer than its floor; the rest is
  * the deck, reshuffled, and the game's random stream is reseeded from `rng`.
  *
  * The deal is the exact posterior if every unknown card were equally likely

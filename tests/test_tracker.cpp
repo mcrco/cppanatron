@@ -515,6 +515,39 @@ void test_victory_point_cap_history() {
     require(buying.victory_point_card_cap(0) == 1, "a new card may be a VP card");
 }
 
+/**
+ * Friendly robber: the observer's robber options reveal which seats are
+ * under 3 actual points. Seat 1 shows 2 points but holds a VP card.
+ */
+void test_friendly_robber_options_bound_victory_point_cards() {
+    GameRules rules;
+    rules.friendly_robber = true;
+    Game game = positioned(4, 31, rules, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        players[0].development_cards = {1, 0, 0, 0, 0};
+        players[1].development_cards = {0, 0, 0, 0, 1};
+        players[2].development_cards = {1, 0, 0, 0, 0};
+    });
+    HandTracker tracker(game, 0);
+    require(tracker.victory_point_card_floor(1) == 0, "nothing known before the robber moves");
+    const Game before = game;
+    const Action knight{Color::red, ActionType::play_knight_card, std::monostate{}};
+    game.execute(knight);
+    tracker.observe(before, knight, game);
+    require(tracker.consistent_with(game), "the bounds hold for the truth");
+    require(tracker.victory_point_card_floor(1) == 1, "seat 1 is robbable, so it holds a VP card");
+    require(tracker.victory_point_card_cap(2) == 0, "seat 2 is spared, so it holds none");
+    std::mt19937_64 rng(5);
+    for (int i = 0; i < 100; ++i) {
+        const Game world = sample_world(game, tracker, rng);
+        require(world.players()[1].development_cards[4] == 1, "samples give seat 1 its VP card");
+        require(world.playable_actions() == game.playable_actions(), "samples offer the real robber moves");
+    }
+    // A tracker started at the robber prompt reads the same options.
+    const HandTracker late(game, 0);
+    require(late.victory_point_card_floor(1) == 1 && late.victory_point_card_cap(2) == 0,
+            "a new tracker reads its options too");
+}
+
 int main() {
     try {
         test_tracker_follows_random_games();
@@ -524,6 +557,7 @@ int main() {
         test_steal_and_monopoly_events();
         test_self_confirmed_trade();
         test_victory_point_cap_history();
+        test_friendly_robber_options_bound_victory_point_cards();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

@@ -137,6 +137,12 @@ public:
      * the root worlds are sampled from `tracker`, which must follow the
      * player to move; without them the tracker is ignored. A finished game
      * gives a search that is done at once, with no visits.
+     *
+     * Determinized roots offer exactly the legal actions `game` gives its
+     * player to move, which that player knows even where they depend on
+     * hidden cards (the friendly robber): worlds that do not offer them all
+     * are resampled (a bounded number of times), and every root is
+     * restricted to the real options the worlds share.
      */
     std::int64_t add(const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr);
 

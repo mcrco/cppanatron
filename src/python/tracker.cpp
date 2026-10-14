@@ -36,7 +36,11 @@ void bind_tracker(nb::module_& module) {
         .value(
             "PUBLIC_VICTORY_POINTS", TrackerEventType::public_victory_points,
             "The game goes on with public victory points ``amounts[seat]``: nobody\n"
-            "holds enough victory point cards to have won.");
+            "holds enough victory point cards to have won.")
+        .value(
+            "VICTORY_POINT_CARDS", TrackerEventType::victory_point_cards,
+            "``player`` holds between ``amounts[0]`` and ``amounts[1]`` victory point\n"
+            "cards (from the observer's friendly-robber options).");
 
     nb::class_<TrackerEvent>(
         module, "TrackerEvent",
@@ -68,6 +72,9 @@ void bind_tracker(nb::module_& module) {
             nb::arg("card"))
         .def_static("end_turn", &TrackerEvent::end_turn, nb::arg("player"))
         .def_static("public_victory_points", &TrackerEvent::public_victory_points, nb::arg("points"))
+        .def_static(
+            "victory_point_cards", &TrackerEvent::victory_point_cards, nb::arg("player"),
+            nb::arg("at_least"), nb::arg("at_most"))
         .def(nb::self == nb::self)
         .def("__repr__", [](const TrackerEvent& event) {
             return nb::str("TrackerEvent({!r}, player={}, other={}, cards={!r}, resource={!r}, "
@@ -110,6 +117,16 @@ void bind_tracker(nb::module_& module) {
         .def_static(
             "events", &HandTracker::events, nb::arg("before"), nb::arg("action"), nb::arg("after"),
             nb::arg("observer"), "The events ``observe`` would apply for ``observer``.")
+        .def_static(
+            "option_events", &HandTracker::option_events, nb::arg("game"), nb::arg("legal"),
+            nb::arg("observer"),
+            "What the observer's legal actions ``legal`` reveal where it is to move in\n"
+            "``game`` (public board): with the friendly robber, which seats are under\n"
+            "3 actual points, i.e. bounds on their victory point cards.")
+        .def(
+            "observe_options", &HandTracker::observe_options, nb::arg("game"), nb::arg("legal"),
+            "Apply ``option_events(game, legal, observer)``; ``observe`` does this itself.\n"
+            "Pass the legal actions the server offered when ``game`` is a rebuilt view.")
         .def(
             "apply", &HandTracker::apply, nb::arg("event"),
             "Apply one event. Impossible events raise and change nothing.")
@@ -179,6 +196,9 @@ void bind_tracker(nb::module_& module) {
         .def(
             "victory_point_card_cap", &HandTracker::victory_point_card_cap, nb::arg("seat"),
             "The most victory point cards ``seat`` can hold, given the game's history.")
+        .def(
+            "victory_point_card_floor", &HandTracker::victory_point_card_floor, nb::arg("seat"),
+            "The fewest victory point cards ``seat`` can hold (they are never played).")
         .def(
             "expected_resources",
             [](const HandTracker& tracker, int seat) { return to_tuple(tracker.expected_resources(seat)); },

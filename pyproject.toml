@@ -29,14 +29,17 @@ CPPANATRON_BUILD_PYTHON = "ON"
 CPPANATRON_BUILD_TESTS = "OFF"
 
 [tool.uv]
-# Rebuild the extension on `uv sync`/`uv run` whenever engine sources change.
+# Rebuild the extension on `uv sync`/`uv run` whenever engine sources change,
+# and after a commit, so build_info() reports the current git state.
 cache-keys = [
+    { git = { commit = true } },
     { file = "pyproject.toml" },
     { file = "CMakeLists.txt" },
     { file = "include/**/*.hpp" },
     { file = "src/**/*.cpp" },
     { file = "src/**/*.hpp" },
     { file = "python/**/*.py" },
+    { file = "cmake/*" },
 ]
 
 [tool.pytest.ini_options]

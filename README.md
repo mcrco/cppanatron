@@ -170,6 +170,11 @@ observations, rewards and flat action indices. Random streams differ across
 languages; replaying recorded outcomes must reproduce identical states. Map and
 in-game randomness use independent seeds.
 
+`cpp.build_info()` says how the loaded extension was built: the engine repo's
+git commit and whether tracked files were modified (recorded at every build;
+`uv sync`/`uv run` rebuild after a commit or an edit), the compiler, build
+type and flags, and the nanobind and Python versions.
+
 ## Build and test
 
 The C++ engine and its tests:

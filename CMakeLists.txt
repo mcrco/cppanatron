@@ -85,6 +85,7 @@ if(CPPANATRON_BUILD_PYTHON)
         src/python/maps.cpp
         src/python/graph.cpp
         src/python/vec_env.cpp
+        src/python/build_info.cpp
         src/python/game.cpp
         src/python/observation.cpp
         src/python/search.cpp
@@ -92,6 +93,22 @@ if(CPPANATRON_BUILD_PYTHON)
         src/python/search_pool.cpp
     )
     target_link_libraries(_core PRIVATE cppanatron::cppanatron)
+
+    # build_info(): compiler and flags at configure time, and the engine
+    # repo's git commit and dirty flag at every build, so a rebuild after a
+    # commit or an edit reports the current state.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" build_type_upper)
+    string(STRIP "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${build_type_upper}}" CPPANATRON_CXX_FLAGS)
+    set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    configure_file(cmake/build_config.h.in "${generated_dir}/cppanatron_build_config.h" @ONLY)
+    add_custom_target(cppanatron_git_info ALL
+        COMMAND "${CMAKE_COMMAND}" "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DOUTPUT=${generated_dir}/cppanatron_git.h"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/git_info.cmake"
+        BYPRODUCTS "${generated_dir}/cppanatron_git.h"
+        COMMENT "Recording the engine's git commit")
+    add_dependencies(_core cppanatron_git_info)
+    target_include_directories(_core PRIVATE "${generated_dir}")
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(_core PRIVATE -Wall -Wextra -Werror)
     endif()

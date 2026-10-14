@@ -18,6 +18,7 @@ namespace cppanatron::python {
 namespace nb = nanobind;
 
 void bind_types(nb::module_& module);
+void bind_build_info(nb::module_& module);
 void bind_maps(nb::module_& module);
 void bind_codecs(nb::module_& module);
 void bind_graph(nb::module_& module);

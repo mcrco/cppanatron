@@ -86,6 +86,8 @@ struct SearchStats {
     double mean_depth{};
     /** Tree storage without the games' own heap memory. */
     std::uint64_t tree_bytes{};
+    /** The worker thread this search runs on. */
+    std::uint32_t lane{};
 };
 
 /**

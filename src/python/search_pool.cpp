@@ -170,7 +170,8 @@ void bind_search_pool(nb::module_& module) {
         .def_ro("worlds", &SearchStats::worlds)
         .def_ro("max_depth", &SearchStats::max_depth)
         .def_ro("mean_depth", &SearchStats::mean_depth)
-        .def_ro("tree_bytes", &SearchStats::tree_bytes, "Tree storage excluding the games' heap.");
+        .def_ro("tree_bytes", &SearchStats::tree_bytes, "Tree storage excluding the games' heap.")
+        .def_ro("lane", &SearchStats::lane, "The worker thread the search runs on.");
 
     nb::class_<SearchPool>(
         module, "SearchPool",

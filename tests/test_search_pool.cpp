@@ -772,6 +772,31 @@ void test_failures_leave_the_pool_usable() {
     }
 }
 
+/** New searches go to the least loaded threads, whatever their ids. */
+void test_searches_spread_over_threads() {
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    SearchConfig config;
+    config.max_players = 2;
+    config.threads = 4;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    const Game game(seats(2), MapType::base, 1);
+    std::vector<std::int64_t> ids;
+    for (std::uint64_t seed = 0; seed < 8; ++seed) {
+        ids.push_back(pool.add(game, seed));
+    }
+    for (std::size_t i = 1; i < ids.size(); i += 2) {
+        pool.remove(ids[i]);  // empties every other thread
+    }
+    for (std::uint64_t seed = 8; seed < 12; ++seed) {
+        (void)pool.add(game, seed);
+    }
+    std::array<int, 4> load{};
+    for (const auto id : pool.ids()) {
+        ++load[pool.stats(id).lane];
+    }
+    require(load == std::array<int, 4>{2, 2, 2, 2}, "every thread runs two searches");
+}
+
 int main() {
     try {
         test_two_player_matches_mcts_search();
@@ -784,6 +809,7 @@ int main() {
         test_determinized_advance_refuses_drawn_outcomes();
         test_determinized_advance_refuses_monopoly();
         test_failures_leave_the_pool_usable();
+        test_searches_spread_over_threads();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

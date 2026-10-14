@@ -317,6 +317,8 @@ struct GumbelRoot {
 
 struct Search {
     std::int64_t id{};
+    /** The worker thread that always runs this search (allocator affinity). */
+    std::size_t lane{};
     std::mt19937_64 rng;
     int players{};
     int root_player{};
@@ -1175,7 +1177,7 @@ struct SearchPool::Impl {
             }
             std::vector<std::size_t> lanes(active.size());
             for (std::size_t i = 0; i < active.size(); ++i) {
-                lanes[i] = static_cast<std::size_t>(active[i]->id);
+                lanes[i] = active[i]->lane;
             }
             try {
                 workers->run(
@@ -1264,7 +1266,7 @@ struct SearchPool::Impl {
         rows_in_flight.swap(batch);
         std::vector<std::size_t> lanes(ranges.size());
         for (std::size_t task = 0; task < ranges.size(); ++task) {
-            lanes[task] = static_cast<std::size_t>(rows_in_flight[ranges[task].first].search->id);
+            lanes[task] = rows_in_flight[ranges[task].first].search->lane;
         }
         std::vector<std::uint8_t> applied(rows, 0);
         try {
@@ -1555,6 +1557,7 @@ struct SearchPool::Impl {
         result.simulations = search.simulations;
         result.evaluations = search.evaluations;
         result.worlds = static_cast<std::uint32_t>(search.worlds.size());
+        result.lane = static_cast<std::uint32_t>(search.lane);
         result.max_depth = search.max_depth;
         result.mean_depth = search.simulations == 0
             ? 0.0
@@ -1597,6 +1600,15 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
     }
     auto search = std::make_unique<Search>();
     search->id = impl_->next_id;
+    // The least loaded thread takes the new search (ids alone would leave
+    // threads idle once some of their searches finish).
+    std::vector<std::size_t> load(impl_->workers->threads());
+    for (const auto& [id, other] : impl_->searches) {
+        if (!other->done) {
+            ++load[other->lane];
+        }
+    }
+    search->lane = static_cast<std::size_t>(std::min_element(load.begin(), load.end()) - load.begin());
     search->rng.seed(seed);
     search->players = players;
     search->root_player = game.current_player_index();

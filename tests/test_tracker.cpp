@@ -174,6 +174,22 @@ void test_tracker_follows_random_games() {
  * Two games the observer cannot tell apart, played on with the same public
  * actions and dice, keep identical trackers.
  */
+void test_sample_world_refuses_finished_games() {
+    Game game(seats(2), MapType::base, 5);
+    std::mt19937_64 rng(5);
+    while (!game.winning_color().has_value()) {
+        game.execute(random_action(game, rng));
+    }
+    const HandTracker tracker(game, 0);
+    bool refused = false;
+    try {
+        (void)sample_world(game, tracker, rng);
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    require(refused, "sample_world must refuse a finished game");
+}
+
 void test_tracker_ignores_hidden_differences() {
     int compared = 0;
     for (int n = 3; n <= 4; ++n) {
@@ -555,6 +571,7 @@ int main() {
     try {
         test_tracker_follows_random_games();
         test_tracker_ignores_hidden_differences();
+        test_sample_world_refuses_finished_games();
         test_victory_point_cards_respect_the_target();
         test_samples_match_expected_hands();
         test_steal_and_monopoly_events();

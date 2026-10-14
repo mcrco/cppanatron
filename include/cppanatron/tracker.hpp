@@ -239,6 +239,10 @@ private:
  * do), so it is close to, not exactly, uniform over consistent worlds. When
  * the victory point condition rejects 1000 deals in a row, the victory point
  * cards go to the deck first instead (still consistent, no longer uniform).
+ *
+ * Throws std::invalid_argument for a finished game: nothing is left to
+ * decide, and its worlds would depend on whether the given game counts as
+ * won, which it only records through hidden victory point cards.
  */
 [[nodiscard]] Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64& rng);
 

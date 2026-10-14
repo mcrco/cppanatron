@@ -238,7 +238,7 @@ void bind_tracker(nb::module_& module) {
         "and the game's random stream is reseeded. This is the exact posterior if\n"
         "unknown cards were equally likely to be anywhere; it ignores evidence the\n"
         "tracker drops (which card a hidden steal likely took, what seats chose not\n"
-        "to do).");
+        "to do). Raises ValueError for a finished game.");
 }
 
 }  // namespace cppanatron::python

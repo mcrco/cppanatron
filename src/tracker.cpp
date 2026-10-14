@@ -839,6 +839,13 @@ bool HandTracker::consistent_with(const Game& truth) const {
 }
 
 Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64& rng) {
+    // In a game in progress everyone knows nobody has won, which caps every
+    // seat's victory point cards. Whether a game is over is public too, but
+    // a finished game's worlds would have to keep its winner, and the game
+    // object only says so through actual (hidden) points: refuse it.
+    if (game.winning_color().has_value()) {
+        throw std::invalid_argument("sample_world needs a game in progress, not a finished one");
+    }
     tracker.check_public(game);
     const int n = tracker.num_players();
     const int observer = tracker.observer();
@@ -873,16 +880,12 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
     for (std::size_t d = 0; d < 5; ++d) {
         unseen.insert(unseen.end(), static_cast<std::size_t>(unseen_counts[d]), static_cast<int>(d));
     }
-    const bool over = game.winning_color().has_value();
     std::vector<int> caps;
     for (int seat : others) {
-        int cap = tracker.victory_point_card_cap(seat);
-        if (!over) {
-            cap = std::min(
-                cap, game.victory_points_to_win() - 1 -
-                         game.players()[static_cast<std::size_t>(seat)].victory_points);
-        }
-        caps.push_back(cap);
+        caps.push_back(std::min(
+            tracker.victory_point_card_cap(seat),
+            game.victory_points_to_win() - 1 -
+                game.players()[static_cast<std::size_t>(seat)].victory_points));
     }
     std::vector<int> floors;
     for (int seat : others) {

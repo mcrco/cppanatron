@@ -1,6 +1,7 @@
 #include "cppanatron/vec_env.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -172,16 +173,19 @@ struct VecEnv::Env {
 };
 
 /**
- * Persistent workers that split a range of envs into one contiguous chunk per
- * thread; the calling thread runs the first chunk.
+ * Persistent workers that share a range of envs: each takes the next few
+ * (kGrain) from an atomic counter, so slow envs (bot seats, six players) do
+ * not leave other threads idle. The calling thread works too. Which thread
+ * steps an env never matters, since every env has its own random stream.
  */
 class VecEnv::ThreadPool {
 public:
-    explicit ThreadPool(int threads) {
+    static constexpr int kGrain = 4;
+
+    explicit ThreadPool(int threads) : errors_(static_cast<std::size_t>(threads)) {
         for (int index = 1; index < threads; ++index) {
             workers_.emplace_back([this, index] { work(index); });
         }
-        errors_.resize(static_cast<std::size_t>(threads));
     }
 
     ~ThreadPool() {
@@ -198,45 +202,63 @@ public:
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
+    /** Runs task(0..tasks-1) once each; rethrows the failure of the lowest task. */
     void run(int tasks, const std::function<void(int)>& task) {
         {
             const std::lock_guard lock(mutex_);
             task_ = &task;
             tasks_ = tasks;
+            next_.store(0, std::memory_order_relaxed);
             pending_ = static_cast<int>(workers_.size());
             ++generation_;
         }
         start_.notify_all();
-        run_chunk(0);
+        run_tasks(0);
         {
             std::unique_lock lock(mutex_);
             done_.wait(lock, [this] { return pending_ == 0; });
             task_ = nullptr;
         }
-        for (std::exception_ptr& error : errors_) {
-            if (error) {
-                std::exception_ptr first = error;
-                std::fill(errors_.begin(), errors_.end(), nullptr);
-                std::rethrow_exception(first);
+        const Failure* first = nullptr;
+        for (const Failure& failure : errors_) {
+            if (failure.error && (first == nullptr || failure.task < first->task)) {
+                first = &failure;
             }
+        }
+        if (first != nullptr) {
+            const std::exception_ptr error = first->error;
+            std::fill(errors_.begin(), errors_.end(), Failure{});
+            std::rethrow_exception(error);
         }
     }
 
 private:
-    void run_chunk(int index) {
-        const int threads = static_cast<int>(workers_.size()) + 1;
-        const int begin = tasks_ * index / threads;
-        const int end = tasks_ * (index + 1) / threads;
-        try {
-            for (int task = begin; task < end; ++task) {
-                (*task_)(task);
+    struct Failure {
+        int task{};
+        std::exception_ptr error;
+    };
+
+    void run_tasks(int thread) {
+        Failure& failure = errors_[static_cast<std::size_t>(thread)];
+        for (;;) {
+            const int begin = next_.fetch_add(kGrain, std::memory_order_relaxed);
+            if (begin >= tasks_) {
+                return;
             }
-        } catch (...) {
-            errors_[static_cast<std::size_t>(index)] = std::current_exception();
+            const int end = std::min(begin + kGrain, tasks_);
+            for (int task = begin; task < end; ++task) {
+                try {
+                    (*task_)(task);
+                } catch (...) {
+                    if (!failure.error || task < failure.task) {
+                        failure = {task, std::current_exception()};
+                    }
+                }
+            }
         }
     }
 
-    void work(int index) {
+    void work(int thread) {
         std::uint64_t seen = 0;
         for (;;) {
             {
@@ -247,7 +269,7 @@ private:
                 }
                 seen = generation_;
             }
-            run_chunk(index);
+            run_tasks(thread);
             {
                 const std::lock_guard lock(mutex_);
                 if (--pending_ == 0) {
@@ -258,12 +280,13 @@ private:
     }
 
     std::vector<std::thread> workers_;
-    std::vector<std::exception_ptr> errors_;
+    std::vector<Failure> errors_;
     std::mutex mutex_;
     std::condition_variable start_;
     std::condition_variable done_;
     const std::function<void(int)>* task_{};
     int tasks_{};
+    std::atomic<int> next_{0};
     int pending_{};
     std::uint64_t generation_{};
     bool stopping_{false};

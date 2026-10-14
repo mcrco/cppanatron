@@ -206,7 +206,7 @@ def test_truncation_at_the_turn_limit():
     assert stats["truncated"] == 1.0 and stats["length"] == 12
 
 
-@pytest.mark.parametrize("threads", [1, 4])
+@pytest.mark.parametrize("threads", [1, 4, 7])
 def test_runs_are_determined_by_the_seed(threads):
     def run(seed: int, num_threads: int) -> list[np.ndarray]:
         env = cpp.VecEnv(

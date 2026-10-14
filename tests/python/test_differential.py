@@ -18,7 +18,12 @@ from catanatron.players.value import ValueFunctionPlayer, base_fn  # noqa: E402
 
 import cppanatron as cpp  # noqa: E402
 from cppanatron.catanatron import from_catanatron_color, to_catanatron_action  # noqa: E402
-from cppanatron.parity import CHANCE_ACTIONS, Snapshot, new_game  # noqa: E402
+from cppanatron.parity import (  # noqa: E402
+    CHANCE_ACTIONS,
+    Snapshot,
+    catanatron_unsupported,
+    new_game,
+)
 from map_shapes import SHAPES  # noqa: E402
 
 GAMES_PER_CONFIGURATION = int(os.environ.get("CPPANATRON_PARITY_GAMES", "2"))
@@ -101,11 +106,18 @@ EXPLICIT_MAP_SEATS = {"MINI": 4, **{name: seats for name, (_, seats) in SHAPES.i
 )
 @pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
 def test_explicit_map_games_stay_in_lockstep(num_players, map_name, game_index):
+    """Template layouts play now; other shapes wait for Catanatron's per-map
+    graphs and run as soon as the installed Catanatron plays them."""
     seed = 5_000 + 1_000 * num_players + 97 * game_index + len(map_name)
+    spec = EXPLICIT_MAPS[map_name](seed)
+    reason = catanatron_unsupported(spec)
+    if reason is not None:
+        assert map_name not in ("BASE", "MINI", "TOURNAMENT"), reason
+        pytest.xfail(reason)
     play_in_lockstep(
         num_players,
         seed,
-        map_spec=EXPLICIT_MAPS[map_name](seed),
+        map_spec=spec,
         vps_to_win=8,
         resource_bank=(24,) * 5 if num_players > 4 else None,
     )

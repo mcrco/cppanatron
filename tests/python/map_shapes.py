@@ -1,13 +1,17 @@
-"""Hand-made explicit maps for tests: shapes no template produces.
+"""Explicit maps for tests: shapes no template produces.
 
-Each builder returns a MapSpec dict (the JSON shape) with terrain and numbers
-drawn from ``seed``, a water ring around the land and ports on some water
-tiles, each facing a land neighbor.
+Each builder returns a MapSpec dict (the JSON shape). The hand-made ones draw
+terrain and numbers from ``seed`` and put a water ring around the land with
+ports on some water tiles, each facing a land neighbor. The fixtures in
+``maps/`` were generated once by catanrl's ``catanrl.maps.generate(generator,
+seed)`` (both recorded in each file) and ignore ``seed``.
 """
 
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 
 RESOURCES = ["WOOD", "BRICK", "SHEEP", "WHEAT", "ORE"]
 NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12]
@@ -123,6 +127,11 @@ def bare(seed: int) -> dict:
     return build_spec(hexagon(1), seed, water=[])
 
 
+def generated(name: str) -> dict:
+    """A fixture map from ``maps/<name>.json``."""
+    return json.loads((Path(__file__).parent / "maps" / f"{name}.json").read_text())["spec"]
+
+
 #: name -> (builder, most players the board seats comfortably)
 SHAPES = {
     "big_hexagon": (big_hexagon, 6),
@@ -130,4 +139,10 @@ SHAPES = {
     "lake": (lake, 6),
     "islands": (islands, 4),
     "bare": (bare, 4),
+    # catanrl.maps: a radius-3 hexagon, the 30-tile 5-6 player board, an
+    # offset rectangle and a random island.
+    **{
+        name: (lambda seed, name=name: generated(name), 6)
+        for name in ("hexagon3", "extension", "rectangle", "blob")
+    },
 }

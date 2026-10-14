@@ -131,9 +131,19 @@ from catanatron.models.tiles import LandTile, Port, Water  # noqa: E402
 
 from cppanatron.catanatron import (  # noqa: E402
     catanatron_map_from_spec,
-    catanatron_map_graph,
     map_spec_from_catanatron,
 )
+from cppanatron.parity import catanatron_unsupported  # noqa: E402
+
+
+def land_graph(reference) -> dict[int, set[int]]:
+    """Node adjacency along the edges of a Catanatron map's land tiles."""
+    graph: dict[int, set[int]] = {}
+    for tile in reference.land_tiles.values():
+        for a, b in tile.edges.values():
+            graph.setdefault(a, set()).add(b)
+            graph.setdefault(b, set()).add(a)
+    return graph
 
 
 def assert_same_map(native: cpp.CatanMap, reference) -> None:
@@ -153,10 +163,12 @@ def assert_same_map(native: cpp.CatanMap, reference) -> None:
         else:
             assert isinstance(expected, Water) and tile.kind == cpp.TileKind.WATER
     assert native.land_nodes == reference.land_nodes
-    graph = catanatron_map_graph(reference)
-    assert sorted(native.land_edges) == sorted(tuple(sorted(e)) for e in graph.edges)
+    graph = land_graph(reference)
+    assert set(native.land_edges) == {
+        (a, b) for a, neighbors in graph.items() for b in neighbors if a < b
+    }
     for node in native.node_ids:
-        assert native.neighbors(node) == sorted(graph.neighbors(node))
+        assert native.neighbors(node) == sorted(graph[node])
 
 
 @pytest.mark.parametrize("map_type", TEMPLATES)
@@ -175,6 +187,7 @@ def test_template_graphs_match_catanatrons_static_graph(map_type):
     native = cpp.CatanMap.build(cpp.MapType[map_type], 11)
     static = STATIC_GRAPH.subgraph(native.land_nodes)
     assert sorted(native.land_edges) == sorted(tuple(sorted(e)) for e in static.edges)
+    assert catanatron_unsupported(native.spec()) is None
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))

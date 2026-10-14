@@ -692,4 +692,27 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
     }
 }
 
+ActorCriticEncoder::ActorCriticEncoder(EncoderDims dims, InfoLevel level, InfoLevel critic_level)
+    : actor_(dims, level), critic_(dims, critic_level), layout_(actor_.layout()) {
+    layout_.push_back(
+        {"critic_players", actor_.size(),
+         {static_cast<std::size_t>(dims.max_players), critic_.player_size()}});
+}
+
+void ActorCriticEncoder::encode(const Game& game, int observer, std::span<float> out) const {
+    if (out.size() != size()) {
+        throw std::invalid_argument("observation buffer must match the encoder size");
+    }
+    actor_.encode(game, observer, out.first(actor_.size()));
+    critic_.encode_players(game, observer, out.subspan(actor_.size()));
+}
+
+void ActorCriticEncoder::encode_waiting(std::span<float> out) const {
+    if (out.size() != size()) {
+        throw std::invalid_argument("observation buffer must match the encoder size");
+    }
+    actor_.encode_waiting(out.first(actor_.size()));
+    std::fill(out.begin() + static_cast<std::ptrdiff_t>(actor_.size()), out.end(), 0.0F);
+}
+
 }  // namespace cppanatron

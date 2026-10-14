@@ -121,7 +121,11 @@ computed on the env threads, for imitation learning.
 `critic_level=cpp.InfoLevel.FULL` (with, say, `level=PRIVATE`) appends a
 critic block to every encoded row: the players block at the critic's level,
 the only block the levels differ in. `env.layout()` gives its offset as
-`critic_players`; `GraphEncoder.encode_players` writes the same block.
+`critic_players`; `GraphEncoder.encode_players` writes the same block, and
+`cpp.ActorCriticEncoder(dims, level, critic_level)` (also `env.row_encoder`)
+writes whole rows, so a `SearchPool` built with it evaluates leaves exactly
+as the model was trained. With determinizations a leaf is a sampled world,
+whose (sampled) hidden cards a full-information critic block shows.
 
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds

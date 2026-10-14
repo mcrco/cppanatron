@@ -320,7 +320,8 @@ VecEnv::VecEnv(VecEnvConfig config)
       encoder_(config_.dims, config_.level),
       critic_encoder_(
           config_.critic_level.has_value()
-              ? std::optional<GraphEncoder>(std::in_place, config_.dims, *config_.critic_level)
+              ? std::optional<ActorCriticEncoder>(
+                    std::in_place, config_.dims, config_.level, *config_.critic_level)
               : std::nullopt),
       envs_(static_cast<std::size_t>(config_.num_envs)),
       pool_(std::make_unique<ThreadPool>(std::min(config_.num_threads, config_.num_envs))) {}
@@ -797,7 +798,6 @@ void VecEnv::write_rows(int env_index) {
     const Game* const game = env.game.get();
     const int num_players = game == nullptr ? 0 : static_cast<int>(game->colors().size());
     const int current = game == nullptr ? -1 : game->current_player_index();
-    const std::size_t actor_size = encoder_.size();
     const std::size_t stride = observation_size();
     buffers_.num_players[env_index] = num_players;
     for (int seat = 0; seat < max_players(); ++seat) {
@@ -814,20 +814,22 @@ void VecEnv::write_rows(int env_index) {
             buffers_.lineup_slot[index] =
                 present ? env.lineup_slots[static_cast<std::size_t>(seat)] : -1;
         }
-        float* const observation = buffers_.observations + index * stride;
-        const std::span<float> actor(observation, actor_size);
-        const std::span<float> critic(observation + actor_size, stride - actor_size);
+        const std::span<float> observation(buffers_.observations + index * stride, stride);
         const auto slot = static_cast<std::size_t>(seat);
         if (acts || (learns && config_.encode_waiting)) {
-            encoder_.encode(*game, seat, actor);
             if (critic_encoder_.has_value()) {
-                critic_encoder_->encode_players(*game, seat, critic);
+                critic_encoder_->encode(*game, seat, observation);
+            } else {
+                encoder_.encode(*game, seat, observation);
             }
             env.waiting_written[slot] = false;
         } else if (!env.waiting_written[slot]) {
             // Waiting and padded rows only change when a row stops acting.
-            encoder_.encode_waiting(actor);
-            std::fill(critic.begin(), critic.end(), 0.0F);
+            if (critic_encoder_.has_value()) {
+                critic_encoder_->encode_waiting(observation);
+            } else {
+                encoder_.encode_waiting(observation);
+            }
             env.waiting_written[slot] = true;
         }
     }

@@ -210,10 +210,10 @@ public:
     }
     /** Row size: the encoder's, plus the critic block when critic_level is set. */
     [[nodiscard]] std::size_t observation_size() const noexcept {
-        return encoder_.size() + (critic_encoder_.has_value() ? critic_encoder_->players_size() : 0);
+        return critic_encoder_.has_value() ? critic_encoder_->size() : encoder_.size();
     }
-    /** The critic block's encoder (players block at critic_level), if any. */
-    [[nodiscard]] const GraphEncoder* critic_encoder() const noexcept {
+    /** The encoder of whole rows when critic_level is set (actor row + critic block). */
+    [[nodiscard]] const ActorCriticEncoder* critic_encoder() const noexcept {
         return critic_encoder_.has_value() ? &*critic_encoder_ : nullptr;
     }
 
@@ -290,7 +290,7 @@ private:
 
     VecEnvConfig config_;
     GraphEncoder encoder_;
-    std::optional<GraphEncoder> critic_encoder_;
+    std::optional<ActorCriticEncoder> critic_encoder_;
     std::vector<Env> envs_;
     std::unique_ptr<ThreadPool> pool_;
     VecEnvBuffers buffers_{};

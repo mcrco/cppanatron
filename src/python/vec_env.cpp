@@ -282,14 +282,10 @@ void bind_vec_env(nb::module_& module) {
         .def(
             "layout",
             [](const PyVecEnv& self) {
-                nb::dict result = nb::cast<nb::dict>(
-                    nb::cast(self.env.encoder()).attr("layout")());
-                if (const GraphEncoder* critic = self.env.critic_encoder()) {
-                    result["critic_players"] = nb::make_tuple(
-                        self.env.encoder().size(),
-                        nb::make_tuple(self.env.max_players(), critic->player_size()));
+                if (const ActorCriticEncoder* rows = self.env.critic_encoder()) {
+                    return nb::cast<nb::dict>(nb::cast(*rows).attr("layout")());
                 }
-                return result;
+                return nb::cast<nb::dict>(nb::cast(self.env.encoder()).attr("layout")());
             },
             "``{block: (offset, shape)}`` of a row: the encoder's blocks, then\n"
             "``critic_players`` (max_players x player features at critic_level) when\n"
@@ -297,6 +293,17 @@ void bind_vec_env(nb::module_& module) {
         .def_prop_ro(
             "encoder", [](const PyVecEnv& self) { return self.env.encoder(); },
             "A copy of the env's GraphEncoder (layout, feature names, action space).")
+        .def_prop_ro(
+            "row_encoder",
+            [](const PyVecEnv& self) -> nb::object {
+                if (const ActorCriticEncoder* rows = self.env.critic_encoder()) {
+                    return nb::cast(*rows);
+                }
+                return nb::cast(self.env.encoder());
+            },
+            "A copy of the encoder that writes whole rows: an ActorCriticEncoder with\n"
+            "a critic_level, else the GraphEncoder. Give it to SearchPool so leaves\n"
+            "match training rows.")
         .def_prop_ro(
             "buffers", [](const PyVecEnv& self) { return self.buffers; },
             "The bound arrays by name.")

@@ -205,4 +205,41 @@ private:
     std::size_t size_{};
 };
 
+/**
+ * Rows for asymmetric actor/critic models, laid out exactly like VecEnv rows
+ * with a critic_level: the actor's GraphEncoder row (action mask included)
+ * followed by the critic block, the players block encoded at critic_level
+ * (`critic_players`, max_players x player features). The information levels
+ * differ in the players block alone, so the actor row with that block
+ * swapped in is the critic's full input.
+ *
+ * Used as SearchPool's encoder, leaves match training rows. With
+ * determinizations, a leaf is a sampled world, so a FULL critic block shows
+ * that world's sampled hidden cards: the intended behaviour of perfect-
+ * information Monte Carlo, which evaluates every world as if it were true.
+ */
+class ActorCriticEncoder final : public ObservationEncoder {
+public:
+    ActorCriticEncoder(EncoderDims dims, InfoLevel level, InfoLevel critic_level);
+
+    [[nodiscard]] std::size_t size() const noexcept override {
+        return actor_.size() + critic_.players_size();
+    }
+    void encode(const Game& game, int observer, std::span<float> out) const override;
+
+    [[nodiscard]] const GraphEncoder& actor() const noexcept { return actor_; }
+    [[nodiscard]] const GraphEncoder& critic() const noexcept { return critic_; }
+    /** The actor's blocks, then critic_players. */
+    [[nodiscard]] const std::vector<GraphEncoder::Block>& layout() const noexcept {
+        return layout_;
+    }
+    /** Zeros with only the actor's no-op set (a waiting row). */
+    void encode_waiting(std::span<float> out) const;
+
+private:
+    GraphEncoder actor_;
+    GraphEncoder critic_;
+    std::vector<GraphEncoder::Block> layout_;
+};
+
 }  // namespace cppanatron

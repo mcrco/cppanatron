@@ -653,3 +653,36 @@ def test_trackers_see_bot_moves_and_feed_search():
     plain.reset()
     with pytest.raises(RuntimeError, match="no trackers"):
         plain.tracker(0, 0)
+
+
+def test_actor_critic_encoder_writes_vec_env_rows_and_search_leaves():
+    env = cpp.VecEnv([cpp.Scenario(num_players=3)], num_envs=2, seed=2,
+                     level=cpp.InfoLevel.PUBLIC, critic_level=cpp.InfoLevel.FULL)
+    buffers = env.allocate()
+    env.reset()
+    encoder = cpp.ActorCriticEncoder(env.dims, cpp.InfoLevel.PUBLIC, cpp.InfoLevel.FULL)
+    assert isinstance(encoder, cpp.ObservationEncoder)
+    assert encoder.layout() == env.layout() and encoder.size == env.observation_size
+    assert isinstance(env.row_encoder, cpp.ActorCriticEncoder)
+    assert isinstance(cpp.VecEnv([cpp.Scenario()]).row_encoder, cpp.GraphEncoder)
+    names = encoder.feature_names()
+    assert names["critic_players"] == names["players"]
+    rng = np.random.default_rng(5)
+    for _ in range(60):
+        for row in np.flatnonzero(buffers["acting"]):
+            game = env.game(row // env.max_players)
+            seat = row % env.max_players
+            assert np.array_equal(buffers["observations"][row], encoder.encode(game, seat))
+        sample_actions(env, buffers, rng)
+        env.step()
+
+    # As SearchPool's encoder, the root's row is the training row.
+    game = env.game(0)
+    pool = cpp.SearchPool(encoder.action_space, encoder,
+                          cpp.SearchConfig(simulations=4, max_players=3))
+    assert pool.observation_size == encoder.size
+    pool.add(game, 1)
+    observations = np.zeros((4, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(4, dtype=np.int64)
+    assert pool.collect(observations, ids) >= 1
+    assert np.array_equal(observations[0], encoder.encode(game, game.current_player_index))

@@ -215,6 +215,84 @@ void bind_graph(nb::module_& module) {
             },
             nb::arg("game"), nb::arg("observer"), nb::arg("out").noconvert(),
             "Write the row into a caller-owned float32 buffer of size ``size``.");
+
+    nb::class_<ActorCriticEncoder, ObservationEncoder>(
+        module, "ActorCriticEncoder",
+        "Rows for asymmetric actor/critic models, laid out like VecEnv rows with a\n"
+        "critic_level: the actor's GraphEncoder row (mask included), then the\n"
+        "players block at ``critic_level`` (``critic_players``). As SearchPool's\n"
+        "encoder, leaves match training rows; with determinizations the critic\n"
+        "block is computed on the sampled world, so a FULL critic sees that\n"
+        "world's sampled hidden cards (perfect-information Monte Carlo).")
+        .def(nb::init<EncoderDims, InfoLevel, InfoLevel>(), nb::arg("dims"),
+             nb::arg("level") = InfoLevel::private_, nb::arg("critic_level") = InfoLevel::full)
+        .def_prop_ro("size", &ActorCriticEncoder::size)
+        .def("__len__", &ActorCriticEncoder::size)
+        .def_prop_ro("dims", [](const ActorCriticEncoder& encoder) { return encoder.actor().dims(); })
+        .def_prop_ro("level", [](const ActorCriticEncoder& encoder) { return encoder.actor().level(); })
+        .def_prop_ro(
+            "critic_level", [](const ActorCriticEncoder& encoder) { return encoder.critic().level(); })
+        .def_prop_ro(
+            "actor", [](const ActorCriticEncoder& encoder) { return encoder.actor(); },
+            "A copy of the actor's GraphEncoder.")
+        .def_prop_ro(
+            "critic", [](const ActorCriticEncoder& encoder) { return encoder.critic(); },
+            "A copy of the GraphEncoder at critic_level (its players block is the critic block).")
+        .def_prop_ro(
+            "action_space",
+            [](const ActorCriticEncoder& encoder) { return encoder.actor().action_space(); })
+        .def(
+            "layout",
+            [](const ActorCriticEncoder& encoder) {
+                nb::dict result;
+                for (const auto& block : encoder.layout()) {
+                    nb::list shape;
+                    for (std::size_t extent : block.shape) {
+                        shape.append(extent);
+                    }
+                    result[block.name.c_str()] = span(block.offset, nb::tuple(shape));
+                }
+                return result;
+            },
+            "``{block: (offset, shape)}``: the actor's blocks, then ``critic_players``.")
+        .def(
+            "feature_names",
+            [](const ActorCriticEncoder& encoder, std::optional<std::string> block) -> nb::object {
+                if (block.has_value()) {
+                    if (*block == "critic_players") {
+                        return nb::cast(encoder.critic().feature_names("players"));
+                    }
+                    return nb::cast(encoder.actor().feature_names(*block));
+                }
+                nb::dict result;
+                for (const char* name : {"global", "players", "tiles", "nodes", "edges"}) {
+                    result[name] = nb::cast(encoder.actor().feature_names(name));
+                }
+                result["critic_players"] = nb::cast(encoder.critic().feature_names("players"));
+                return result;
+            },
+            nb::arg("block") = nb::none())
+        .def(
+            "encode",
+            [](const ActorCriticEncoder& encoder, const Game& game, int observer) {
+                check_observer(game, observer);
+                std::vector<float> row(encoder.size());
+                {
+                    nb::gil_scoped_release release;
+                    encoder.encode(game, observer, row);
+                }
+                return to_numpy(std::move(row));
+            },
+            nb::arg("game"), nb::arg("observer"))
+        .def(
+            "encode_into",
+            [](const ActorCriticEncoder& encoder, const Game& game, int observer,
+               OutputVector<float> out) {
+                check_observer(game, observer);
+                nb::gil_scoped_release release;
+                encoder.encode(game, observer, std::span<float>(out.data(), out.shape(0)));
+            },
+            nb::arg("game"), nb::arg("observer"), nb::arg("out").noconvert());
 }
 
 }  // namespace cppanatron::python

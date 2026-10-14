@@ -65,6 +65,14 @@ order (`MapSpec.from_dict` / `.to_dict` use the JSON shape `{"tiles":
 node and edge ids follow Catanatron's `from_tiles` numbering, so a spec builds
 the same board in both engines. Roads run along land-tile edges.
 
+`cpp.GraphActionSpace(cpp.EncoderDims(max_players=..., max_tiles=..., max_nodes=...,
+max_edges=...))` is the map-agnostic action space of graph networks: globals
+(roll, end turn, development cards, discards, monopoly, year of plenty,
+maritime trades), then a settlement and a city per node slot, a road per edge
+slot, a robber move per tile and relative victim seat, and a final no-op for
+waiting seats. `index`, `decode`, `mask` and `layout()` work on any map within
+the dims; domestic trades are outside it.
+
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
 the observation layout of Catanatron's board tensor. Stock Catanatron takes

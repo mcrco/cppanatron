@@ -10,6 +10,8 @@ add_library(cppanatron
     src/game.cpp
     src/setup.cpp
     src/action_space.cpp
+    src/graph_dims.cpp
+    src/graph_action_space.cpp
     src/value_player.cpp
     src/observation.cpp
     src/batch.cpp
@@ -59,6 +61,7 @@ if(CPPANATRON_BUILD_PYTHON)
         src/python/module.cpp
         src/python/types.cpp
         src/python/maps.cpp
+        src/python/graph.cpp
         src/python/game.cpp
         src/python/observation.cpp
         src/python/search.cpp

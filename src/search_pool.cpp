@@ -13,6 +13,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <string>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -297,6 +298,10 @@ std::uint64_t outcome_fingerprint(const Game& game) {
 struct Leaf {
     std::uint32_t world{};
     std::uint32_t node{};
+    /** A root awaiting its first evaluation (no virtual visits, no simulation). */
+    bool root{};
+    /** The Gumbel root edge this simulation was sent down, or kNone. */
+    std::uint32_t root_edge{kNone};
 };
 
 struct GumbelRoot {
@@ -1018,7 +1023,7 @@ struct SearchPool::Impl {
                 Node& root = search.worlds[w].nodes.front();
                 if (!root.expanded && !root.pending) {
                     root.pending = true;
-                    search.issued.push_back({w, 0});
+                    search.issued.push_back({w, 0, true, kNone});
                     ++search.pending;
                     ++issued;
                 }
@@ -1036,12 +1041,21 @@ struct SearchPool::Impl {
                     break;
                 }
             }
-            const Descent descent = descend(search, tree, root_edge);
-            if (descent.stop == Stop::collision) {
+            const auto unpop = [&] {
                 if (root_edge.has_value()) {
                     search.gumbel->queue.push_back(*root_edge);
                     --search.gumbel->own_visits[*root_edge];
                 }
+            };
+            Descent descent;
+            try {
+                descent = descend(search, tree, root_edge);
+            } catch (...) {
+                unpop();
+                throw;
+            }
+            if (descent.stop == Stop::collision) {
+                unpop();
                 break;
             }
             ++search.started;
@@ -1051,7 +1065,9 @@ struct SearchPool::Impl {
                 for (std::uint32_t n = descent.node; n != kNone; n = tree.nodes[n].parent) {
                     ++tree.nodes[n].visits;
                 }
-                search.issued.push_back({world, descent.node});
+                search.issued.push_back(
+                    {world, descent.node, false,
+                     root_edge.has_value() ? static_cast<std::uint32_t>(*root_edge) : kNone});
                 ++search.pending;
                 ++issued;
                 continue;
@@ -1070,6 +1086,25 @@ struct SearchPool::Impl {
             record_depth(search, node);
         }
         finish_if_done(search);
+    }
+
+    /** Undo the issue of a leaf that will not be evaluated. */
+    static void withdraw(Search& search, const Leaf& leaf) {
+        Tree& tree = search.worlds[leaf.world];
+        tree.nodes[leaf.node].pending = false;
+        --search.pending;
+        if (leaf.root) {
+            return;
+        }
+        for (std::uint32_t n = leaf.node; n != kNone; n = tree.nodes[n].parent) {
+            --tree.nodes[n].visits;
+        }
+        --search.started;
+        if (leaf.root_edge != kNone && search.gumbel.has_value()) {
+            search.gumbel->queue.push_back(leaf.root_edge);
+            --search.gumbel->own_visits[leaf.root_edge];
+        }
+        search.done = false;
     }
 
     void evaluate(Search& search, const Leaf& leaf, std::span<const float> logits,
@@ -1108,7 +1143,7 @@ struct SearchPool::Impl {
 
     std::size_t collect(std::span<float> observations, std::span<std::int64_t> ids) {
         if (!batch.empty()) {
-            throw std::logic_error("apply the last collect before collecting again");
+            throw std::logic_error("apply (or cancel) the last collect before collecting again");
         }
         const std::size_t capacity = ids.size();
         const std::size_t width = encoder->size();
@@ -1142,14 +1177,25 @@ struct SearchPool::Impl {
             for (std::size_t i = 0; i < active.size(); ++i) {
                 lanes[i] = static_cast<std::size_t>(active[i]->id);
             }
-            workers->run(
-                active.size(),
-                [&](std::size_t i) {
-                    if (quotas[i] > 0) {
-                        gather(*active[i], quotas[i]);
+            try {
+                workers->run(
+                    active.size(),
+                    [&](std::size_t i) {
+                        if (quotas[i] > 0) {
+                            gather(*active[i], quotas[i]);
+                        }
+                    },
+                    &lanes);
+            } catch (...) {
+                // Searches stay usable: issued leaves go back as if never chosen.
+                for (Search* search : active) {
+                    for (auto leaf = search->issued.rbegin(); leaf != search->issued.rend(); ++leaf) {
+                        withdraw(*search, *leaf);
                     }
-                },
-                &lanes);
+                    search->issued.clear();
+                }
+                throw;
+            }
             for (Search* search : active) {
                 for (const Leaf& leaf : search->issued) {
                     batch.push_back({search, leaf});
@@ -1167,13 +1213,26 @@ struct SearchPool::Impl {
             }
             // Every issued simulation ended in a terminal position: go again.
         }
-        workers->run(batch.size(), [&](std::size_t row) {
-            const Row& entry = batch[row];
-            const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
-            encoder->encode(game, game.current_player_index(), observations.subspan(row * width, width));
-            ids[row] = entry.search->id;
-        });
+        try {
+            workers->run(batch.size(), [&](std::size_t row) {
+                const Row& entry = batch[row];
+                const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
+                encoder->encode(game, game.current_player_index(), observations.subspan(row * width, width));
+                ids[row] = entry.search->id;
+            });
+        } catch (...) {
+            cancel();
+            throw;
+        }
         return batch.size();
+    }
+
+    /** Withdraw every pending row, latest first (restoring Gumbel's queue order). */
+    void cancel() {
+        for (auto row = batch.rbegin(); row != batch.rend(); ++row) {
+            withdraw(*row->search, row->leaf);
+        }
+        batch.clear();
     }
 
     void apply(std::span<const float> logits, std::span<const float> values) {
@@ -1183,6 +1242,15 @@ struct SearchPool::Impl {
         if (logits.size() != rows * width || values.size() != rows * players) {
             throw std::invalid_argument(
                 "apply needs action_size() logits and max_players() values per collected row");
+        }
+        // Reject bad rows before anything changes, so the caller can retry.
+        for (std::size_t row = 0; row < rows; ++row) {
+            const auto seats = static_cast<std::size_t>(batch[row].search->players);
+            for (std::size_t slot = 0; slot < seats; ++slot) {
+                if (!std::isfinite(values[row * players + slot])) {
+                    throw std::invalid_argument("leaf values must be finite (row " + std::to_string(row) + ")");
+                }
+            }
         }
         // Rows of one search are contiguous; each search is one task.
         std::vector<std::pair<std::size_t, std::size_t>> ranges;
@@ -1198,17 +1266,29 @@ struct SearchPool::Impl {
         for (std::size_t task = 0; task < ranges.size(); ++task) {
             lanes[task] = static_cast<std::size_t>(rows_in_flight[ranges[task].first].search->id);
         }
-        workers->run(
-            ranges.size(),
-            [&](std::size_t task) {
-                for (std::size_t row = ranges[task].first; row < ranges[task].second; ++row) {
-                    const Row& entry = rows_in_flight[row];
-                    evaluate(
-                        *entry.search, entry.leaf, logits.subspan(row * width, width),
-                        values.subspan(row * players, players));
+        std::vector<std::uint8_t> applied(rows, 0);
+        try {
+            workers->run(
+                ranges.size(),
+                [&](std::size_t task) {
+                    for (std::size_t row = ranges[task].first; row < ranges[task].second; ++row) {
+                        const Row& entry = rows_in_flight[row];
+                        evaluate(
+                            *entry.search, entry.leaf, logits.subspan(row * width, width),
+                            values.subspan(row * players, players));
+                        applied[row] = 1;
+                    }
+                },
+                &lanes);
+        } catch (...) {
+            // Rows that were not applied go back to their searches unevaluated.
+            for (std::size_t row = rows; row-- > 0;) {
+                if (applied[row] == 0) {
+                    withdraw(*rows_in_flight[row].search, rows_in_flight[row].leaf);
                 }
-            },
-            &lanes);
+            }
+            throw;
+        }
     }
 
     // ------------------------------------------------------------ re-rooting
@@ -1598,6 +1678,8 @@ void SearchPool::apply(std::span<const float> logits, std::span<const float> val
     impl_->apply(logits, values);
 }
 
+void SearchPool::cancel() { impl_->cancel(); }
+
 std::size_t SearchPool::pending() const noexcept { return impl_->batch.size(); }
 
 const Game& SearchPool::pending_game(std::size_t row) const {
@@ -1643,7 +1725,7 @@ bool SearchPool::advance(std::int64_t id, std::size_t action_index) {
 void SearchPool::remove(std::int64_t id) {
     Search& search = impl_->find(id);
     if (search.pending > 0) {
-        throw std::logic_error("cannot remove a search with leaves awaiting apply");
+        throw std::logic_error("cannot remove a search with leaves awaiting apply (apply or cancel first)");
     }
     impl_->searches.erase(id);
 }

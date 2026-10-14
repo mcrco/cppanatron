@@ -157,8 +157,17 @@ public:
     /**
      * Expand and back up the rows of the last collect: `logits` holds
      * action_size() floats per row, `values` max_players() floats per row.
+     * Wrong sizes or non-finite values throw std::invalid_argument before
+     * anything changes, so apply can be retried. If an expansion fails
+     * anyway, the rows not yet applied are withdrawn (see cancel).
      */
     void apply(std::span<const float> logits, std::span<const float> values);
+    /**
+     * Withdraw the rows of the last collect: their leaves go back to their
+     * searches unevaluated, as if never chosen. collect does this itself
+     * when it throws.
+     */
+    void cancel();
 
     /** Rows of the last collect awaiting apply. */
     [[nodiscard]] std::size_t pending() const noexcept;

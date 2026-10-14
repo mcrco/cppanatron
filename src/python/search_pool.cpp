@@ -250,6 +250,12 @@ void bind_search_pool(nb::module_& module) {
             "[n, action_size], ``values`` float32 [n, max_players] (seat-relative win\n"
             "probabilities).")
         .def(
+            "cancel", &SearchPool::cancel,
+            "Withdraw the last collect's rows unevaluated (e.g. after a failed\n"
+            "network call); the next collect chooses leaves afresh. apply rejects bad\n"
+            "rows (wrong shape, non-finite values) without changing anything, so it can\n"
+            "also simply be retried.")
+        .def(
             "pending_game", [](const SearchPool& pool, std::size_t row) { return Game(pool.pending_game(row)); },
             nb::arg("row"), "A copy of a pending row's position.")
         .def("done", &SearchPool::done, nb::arg("id"))

@@ -2,6 +2,8 @@
 // finding wins, determinized searches that never read the hidden truth.
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -638,6 +640,138 @@ void test_determinized_advance_refuses_monopoly() {
     }
 }
 
+/** ToyEncoder that throws on its `fail_at`-th call. */
+class FailingEncoder final : public ObservationEncoder {
+public:
+    explicit FailingEncoder(int fail_at) : fail_at_(fail_at) {}
+    [[nodiscard]] std::size_t size() const noexcept override { return 4; }
+    void encode(const Game& game, int observer, std::span<float> out) const override {
+        if (++calls_ == fail_at_) {
+            throw std::runtime_error("encoder failed");
+        }
+        ToyEncoder().encode(game, observer, out);
+    }
+
+private:
+    int fail_at_;
+    mutable std::atomic<int> calls_{0};
+};
+
+/** FlatActionCodec whose decode throws on its `fail_at`-th call. */
+class FailingCodec final : public ActionCodec {
+public:
+    FailingCodec(int players, int fail_at) : inner_(players, MapType::base), fail_at_(fail_at) {}
+    [[nodiscard]] std::size_t size() const noexcept override { return inner_.size(); }
+    [[nodiscard]] std::size_t index(const Game& game, const Action& action) const override {
+        return inner_.index(game, action);
+    }
+    [[nodiscard]] Action decode(const Game& game, std::size_t index) const override {
+        if (++calls_ == fail_at_) {
+            throw std::runtime_error("codec failed");
+        }
+        return inner_.decode(game, index);
+    }
+    void mask(const Game& game, std::span<std::uint8_t> out) const override { inner_.mask(game, out); }
+
+private:
+    FlatActionCodec inner_;
+    int fail_at_;
+    mutable std::atomic<int> calls_{0};
+};
+
+/** collect/apply failures withdraw what they started; the pool stays usable. */
+void test_failures_leave_the_pool_usable() {
+    const Played played = play_random(3, 15, 150);
+    const auto check = [](SearchPool& pool, const std::vector<std::int64_t>& ids, int simulations) {
+        for (const auto id : ids) {
+            require(pool.done(id), "every search finishes");
+            const auto visits = pool.visits(id);
+            require(std::accumulate(visits.begin(), visits.end(), 0U) == static_cast<unsigned>(simulations),
+                    "no simulation is lost or stranded");
+            require(pool.stats(id).simulations == static_cast<std::uint64_t>(simulations), "all counted");
+            pool.remove(id);
+        }
+    };
+    const auto evaluate = [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_logits(leaf, logits);
+        std::fill(values.begin(), values.end(), static_cast<float>(hashed_value(leaf) / 3));
+    };
+    for (const RootSelection root : {RootSelection::puct, RootSelection::gumbel}) {
+        SearchConfig config;
+        config.simulations = 60;
+        config.max_players = 3;
+        config.max_pending = 4;
+        config.root = root;
+        const auto codec = std::make_shared<FlatActionCodec>(3, MapType::base);
+
+        // A non-finite value is rejected before anything changes; a retry works.
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        std::vector<std::int64_t> ids{pool.add(played.game, 1), pool.add(played.game, 2)};
+        std::vector<float> observations(16 * pool.observation_size());
+        std::vector<std::int64_t> rows(16);
+        for (int round = 0; round < 3; ++round) {
+            const std::size_t n = pool.collect(observations, rows);
+            std::vector<float> logits(n * pool.action_size(), 0.0F);
+            std::vector<float> values(n * 3, 0.3F);
+            if (round == 2) {
+                values[1] = std::numeric_limits<float>::quiet_NaN();
+                bool threw = false;
+                try {
+                    pool.apply(logits, values);
+                } catch (const std::invalid_argument&) {
+                    threw = true;
+                }
+                require(threw && pool.pending() == n, "a NaN row is rejected and the rows stay pending");
+                values[1] = 0.3F;
+            }
+            pool.apply(logits, values);
+        }
+        // Rows can be withdrawn unevaluated.
+        require(pool.collect(observations, rows) > 0, "more leaves");
+        pool.cancel();
+        require(pool.pending() == 0, "cancel withdraws every row");
+        run(pool, evaluate, 16);
+        check(pool, ids, 60);
+
+        // An encoder or codec failure inside collect withdraws the issued leaves.
+        for (int failing = 0; failing < 2; ++failing) {
+            std::shared_ptr<const ActionCodec> failing_codec =
+                failing == 0 ? std::shared_ptr<const ActionCodec>(codec)
+                             : std::make_shared<FailingCodec>(3, 40);
+            std::shared_ptr<const ObservationEncoder> encoder =
+                failing == 0 ? std::shared_ptr<const ObservationEncoder>(std::make_shared<FailingEncoder>(25))
+                             : std::make_shared<ToyEncoder>();
+            SearchPool fragile(failing_codec, encoder, config);
+            std::vector<std::int64_t> fragile_ids{fragile.add(played.game, 3), fragile.add(played.game, 4)};
+            int failures = 0;
+            while (true) {
+                std::size_t n = 0;
+                try {
+                    n = fragile.collect(observations, rows);
+                } catch (const std::runtime_error&) {
+                    ++failures;
+                    require(fragile.pending() == 0, "a failed collect leaves nothing pending");
+                    continue;
+                }
+                if (n == 0) {
+                    break;
+                }
+                std::vector<float> logits(n * fragile.action_size());
+                std::vector<float> values(n * 3);
+                for (std::size_t row = 0; row < n; ++row) {
+                    evaluate(
+                        fragile.pending_game(row),
+                        std::span<float>(logits).subspan(row * fragile.action_size(), fragile.action_size()),
+                        std::span<float>(values).subspan(row * 3, 3));
+                }
+                fragile.apply(logits, values);
+            }
+            require(failures == 1, "the failure happened once");
+            check(fragile, fragile_ids, 60);
+        }
+    }
+}
+
 int main() {
     try {
         test_two_player_matches_mcts_search();
@@ -649,6 +783,7 @@ int main() {
         test_determinized_roots_offer_the_real_options();
         test_determinized_advance_refuses_drawn_outcomes();
         test_determinized_advance_refuses_monopoly();
+        test_failures_leave_the_pool_usable();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

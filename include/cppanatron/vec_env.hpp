@@ -123,8 +123,10 @@ struct EpisodeStats {
  * no playable action (initial placements can crowd a small map) ends the
  * same way as a truncation.
  *
- * Each env draws scenarios, maps, seats and game seeds from its own random
- * stream seeded from the config seed, so results do not depend on threading.
+ * Each env draws scenarios, maps, seats, game seeds and bot seeds from its
+ * own random stream seeded from the config seed, so results do not depend on
+ * threading. Random bots play from a stream seeded per game by its bot seed,
+ * so a game's play depends on its seeds alone.
  */
 class VecEnv {
 public:
@@ -164,6 +166,9 @@ public:
     [[nodiscard]] const Game& game(int env_index) const;
     [[nodiscard]] int scenario_index(int env_index) const;
     [[nodiscard]] const std::vector<SeatKind>& seat_kinds(int env_index) const;
+    /** Seeds of an env's current game: its dice, cards and steals, and its bots. */
+    [[nodiscard]] std::uint64_t game_seed(int env_index) const;
+    [[nodiscard]] std::uint64_t bot_seed(int env_index) const;
 
 private:
     struct Env;

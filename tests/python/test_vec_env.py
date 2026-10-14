@@ -273,6 +273,27 @@ def test_crowded_maps_end_stuck_games_as_truncations():
         cpp.VecEnv([cpp.Scenario(num_players=3, maps=[tiny])])
 
 
+def test_every_game_has_its_own_seeds():
+    """Games take a game seed and a bot seed from the env's stream; the
+    game replays from its game seed."""
+    env = cpp.VecEnv([cpp.Scenario(num_players=3, seats=["learner", "R", "R"])],
+                     num_envs=3, seed=11)
+    buffers = env.allocate()
+    env.reset()
+    seeds = {(env.game_seed(e), env.bot_seed(e)) for e in range(3)}
+    assert len(seeds) == 3 and all(g != b for g, b in seeds)
+    for e in range(3):
+        fresh = cpp.Game(3, map=env.game(e).board.map, seed=env.game_seed(e))
+        assert fresh.board.robber_coordinate == env.game(e).board.robber_coordinate
+    rng = np.random.default_rng(2)
+    seen = set(seeds)
+    for _ in range(400):
+        sample_actions(env, buffers, rng)
+        env.step()
+        seen |= {(env.game_seed(e), env.bot_seed(e)) for e in range(3)}
+    assert len(seen) > len(seeds)
+
+
 def test_vp_shaping_rewards_learner_points():
     env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=4, seed=2, vp_reward=1.0)
     buffers = env.allocate()

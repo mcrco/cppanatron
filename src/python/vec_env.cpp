@@ -337,7 +337,15 @@ void bind_vec_env(nb::module_& module) {
         .def(
             "seat_kinds",
             [](const PyVecEnv& self, int env_index) { return self.env.seat_kinds(env_index); },
-            nb::arg("env_index"));
+            nb::arg("env_index"))
+        .def(
+            "game_seed",
+            [](const PyVecEnv& self, int env_index) { return self.env.game_seed(env_index); },
+            nb::arg("env_index"), "Seed of the env's current game (dice, cards, steals).")
+        .def(
+            "bot_seed",
+            [](const PyVecEnv& self, int env_index) { return self.env.bot_seed(env_index); },
+            nb::arg("env_index"), "Seed of the current game's bot stream (random bots).");
 }
 
 }  // namespace cppanatron::python

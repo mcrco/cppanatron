@@ -151,7 +151,15 @@ void EpisodeStats::Bucket::add(const Bucket& other) {
 }
 
 struct VecEnv::Env {
+    /** Draws each new game's scenario, map, seeds and seating (auto-reset). */
     std::mt19937_64 random;
+    /**
+     * The current game's bot stream, seeded per game: what bots play depends
+     * on that game's bot seed alone, not on the games the env played before.
+     */
+    std::mt19937_64 bots;
+    std::uint64_t bot_seed{};
+    std::uint64_t game_seed{};
     std::unique_ptr<Game> game;
     int scenario{};
     std::vector<SeatKind> seats;
@@ -383,15 +391,18 @@ void VecEnv::start_game(Env& env) {
             CatanMap::build(scenario.map_type, env.random(), scenario.number_placement));
     }
     const auto num_players = static_cast<std::size_t>(scenario.num_players);
+    env.game_seed = env.random();
     env.game = std::make_unique<Game>(
         std::vector<Color>(kColors.begin(), kColors.begin() + scenario.num_players), map,
-        env.random(), scenario.rules);
+        env.game_seed, scenario.rules);
     env.seats = scenario.seats.empty()
                     ? std::vector<SeatKind>(num_players, SeatKind::learner)
                     : scenario.seats;
     if (scenario.shuffle_seats) {
         std::shuffle(env.seats.begin(), env.seats.end(), env.random);
     }
+    env.bot_seed = env.random();
+    env.bots.seed(env.bot_seed);
     env.victory_points.assign(num_players, 0);
     env.decisions = 0;
 }
@@ -486,7 +497,7 @@ void VecEnv::play_until_learner(int env_index) {
                 game.execute(actions.front());
                 break;
             case SeatKind::random:
-                game.execute(actions[pick(actions.size(), env.random)]);
+                game.execute(actions[pick(actions.size(), env.bots)]);
                 break;
             case SeatKind::value:
                 game.execute(value_action(game, ValueWeights{}, scenario.value_enemies));
@@ -609,6 +620,14 @@ const Game& VecEnv::game(int env_index) const {
 
 int VecEnv::scenario_index(int env_index) const {
     return envs_.at(static_cast<std::size_t>(env_index)).scenario;
+}
+
+std::uint64_t VecEnv::game_seed(int env_index) const {
+    return envs_.at(static_cast<std::size_t>(env_index)).game_seed;
+}
+
+std::uint64_t VecEnv::bot_seed(int env_index) const {
+    return envs_.at(static_cast<std::size_t>(env_index)).bot_seed;
 }
 
 const std::vector<SeatKind>& VecEnv::seat_kinds(int env_index) const {

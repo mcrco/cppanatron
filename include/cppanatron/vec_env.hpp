@@ -90,6 +90,8 @@ struct EpisodeStats {
         std::uint64_t learner_wins{};
         /** Learner seats summed over episodes (for each seat's expected share). */
         std::uint64_t learner_seats{};
+        /** Truncated episodes that ended with no playable action (crowded maps). */
+        std::uint64_t stuck{};
         std::array<std::uint64_t, 6> seat_wins{};
 
         void add(const Bucket& other);
@@ -113,7 +115,9 @@ struct EpisodeStats {
  * timeouts as terminals), so a truncation must also end the trajectory
  * there; the truncation flag tells the two apart for logging. Either way the
  * game is replaced at once, so the same step's observations are the next
- * game's, as in PufferLib's C environments (e.g. breakout).
+ * game's, as in PufferLib's C environments (e.g. breakout). A game left with
+ * no playable action (initial placements can crowd a small map) ends the
+ * same way as a truncation.
  *
  * Each env draws scenarios, maps, seats and game seeds from its own random
  * stream seeded from the config seed, so results do not depend on threading.
@@ -167,7 +171,7 @@ private:
     void step_env(int env_index);
     void start_game(Env& env);
     void play_until_learner(int env_index);
-    void finish_game(int env_index, bool truncated);
+    void finish_game(int env_index, bool truncated, bool stuck = false);
     void shape_rewards(int env_index, bool pay);
     void write_rows(int env_index);
     [[nodiscard]] std::size_t row(int env_index, int seat) const noexcept;

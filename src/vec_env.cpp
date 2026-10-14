@@ -25,6 +25,42 @@ std::size_t pick(std::size_t count, T& random) {
     return std::uniform_int_distribution<std::size_t>(0, count - 1)(random);
 }
 
+/**
+ * Settlements the distance rule lets a map hold, by greedily placing on the
+ * open node with the fewest open neighbors: a lower bound on the maximum,
+ * and usually equal to it on hex maps.
+ */
+int settlement_capacity(const CatanMap& map) {
+    std::vector<bool> open(static_cast<std::size_t>(map.num_node_ids()), false);
+    for (int node : map.land_node_list()) {
+        open[static_cast<std::size_t>(node)] = true;
+    }
+    const auto open_neighbors = [&](int node) {
+        return std::count_if(map.neighbors(node).begin(), map.neighbors(node).end(),
+                             [&](int neighbor) { return open[static_cast<std::size_t>(neighbor)]; });
+    };
+    int placed = 0;
+    for (;;) {
+        int best = -1;
+        std::ptrdiff_t fewest = 0;
+        for (int node : map.land_node_list()) {
+            if (open[static_cast<std::size_t>(node)] &&
+                (best < 0 || open_neighbors(node) < fewest)) {
+                best = node;
+                fewest = open_neighbors(node);
+            }
+        }
+        if (best < 0) {
+            return placed;
+        }
+        ++placed;
+        open[static_cast<std::size_t>(best)] = false;
+        for (int neighbor : map.neighbors(best)) {
+            open[static_cast<std::size_t>(neighbor)] = false;
+        }
+    }
+}
+
 void validate(const VecEnvConfig& config) {
     if (config.num_envs <= 0) {
         throw std::invalid_argument("num_envs must be positive");
@@ -73,6 +109,13 @@ void validate(const VecEnvConfig& config) {
             if (!config.dims.fits(*map, scenario.num_players)) {
                 throw std::invalid_argument(where + "a map does not fit the dims");
             }
+            // Every seat places two settlements to start.
+            if (settlement_capacity(*map) < 2 * scenario.num_players) {
+                throw std::invalid_argument(
+                    where + "a map cannot seat " + std::to_string(scenario.num_players) +
+                    " players: the distance rule leaves room for " +
+                    std::to_string(settlement_capacity(*map)) + " settlements");
+            }
         }
     }
     if (!(total_weight > 0.0)) {
@@ -89,6 +132,7 @@ void EpisodeStats::Bucket::add(const Bucket& other) {
     decisions += other.decisions;
     learner_wins += other.learner_wins;
     learner_seats += other.learner_seats;
+    stuck += other.stuck;
     for (std::size_t seat = 0; seat < seat_wins.size(); ++seat) {
         seat_wins[seat] += other.seat_wins[seat];
     }
@@ -306,7 +350,7 @@ void VecEnv::start_game(Env& env) {
     env.decisions = 0;
 }
 
-void VecEnv::finish_game(int env_index, bool truncated) {
+void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     const Game& game = *env.game;
     shape_rewards(env_index, true);
@@ -317,6 +361,7 @@ void VecEnv::finish_game(int env_index, bool truncated) {
     episode.decisions = env.decisions;
     episode.learner_seats = static_cast<std::uint64_t>(
         std::count(env.seats.begin(), env.seats.end(), SeatKind::learner));
+    episode.stuck = stuck ? 1 : 0;
     if (truncated) {
         episode.truncated = 1;
     } else {
@@ -368,7 +413,13 @@ void VecEnv::play_until_learner(int env_index) {
         }
         const auto& actions = game.playable_actions();
         if (actions.empty()) {
-            throw std::logic_error("a game in progress has no playable action");
+            // Possible on crowded maps: the initial placements can leave a
+            // seat no open node. The game cannot go on; count it as a
+            // truncated (stuck) episode and start another.
+            finish_game(env_index, true, true);
+            start_game(env);
+            shape_rewards(env_index, false);
+            continue;
         }
         switch (env.seats[static_cast<std::size_t>(game.current_player_index())]) {
             case SeatKind::learner:

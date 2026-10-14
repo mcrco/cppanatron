@@ -89,6 +89,7 @@ nb::dict bucket_to_python(const EpisodeStats::Bucket& bucket, std::size_t seats)
     result["decisions"] = mean(bucket.decisions);
     result["learner_win"] = mean(bucket.learner_wins);
     result["learner_seats"] = mean(bucket.learner_seats);
+    result["stuck"] = mean(bucket.stuck);
     nb::list seat_wins;
     for (std::size_t seat = 0; seat < seats; ++seat) {
         seat_wins.append(mean(bucket.seat_wins[seat]));
@@ -323,8 +324,9 @@ void bind_vec_env(nb::module_& module) {
                 return result;
             },
             "Episodes finished since the last call: count, and means of truncated,\n"
-            "length (turns), learner decisions, learner_win (won by a learner seat),\n"
-            "learner_seats and seat_win per seat; the same per scenario.")
+            "stuck (truncated with no playable action), length (turns), learner\n"
+            "decisions, learner_win (won by a learner seat), learner_seats and\n"
+            "seat_win per seat; the same per scenario.")
         .def(
             "game", [](const PyVecEnv& self, int env_index) { return Game(self.env.game(env_index)); },
             nb::arg("env_index"), "A copy of an env's current game.")

@@ -213,6 +213,27 @@ def test_resets_without_a_seed_start_new_games():
     assert again_maps == second_maps and np.array_equal(again, second)
 
 
+def test_crowded_maps_end_stuck_games_as_truncations():
+    """Six seats fill the seven-tile board: random placements can leave a seat
+    no open node, which ends the game as a stuck truncation."""
+    crowded = cpp.CatanMap.from_spec(SHAPES["bare"][0](0))
+    env = cpp.VecEnv([cpp.Scenario(num_players=6, maps=[crowded])], num_envs=8, seed=2)
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(4)
+    stuck_steps = 0
+    for _ in range(300):
+        sample_actions(env, buffers, rng)
+        env.step()
+        stuck_steps += int(buffers["truncations"].any())
+    stats = env.pop_stats()
+    assert stats["stuck"] > 0 and stats["truncated"] >= stats["stuck"]
+    assert stuck_steps > 0
+    with pytest.raises(ValueError, match="cannot seat 3 players"):
+        tiny = cpp.CatanMap.from_spec({"tiles": [{"coordinate": [0, 0, 0], "type": "land"}]})
+        cpp.VecEnv([cpp.Scenario(num_players=3, maps=[tiny])])
+
+
 def test_vp_shaping_rewards_learner_points():
     env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=4, seed=2, vp_reward=1.0)
     buffers = env.allocate()

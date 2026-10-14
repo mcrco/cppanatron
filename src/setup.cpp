@@ -133,7 +133,8 @@ void Game::apply_setup(const GameSetup& setup) {
         }
     }
 
-    board_.restore(buildings, roads, setup.robber.value_or(board_.robber_coordinate()));
+    // Played from the start, everyone builds a first road in seating order.
+    board_.restore(buildings, roads, setup.robber.value_or(board_.robber_coordinate()), colors_);
     std::vector<int> road_lengths(num_players);
     std::vector<int> knights(num_players);
     for (std::size_t seat = 0; seat < num_players; ++seat) {

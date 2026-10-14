@@ -14,6 +14,7 @@ import pytest
 
 pytest.importorskip("catanatron")
 
+from catanatron.models.player import Color  # noqa: E402
 from catanatron.players.value import ValueFunctionPlayer, base_fn  # noqa: E402
 
 import cppanatron as cpp  # noqa: E402
@@ -108,6 +109,24 @@ def test_explicit_map_games_stay_in_lockstep(num_players, map_name, game_index):
         seed,
         map_spec=spec,
         vps_to_win=8,
+        resource_bank=(24,) * 5 if num_players > 4 else None,
+    )
+
+
+@pytest.mark.parametrize("num_players", [3, 4, 5, 6])
+@pytest.mark.parametrize("map_name", ["BASE", "hexagon3", "extension"])
+@pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
+def test_seatings_out_of_color_order_stay_in_lockstep(num_players, map_name, game_index):
+    """Ties (Longest Road after a cut) follow the order seats built their
+    first road, which only differs from color order with such seatings."""
+    seed = 9_000 + 100 * num_players + 7 * game_index + len(map_name)
+    colors = list(Color)[:num_players]
+    seating = colors[::-1] if game_index % 2 == 0 else colors[1:] + colors[:1]
+    play_in_lockstep(
+        seating,
+        seed,
+        map_spec=EXPLICIT_MAPS[map_name](seed),
+        vps_to_win=10,
         resource_bank=(24,) * 5 if num_players > 4 else None,
     )
 

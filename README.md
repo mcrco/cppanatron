@@ -213,6 +213,12 @@ any compiler or standard library (`tests/test_random.cpp` and
 worlds; floating-point noise can still differ in the last bit where math
 libraries round `log` differently).
 
+Where Catanatron departs from the printed rules in a well-defined way, the
+engine follows it: after a settlement cuts a road, Longest Road goes to the
+longest road left even below five (the first such in the order players built
+their first road, which is seating order in a game played from the start),
+and a road walk may start at, but not enter, an opponent's building.
+
 Parity means matching legal actions, state transitions, terminal conditions,
 observations, rewards and flat action indices. Random streams differ across
 languages; replaying recorded outcomes must reproduce identical states. Map and

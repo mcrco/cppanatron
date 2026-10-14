@@ -401,15 +401,16 @@ def test_an_enemy_settlement_cuts_the_longest_road(engine):
     assert game.player(RED).longest_road_length == 4
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Catanatron keeps Longest Road after a cut leaves no road of five; "
-    "the official rules set the card aside. cppanatron matches the reference.",
-)
-def test_a_cut_below_five_roads_sets_the_award_aside(engine):
+def test_a_cut_below_five_roads_keeps_the_longest_remaining_road(engine):
+    """Catanatron re-awards Longest Road after a cut to the longest road left
+    (the first such in the order players built their first road), even below
+    five roads, where the official rules set the card aside. That is well
+    defined, so both engines do it; see test_longest_road_ties.py for ties."""
     game = setup_game(engine)
     cut_red_road_at_node_9(game)
-    assert not game.player(RED).has_road
+    red, blue = game.player(RED), game.player(BLUE)
+    assert red.longest_road_length == 4 and blue.longest_road_length < 4
+    assert red.has_road and not blue.has_road
 
 
 def test_reaching_the_target_score_wins(engine):

@@ -168,15 +168,16 @@ void Board::build_settlement(Color color, int node_id, bool initial_build_phase)
                     best, longest_acyclic_path(component, road_color));
             }
             road_lengths_[road_color] = best;
-            if (!road_lengths_.empty()) {
-                const auto winner = std::max_element(
-                    road_lengths_.begin(),
-                    road_lengths_.end(),
-                    [](const auto& lhs, const auto& rhs) {
-                        return lhs.second < rhs.second;
-                    });
-                road_color_ = winner->first;
-                road_length_ = winner->second;
+            // Catanatron's max(road_lengths.items()): the first longest in the
+            // order the players built their first road, even below five.
+            road_color_.reset();
+            road_length_ = 0;
+            for (Color candidate : road_order_) {
+                const int length = road_lengths_.at(candidate);
+                if (!road_color_.has_value() || length > road_length_) {
+                    road_color_ = candidate;
+                    road_length_ = length;
+                }
             }
         }
     }
@@ -229,6 +230,9 @@ void Board::build_road(Color color, Edge edge) {
 
     const int candidate_length =
         longest_acyclic_path(components[chosen_index], color);
+    if (!road_lengths_.contains(color)) {
+        road_order_.push_back(color);
+    }
     int& cached_length = road_lengths_[color];
     cached_length = std::max(cached_length, candidate_length);
     if (candidate_length >= 5 && candidate_length > road_length_) {
@@ -346,7 +350,8 @@ int Board::longest_acyclic_path(
 void Board::restore(
     const std::map<int, BuildingState>& buildings,
     const std::map<Edge, Color>& roads,
-    Coordinate robber) {
+    Coordinate robber,
+    const std::vector<Color>& road_order) {
     if (map_->tile_at(robber).kind != TileKind::land) {
         throw std::invalid_argument("robber must be on a land tile");
     }
@@ -426,10 +431,22 @@ void Board::restore(
     for (Color color : colors) {
         rebuild_connected_components(color);
     }
-    // As in play, only players who have built a road have a cached length.
+    // As in play, only players who have built a road have a cached length,
+    // kept in the order they built their first one: `road_order` first, then
+    // any other color with roads.
+    std::vector<Color> order = road_order;
     for (const auto& [edge, color] : roads_) {
         (void)edge;
-        if (road_lengths_.contains(color)) {
+        if (std::find(order.begin(), order.end(), color) == order.end()) {
+            order.push_back(color);
+        }
+    }
+    road_order_.clear();
+    for (Color color : order) {
+        const bool has_road = std::any_of(roads_.begin(), roads_.end(), [color](const auto& road) {
+            return road.second == color;
+        });
+        if (!has_road) {
             continue;
         }
         int best = 0;
@@ -437,6 +454,7 @@ void Board::restore(
             best = std::max(best, longest_acyclic_path(component, color));
         }
         road_lengths_[color] = best;
+        road_order_.push_back(color);
     }
     road_color_.reset();
     road_length_ = 0;

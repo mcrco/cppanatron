@@ -54,12 +54,15 @@ public:
      * Validates the distance rule and that every road connects to a building
      * of its color (through any nodes, since a later settlement may have cut
      * the road), then rebuilds road networks and lengths from scratch. Nobody
-     * holds Longest Road until set_longest_road_holder.
+     * holds Longest Road until set_longest_road_holder. `road_order` is the
+     * order the colors built their first road (seating order in a game played
+     * from the start), which breaks ties when a cut road hands the award on.
      */
     void restore(
         const std::map<int, BuildingState>& buildings,
         const std::map<Edge, Color>& roads,
-        Coordinate robber);
+        Coordinate robber,
+        const std::vector<Color>& road_order = {});
     /** Scenario setup: who holds Longest Road after restore. */
     void set_longest_road_holder(std::optional<Color> color);
 
@@ -92,6 +95,11 @@ private:
     std::map<Edge, Color> roads_;
     std::map<Color, std::vector<std::set<int>>> connected_components_;
     std::map<Color, int> road_lengths_;
+    /**
+     * Colors in the order they built their first road: Catanatron's
+     * road_lengths dict order, which decides ties after a cut.
+     */
+    std::vector<Color> road_order_;
     std::optional<Color> road_color_;
     int road_length_{};
     std::set<int> board_buildable_ids_;

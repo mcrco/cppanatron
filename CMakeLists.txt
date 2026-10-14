@@ -14,6 +14,8 @@ add_library(cppanatron
     src/observation.cpp
     src/batch.cpp
     src/mcts.cpp
+    src/hidden_cards.cpp
+    src/tracker.cpp
 )
 add_library(cppanatron::cppanatron ALIAS cppanatron)
 
@@ -38,6 +40,10 @@ if(CPPANATRON_BUILD_TESTS)
     add_executable(cppanatron_tests tests/test_board.cpp)
     target_link_libraries(cppanatron_tests PRIVATE cppanatron::cppanatron)
     add_test(NAME cppanatron_tests COMMAND cppanatron_tests)
+
+    add_executable(cppanatron_tracker_tests tests/test_tracker.cpp)
+    target_link_libraries(cppanatron_tracker_tests PRIVATE cppanatron::cppanatron)
+    add_test(NAME cppanatron_tracker_tests COMMAND cppanatron_tracker_tests)
 
     add_executable(cppanatron_action_dump tools/dump_action_space.cpp)
     target_link_libraries(cppanatron_action_dump PRIVATE cppanatron::cppanatron)

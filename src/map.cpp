@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -242,6 +244,9 @@ std::vector<Coordinate> official_spiral_coordinates(bool mini) {
     };
 }
 
+/** Far beyond any playable map; keeps coordinate arithmetic overflow-free. */
+constexpr std::int64_t kMaxCoordinate = 1 << 20;
+
 std::string coordinate_name(Coordinate coordinate) {
     return "(" + std::to_string(coordinate.x) + ", " + std::to_string(coordinate.y) + ", " +
            std::to_string(coordinate.z) + ")";
@@ -253,7 +258,14 @@ void validate_spec(const MapSpec& spec) {
     bool has_desert = false;
     for (const TileSpec& tile : spec.tiles) {
         const std::string where = "tile at " + coordinate_name(tile.coordinate);
-        if (tile.coordinate.x + tile.coordinate.y + tile.coordinate.z != 0) {
+        const auto [x, y, z] = tile.coordinate;
+        // Bounded first, so neighbor coordinates (one step away) cannot overflow.
+        if (std::max({std::abs(static_cast<std::int64_t>(x)), std::abs(static_cast<std::int64_t>(y)),
+                      std::abs(static_cast<std::int64_t>(z))}) > kMaxCoordinate) {
+            throw std::invalid_argument(
+                where + ": cube coordinates must lie within " + std::to_string(kMaxCoordinate));
+        }
+        if (static_cast<std::int64_t>(x) + y + z != 0) {
             throw std::invalid_argument(where + ": cube coordinates must sum to zero");
         }
         if (!seen.insert(tile.coordinate).second) {

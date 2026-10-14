@@ -56,6 +56,9 @@ def test_spec_dicts_have_exactly_the_documented_shape():
     ("tile", "message"),
     [
         ({"coordinate": [0, 0, 1], "type": "land"}, "sum to zero"),
+        # 2**31 - 1 twice plus 2 wraps to zero in 32-bit arithmetic.
+        ({"coordinate": [2**31 - 1, 2**31 - 1, 2], "type": "water"}, "within"),
+        ({"coordinate": [2**20 + 1, -(2**20) - 1, 0], "type": "water"}, "within"),
         ({"coordinate": [0, 0, 0], "type": "land", "resource": "WOOD"}, "number"),
         ({"coordinate": [0, 0, 0], "type": "land", "resource": "WOOD", "number": 7}, "number"),
         ({"coordinate": [0, 0, 0], "type": "land", "number": 8}, "desert"),

@@ -13,6 +13,13 @@ namespace cppanatron {
 namespace {
 
 /** SplitMix64: decorrelates the per-env streams drawn from one seed. */
+/**
+ * Games an env may finish in a row without a learner decision before step()
+ * gives up: bots alone, or crowded maps sticking before a learner's turn,
+ * would otherwise loop forever with the GIL released.
+ */
+constexpr int kMaxGamesWithoutLearner = 64;
+
 std::uint64_t mix(std::uint64_t value) {
     value += 0x9e3779b97f4a7c15ULL;
     value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
@@ -90,8 +97,12 @@ void validate(const VecEnvConfig& config) {
                 throw std::invalid_argument(where + "at least one seat must be a learner");
             }
         }
-        if (scenario.turn_limit <= 0) {
-            throw std::invalid_argument(where + "turn_limit must be positive");
+        // The initial placements take 2 (n - 1) turns; a game cut off before
+        // every learner has placed could end before any learner decides.
+        if (scenario.turn_limit <= 2 * (scenario.num_players - 1)) {
+            throw std::invalid_argument(
+                where + "turn_limit must exceed the " +
+                std::to_string(2 * (scenario.num_players - 1)) + " turns of initial placement");
         }
         if (!(scenario.weight >= 0.0)) {
             throw std::invalid_argument(where + "weight must be non-negative");
@@ -147,6 +158,8 @@ struct VecEnv::Env {
     std::vector<int> victory_points;
     std::uint64_t decisions{};
     EpisodeStats stats;
+    /** Games finished in a row without a learner decision. */
+    int games_without_learner{};
     /** The acting row's decoded action, or why it cannot be played. */
     Action pending;
     std::string refusal;
@@ -399,6 +412,18 @@ void VecEnv::shape_rewards(int env_index, bool pay) {
     }
 }
 
+void VecEnv::next_game(int env_index) {
+    Env& env = envs_[static_cast<std::size_t>(env_index)];
+    if (++env.games_without_learner > kMaxGamesWithoutLearner) {
+        throw std::runtime_error(
+            "env " + std::to_string(env_index) + ": " +
+            std::to_string(kMaxGamesWithoutLearner) +
+            " games in a row ended before any learner decided; check the scenarios");
+    }
+    start_game(env);
+    shape_rewards(env_index, false);
+}
+
 void VecEnv::play_until_learner(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     for (;;) {
@@ -407,8 +432,7 @@ void VecEnv::play_until_learner(int env_index) {
         const bool won = game.winning_color().has_value();
         if (won || game.num_turns() >= scenario.turn_limit) {
             finish_game(env_index, !won);
-            start_game(env);
-            shape_rewards(env_index, false);
+            next_game(env_index);
             continue;
         }
         const auto& actions = game.playable_actions();
@@ -417,13 +441,13 @@ void VecEnv::play_until_learner(int env_index) {
             // seat no open node. The game cannot go on; count it as a
             // truncated (stuck) episode and start another.
             finish_game(env_index, true, true);
-            start_game(env);
-            shape_rewards(env_index, false);
+            next_game(env_index);
             continue;
         }
         switch (env.seats[static_cast<std::size_t>(game.current_player_index())]) {
             case SeatKind::learner:
                 if (actions.size() > 1) {
+                    env.games_without_learner = 0;
                     return;
                 }
                 game.execute(actions.front());

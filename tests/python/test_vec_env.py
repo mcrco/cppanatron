@@ -148,6 +148,23 @@ def test_self_play_steps_match_a_replayed_game():
     assert finished > 3
 
 
+def test_turn_limits_must_outlast_the_initial_placement():
+    for players, limit in ((2, 2), (4, 6), (6, 10)):
+        with pytest.raises(ValueError, match="initial placement"):
+            cpp.VecEnv([cpp.Scenario(num_players=players, turn_limit=limit)])
+        cpp.VecEnv([cpp.Scenario(num_players=players, turn_limit=limit + 1)])
+    # The shortest allowed limit still gives the learner (last to place) decisions.
+    env = cpp.VecEnv([cpp.Scenario(num_players=4, seats=["R", "R", "R", "learner"],
+                                   turn_limit=7)], num_envs=2, seed=3)
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(1)
+    for _ in range(50):
+        sample_actions(env, buffers, rng)
+        env.step()
+    assert env.pop_stats()["truncated"] == 1.0
+
+
 def test_truncation_at_the_turn_limit():
     env = cpp.VecEnv([cpp.Scenario(num_players=2, turn_limit=12)], num_envs=2, seed=4)
     buffers = env.allocate()

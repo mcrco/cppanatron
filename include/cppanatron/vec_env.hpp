@@ -35,7 +35,10 @@ struct Scenario {
     std::vector<SeatKind> seats;
     /** Shuffle which seat gets which kind at every reset. */
     bool shuffle_seats{false};
-    /** A game is truncated once num_turns reaches this. */
+    /**
+     * A game is truncated once num_turns reaches this. It must exceed the
+     * 2 (num_players - 1) turns of the initial placement.
+     */
     int turn_limit{500};
     double weight{1.0};
     ValueEnemies value_enemies{ValueEnemies::next};
@@ -171,6 +174,7 @@ private:
     void step_env(int env_index);
     void start_game(Env& env);
     void play_until_learner(int env_index);
+    void next_game(int env_index);
     void finish_game(int env_index, bool truncated, bool stuck = false);
     void shape_rewards(int env_index, bool pay);
     void write_rows(int env_index);

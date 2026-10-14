@@ -32,7 +32,11 @@ void bind_tracker(nb::module_& module) {
         .value(
             "PLAY_DEVELOPMENT_CARD", TrackerEventType::play_development_card,
             "``player`` plays ``development_card``.")
-        .value("END_TURN", TrackerEventType::end_turn, "``player`` ends its turn.");
+        .value("END_TURN", TrackerEventType::end_turn, "``player`` ends its turn.")
+        .value(
+            "PUBLIC_VICTORY_POINTS", TrackerEventType::public_victory_points,
+            "The game goes on with public victory points ``amounts[seat]``: nobody\n"
+            "holds enough victory point cards to have won.");
 
     nb::class_<TrackerEvent>(
         module, "TrackerEvent",
@@ -63,6 +67,7 @@ void bind_tracker(nb::module_& module) {
             "play_development_card", &TrackerEvent::play_development_card, nb::arg("player"),
             nb::arg("card"))
         .def_static("end_turn", &TrackerEvent::end_turn, nb::arg("player"))
+        .def_static("public_victory_points", &TrackerEvent::public_victory_points, nb::arg("points"))
         .def(nb::self == nb::self)
         .def("__repr__", [](const TrackerEvent& event) {
             return nb::str("TrackerEvent({!r}, player={}, other={}, cards={!r}, resource={!r}, "
@@ -137,6 +142,11 @@ void bind_tracker(nb::module_& module) {
             "play_development_card", &HandTracker::play_development_card, nb::arg("player"),
             nb::arg("card"))
         .def("end_turn", &HandTracker::end_turn, nb::arg("player"))
+        .def(
+            "public_victory_points", &HandTracker::public_victory_points, nb::arg("points"),
+            "The game goes on with these public victory points per seat. Send it\n"
+            "after every step (``observe`` does): victory point cards are capped by\n"
+            "the fewest points a seat could have held without having won.")
         .def("hand_size", &HandTracker::hand_size, nb::arg("seat"))
         .def(
             "known_resources",
@@ -166,6 +176,9 @@ void bind_tracker(nb::module_& module) {
             "The deck plus the other seats' unplayed cards, in DevelopmentCard order.")
         .def_prop_ro("development_deck_size", &HandTracker::development_deck_size)
         .def("bought_this_turn", &HandTracker::bought_this_turn, nb::arg("seat"))
+        .def(
+            "victory_point_card_cap", &HandTracker::victory_point_card_cap, nb::arg("seat"),
+            "The most victory point cards ``seat`` can hold, given the game's history.")
         .def(
             "expected_resources",
             [](const HandTracker& tracker, int seat) { return to_tuple(tracker.expected_resources(seat)); },

@@ -473,6 +473,48 @@ void test_self_confirmed_trade() {
     require(threw && tracker == unchanged, "a transfer to oneself is rejected and changes nothing");
 }
 
+/**
+ * A seat that held its one card at 9 public points (of 10) cannot hold a
+ * victory point card, even after losing Largest Army.
+ */
+void test_victory_point_cap_history() {
+    Game game(seats(3), MapType::tournament, 3);
+    GameSetup setup;
+    setup.players.resize(3);
+    setup.players[0].cities = {1, 3, 13};
+    setup.players[0].settlements = {20};
+    setup.players[0].development_cards = {0, 0, 0, 1, 0};
+    setup.players[0].played_development_cards = {3, 0, 0, 0, 0};
+    setup.players[1].settlements = {42};
+    setup.players[1].development_cards = {1, 0, 0, 0, 0};
+    setup.players[1].played_development_cards = {3, 0, 0, 0, 0};
+    setup.players[2].settlements = {49};
+    setup.current_player = 1;
+    setup.largest_army = 0;
+    game.apply_setup(setup);
+    require(game.players()[0].victory_points == 9, "seat 0 starts at 9 public points");
+    HandTracker tracker(game, 2);
+    require(tracker.victory_point_card_cap(0) == 0, "at 9 points the card is not a VP card");
+
+    const Game before = game;
+    const Action knight{Color::blue, ActionType::play_knight_card, std::monostate{}};
+    game.execute(knight);
+    tracker.observe(before, knight, game);
+    require(game.players()[0].victory_points == 7, "seat 0 lost Largest Army");
+    require(tracker.victory_point_card_cap(0) == 0, "the cap remembers the 9 points");
+    std::mt19937_64 rng(1);
+    for (int i = 0; i < 200; ++i) {
+        require(sample_world(game, tracker, rng).players()[0].development_cards[4] == 0,
+                "a sample must not give seat 0 a VP card");
+    }
+
+    // Each card bought since raises the cap by one.
+    HandTracker buying(game, 2);
+    buying.public_victory_points({9, 2, 1});
+    buying.buy_development_card(0, std::nullopt);
+    require(buying.victory_point_card_cap(0) == 1, "a new card may be a VP card");
+}
+
 int main() {
     try {
         test_tracker_follows_random_games();
@@ -481,6 +523,7 @@ int main() {
         test_samples_match_expected_hands();
         test_steal_and_monopoly_events();
         test_self_confirmed_trade();
+        test_victory_point_cap_history();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

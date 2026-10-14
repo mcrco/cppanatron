@@ -38,6 +38,19 @@ struct PlayerState {
     auto operator<=>(const PlayerState&) const = default;
 };
 
+/**
+ * One seat's hidden cards for Game::redeal_hidden_cards. Hand sizes must not
+ * change, and per resource the hands must hold what they held before (the
+ * bank stays as it is); development cards come from the deck plus every
+ * hand. `development_card_owned_at_start` says which kinds the seat held
+ * when its turn began, i.e. may play this turn.
+ */
+struct HiddenHand {
+    std::array<int, 5> resources{};
+    std::array<int, 5> development_cards{};
+    std::array<bool, 4> development_card_owned_at_start{};
+};
+
 class Game {
 public:
     /** A base-game game; GameRules sets everything else to the base game's. */
@@ -148,6 +161,14 @@ public:
      */
     void determinize_development_cards(
         Color color, const std::array<int, 5>& cards, std::uint64_t seed);
+
+    /**
+     * Information-set determinization of every hidden card at once (see
+     * HiddenHand): every seat's hand is replaced, the deck becomes the unseen
+     * development cards no hand holds, reshuffled, and the game's random
+     * stream is reseeded, so nothing hidden in the old state survives.
+     */
+    void redeal_hidden_cards(const std::vector<HiddenHand>& hands, std::uint64_t seed);
 
     /**
      * Scenario setup: put a freshly created game into an exact position.

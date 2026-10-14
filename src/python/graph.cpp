@@ -91,7 +91,7 @@ void bind_graph(nb::module_& module) {
                 .format(dims.max_players, dims.max_tiles, dims.max_nodes, dims.max_edges);
         });
 
-    nb::class_<GraphActionSpace>(
+    nb::class_<GraphActionSpace, ActionCodec>(
         module, "GraphActionSpace",
         "Map-agnostic action indices: [globals | settlement@node | city@node |\n"
         "road@edge | robber@tile x victim-slot | no-op]. Robber victims are seats\n"
@@ -147,7 +147,7 @@ void bind_graph(nb::module_& module) {
         .value("PUBLIC", InfoLevel::public_)
         .value("FULL", InfoLevel::full);
 
-    nb::class_<GraphEncoder>(
+    nb::class_<GraphEncoder, ObservationEncoder>(
         module, "GraphEncoder",
         "Seat-relative graph observations padded to EncoderDims. A row is\n"
         "[global | players | tiles | nodes | edges | edge_nodes | tile_nodes |\n"

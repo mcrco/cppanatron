@@ -19,11 +19,14 @@ namespace nb = nanobind;
 
 void bind_types(nb::module_& module);
 void bind_maps(nb::module_& module);
+void bind_codecs(nb::module_& module);
 void bind_graph(nb::module_& module);
 void bind_vec_env(nb::module_& module);
 void bind_game(nb::module_& module);
 void bind_observation(nb::module_& module);
 void bind_search(nb::module_& module);
+void bind_tracker(nb::module_& module);
+void bind_search_pool(nb::module_& module);
 
 /** Python view of an action value; see the Action docstring for the shapes. */
 [[nodiscard]] nb::object action_value_to_python(ActionType type, const ActionValue& value);

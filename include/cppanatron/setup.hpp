@@ -27,6 +27,11 @@ struct PlayerSetup {
  * and played card; victory points, Longest Road and Largest Army follow from
  * the pieces and cards. Positions are at the current player's turn, before
  * or after the roll; every held development card is playable.
+ *
+ * Road lengths count a road's last edge into an opponent's building, as the
+ * rules do. In play the engine, like Catanatron, counts that edge only if the
+ * road was built before the building, so a declared copy of a played
+ * position can have a road one longer.
  */
 struct GameSetup {
     /** One entry per seat, in seating order. */

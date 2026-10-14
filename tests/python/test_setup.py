@@ -11,21 +11,41 @@ import cppanatron as cpp
 #: Fields a declared position must reproduce exactly. The turns-since counters
 #: are not part of a declaration: they start at "never".
 PLAYER_FIELDS = (
-    "victory_points",
-    "actual_victory_points",
     "roads_available",
     "settlements_available",
     "cities_available",
-    "has_road",
     "has_army",
     "has_rolled",
     "has_played_development_card_in_turn",
-    "longest_road_length",
     "resources",
     "development_cards",
     "played_development_cards",
-    "development_card_owned_at_start",
 )
+#: Fields that follow road lengths. In play, the engine (like Catanatron)
+#: counts a road's last edge into an opponent's building only if the road was
+#: there before the building; a declared position always counts it. Its
+#: per-player length also reads 0 until the first build after the initial
+#: phase, so declared lengths are compared with the board's.
+ROAD_FIELDS = ("victory_points", "actual_victory_points", "has_road")
+
+
+def has_road_into_opponent(game: cpp.Game) -> bool:
+    """Whether some road ends at another player's building."""
+    buildings = game.board.buildings
+    return any(
+        node in buildings and buildings[node][0] != color
+        for edge, color in game.board.roads.items()
+        for node in edge
+    )
+
+
+def playable_cards(player: cpp.PlayerState) -> list[bool]:
+    """Which cards could be played this turn. A card played earlier in the turn
+    leaves its owned-at-start flag set with none left, which changes nothing."""
+    return [
+        owned and count > 0
+        for owned, count in zip(player.development_card_owned_at_start, player.development_cards)
+    ]
 
 
 def declare(game: cpp.Game) -> tuple[list[cpp.PlayerSetup], dict]:
@@ -58,14 +78,21 @@ def declare(game: cpp.Game) -> tuple[list[cpp.PlayerSetup], dict]:
     return players, options
 
 
-def assert_same_position(expected: cpp.Game, actual: cpp.Game) -> None:
+def assert_same_position(expected: cpp.Game, actual: cpp.Game, *, roads: bool = True) -> None:
+    """Every declared field matches; with ``roads=False``, all but road lengths
+    and what follows from them."""
     assert actual.board.buildings == expected.board.buildings
     assert actual.board.roads == expected.board.roads
     assert actual.board.robber_coordinate == expected.board.robber_coordinate
-    assert actual.board.longest_road_color == expected.board.longest_road_color
+    if roads:
+        assert actual.board.longest_road_color == expected.board.longest_road_color
     for seat, (want, got) in enumerate(zip(expected.players, actual.players, strict=True)):
-        for field in PLAYER_FIELDS:
+        for field in PLAYER_FIELDS + (ROAD_FIELDS if roads else ()):
             assert getattr(got, field) == getattr(want, field), f"seat {seat}: {field}"
+        if roads:
+            board_length = expected.board.longest_road(expected.colors[seat])
+            assert got.longest_road_length == board_length, f"seat {seat}: longest road"
+        assert playable_cards(got) == playable_cards(want), f"seat {seat}: playable cards"
         assert sorted(got.settlements) == sorted(want.settlements)
         assert sorted(got.cities) == sorted(want.cities)
         assert sorted(got.roads) == sorted(want.roads)
@@ -78,8 +105,7 @@ def assert_same_position(expected: cpp.Game, actual: cpp.Game) -> None:
         "is_initial_build_phase",
         "num_turns",
         "completed_turns",
-        "winning_color",
-    ):
+    ) + (("winning_color",) if roads else ()):
         assert getattr(actual, field) == getattr(expected, field), field
     assert set(actual.playable_actions) == set(expected.playable_actions)
 
@@ -97,6 +123,7 @@ def fresh_like(game: cpp.Game, map_type: cpp.MapType, map_seed: int) -> cpp.Game
 def test_every_turn_start_of_random_games_can_be_declared(num_players, map_type):
     native_map = cpp.MapType[map_type]
     rng = random.Random(num_players)
+    exact = 0
     for game_index in range(3):
         map_seed = 100 * num_players + game_index
         game = cpp.Game(num_players, map_type=native_map, seed=game_index, map_seed=map_seed)
@@ -107,16 +134,28 @@ def test_every_turn_start_of_random_games_can_be_declared(num_players, map_type)
             at_turn_start = (
                 not game.is_initial_build_phase
                 and game.current_prompt == cpp.ActionPrompt.PLAY_TURN
+                and not game.is_road_building
                 and not game.player(game.current_player_index).has_rolled
             )
             if at_turn_start and rng.random() < 0.2:
                 players, options = declare(game)
+                roads = not has_road_into_opponent(game)
+                if not roads:
+                    # Longer roads may move Longest Road; let the leader take it.
+                    options["longest_road"] = None
                 declared = fresh_like(game, native_map, map_seed)
-                declared.apply_setup(players, **options)
-                assert_same_position(game, declared)
+                try:
+                    declared.apply_setup(players, **options)
+                except ValueError as exc:
+                    if roads or "Longest Road is tied" not in str(exc):
+                        raise
+                    continue
+                assert_same_position(game, declared, roads=roads)
                 checked += 1
+                exact += roads
             game.execute(rng.choice(game.playable_actions))
         assert checked > 0
+    assert exact > 0
 
 
 def test_a_declared_setup_matches_one_played_through():

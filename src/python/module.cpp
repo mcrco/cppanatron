@@ -8,4 +8,6 @@ NB_MODULE(_core, module) {
     cppanatron::python::bind_game(module);
     cppanatron::python::bind_observation(module);
     cppanatron::python::bind_search(module);
+    cppanatron::python::bind_tracker(module);
+    cppanatron::python::bind_search_pool(module);
 }

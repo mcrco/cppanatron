@@ -24,8 +24,8 @@ The engine also includes a policy/value-guided stochastic PUCT implementation.
 It keeps cloned game states, tree traversal, exact dice/development-card/robber
 chance outcomes, and value backup in C++. It is pull-based: the caller evaluates
 the root and each selected leaf with its own model, so CatanRL can batch PyTorch
-inference across many searches. Native search is perfect-information MCTS;
-information-set determinization remains Python-only.
+inference across many searches. `SearchPool` (below) supersedes it with
+N-player, batched and determinized search.
 
 ## Python
 
@@ -60,6 +60,48 @@ raise `ValueError`, as in Catanatron.
 Catanatron and builds the observation layout of Catanatron's board tensor.
 Batched environments (`GameBatch`), search leaves (`MCTSSearch`) and
 observations write straight into caller-owned NumPy buffers.
+
+## Hidden information and batched search
+
+`HandTracker(game, seat)` follows a game from one seat using only what that
+seat sees: hand sizes, a known lower bound per resource and the unknown cards
+beyond it (whose per-resource total is known from the bank), development-card
+counts and the unseen cards (deck plus other hands). Feed it true transitions
+with `observe(before, action, after)`, or, when you only have views (a server
+bot), public events: `gain`, `lose`, `transfer`, `steal` (resource only if you
+were thief or victim), `monopoly`, `buy_development_card` (card only for
+yourself), `play_development_card`, `end_turn`. `sample_world(game, tracker,
+seed)` deals a full game consistent with that knowledge, never reading the
+hidden cards of `game`; `expected_resources(seat)` gives the mean hand.
+
+`SearchPool` runs many N-player searches in lockstep. It takes an
+`ActionCodec` and an `ObservationEncoder` (implemented in C++; `FlatActionCodec`
+and `FlatObservationEncoder` wrap the v1 flat table and observation) and a
+`SearchConfig`:
+
+```python
+codec = cpp.FlatActionCodec(4, cpp.MapType.BASE)
+encoder = cpp.FlatObservationEncoder(4, observation_layout())
+pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(
+    simulations=256, max_players=4, root=cpp.RootSelection.GUMBEL, determinizations=4))
+ids = [pool.add(game, seed=i, tracker=trackers[game.current_player_index])
+       for i, (game, trackers) in enumerate(boards)]
+obs = np.empty((512, pool.observation_size), np.float32)
+rows = np.empty(512, np.int64)
+while n := pool.collect(obs, rows):          # leaves of every search, GIL released
+    logits, values = net(obs[:n])            # [n, A], [n, P] seat-relative win probabilities
+    pool.apply(logits, values)
+action = pool.select(ids[0])                 # also visits(), q(), policy_target(), value()
+```
+
+Values are per-seat win probabilities (slot 0 = the leaf's player to move);
+each node picks by its own player's value (max^n), which for two players whose
+values sum to one is the usual zero-sum search (`c_puct` is half of
+`MCTSSearch`'s). Chance actions sample exact outcomes, and outcomes reaching
+the same position share a child. Children and their games are built only when
+first selected, and expanded positions drop their games until needed: a
+256-simulation tree takes about 4.4 MB on 2-player BASE, versus 29 MB for
+`MCTSSearch` (`build/cppanatron_search_bench` measures both).
 
 ## Parity
 

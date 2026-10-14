@@ -79,6 +79,8 @@ if(CPPANATRON_BUILD_PYTHON)
         src/python/game.cpp
         src/python/observation.cpp
         src/python/search.cpp
+        src/python/tracker.cpp
+        src/python/search_pool.cpp
     )
     target_link_libraries(_core PRIVATE cppanatron::cppanatron)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

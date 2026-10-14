@@ -198,8 +198,9 @@ public:
     [[nodiscard]] std::vector<float> value(std::int64_t id) const;
     /**
      * The action to play. Temperature 0: most visits (PUCT) or the
-     * Sequential Halving winner (Gumbel); otherwise a sample from
-     * policy_target ** (1 / temperature).
+     * Sequential Halving winner (Gumbel: the best noise + logits + sigma
+     * among the final survivors, which are re-ranked after every phase);
+     * otherwise a sample from policy_target ** (1 / temperature).
      */
     [[nodiscard]] std::size_t select(std::int64_t id, double temperature = 0.0);
     /**

@@ -892,7 +892,10 @@ struct SearchPool::Impl {
             }
             ++gumbel.phase;
             const auto [kept, simulations] = gumbel.phases[static_cast<std::size_t>(gumbel.phase)];
-            if (gumbel.phase > 0 && static_cast<std::size_t>(kept) < gumbel.survivors.size()) {
+            // Re-rank after every phase, as mctx does before each simulation:
+            // the leader gets a partial phase's extra visit, and the order is
+            // never left over from an earlier shrink.
+            if (gumbel.phase > 0) {
                 const auto sigma = gumbel_sigma(search);
                 std::stable_sort(
                     gumbel.survivors.begin(), gumbel.survivors.end(),
@@ -900,7 +903,9 @@ struct SearchPool::Impl {
                         return gumbel.noise[a] + gumbel.logits[a] + sigma[a] >
                                gumbel.noise[b] + gumbel.logits[b] + sigma[b];
                     });
-                gumbel.survivors.resize(static_cast<std::size_t>(kept));
+                if (static_cast<std::size_t>(kept) < gumbel.survivors.size()) {
+                    gumbel.survivors.resize(static_cast<std::size_t>(kept));
+                }
             }
             for (int i = 0; i < simulations; ++i) {
                 gumbel.queue.push_back(gumbel.survivors[static_cast<std::size_t>(i) % gumbel.survivors.size()]);
@@ -1508,14 +1513,16 @@ struct SearchPool::Impl {
         };
         if (temperature == 0.0) {
             if (search.gumbel.has_value()) {
+                // The Sequential Halving winner: the best score among the
+                // final survivors (with an uneven last phase they need not
+                // have equal visits, so visits do not decide).
                 const GumbelRoot& gumbel = *search.gumbel;
                 const auto sigma = gumbel_sigma(search);
-                const std::uint32_t most = *std::max_element(gumbel.own_visits.begin(), gumbel.own_visits.end());
-                std::size_t best = 0;
+                std::size_t best = gumbel.survivors.front();
                 double best_score = -std::numeric_limits<double>::infinity();
-                for (std::size_t i = 0; i < sigma.size(); ++i) {
+                for (const std::size_t i : gumbel.survivors) {
                     const double score = gumbel.noise[i] + gumbel.logits[i] + sigma[i];
-                    if (gumbel.own_visits[i] == most && score > best_score) {
+                    if (score > best_score) {
                         best_score = score;
                         best = i;
                     }

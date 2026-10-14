@@ -821,8 +821,65 @@ void test_searches_spread_over_threads() {
     require(load == std::array<int, 4>{2, 2, 2, 2}, "every thread runs two searches");
 }
 
+/**
+ * Gumbel at temperature 0 plays the Sequential Halving winner: the finalist
+ * with the best noise + logits + sigma, even when the last phase is uneven
+ * (halving_phases(5, 16) ends (2, 3), so one finalist gets an extra visit).
+ * With gumbel_scale 0 the score is log policy_target + const.
+ */
+void test_gumbel_plays_the_best_scoring_finalist() {
+    const auto codec = std::make_shared<FlatActionCodec>(3, MapType::base);
+    SearchConfig config;
+    config.root = RootSelection::gumbel;
+    config.gumbel_scale = 0.0;
+    config.gumbel_considered = 5;
+    config.simulations = 16;
+    config.max_players = 3;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    std::vector<std::int64_t> ids;
+    for (std::uint64_t seed = 0; seed < 400 && ids.size() < 60; ++seed) {
+        Game game(seats(3), MapType::base, seed);
+        std::mt19937_64 rng(seed);
+        // Initial placements and turns of play.
+        for (std::uint64_t step = 0; step < seed * 7 % 60; ++step) {
+            const auto& actions = game.playable_actions();
+            game.execute(actions[rng() % actions.size()]);
+        }
+        if (game.playable_actions().size() >= 5) {
+            ids.push_back(pool.add(game, seed));
+        }
+    }
+    run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_logits(leaf, logits);
+        const double v = hashed_value(leaf);
+        values[0] = static_cast<float>(v);
+        values[1] = static_cast<float>((1.0 - v) / 2.0);
+        values[2] = values[1];
+    });
+    int uneven = 0;
+    for (const std::int64_t id : ids) {
+        const auto visits = pool.visits(id);
+        const auto target = pool.policy_target(id);
+        std::vector<std::size_t> order(visits.size());
+        std::iota(order.begin(), order.end(), std::size_t{0});
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return visits[a] > visits[b]; });
+        const std::size_t first = order[0];
+        const std::size_t second = order[1];
+        require(visits[first] + visits[second] >= 12, "two finalists share the last phases");
+        uneven += visits[first] != visits[second];
+        if (target[first] == target[second]) {
+            continue;
+        }
+        const std::size_t best = target[first] > target[second] ? first : second;
+        require(pool.select(id) == best, "temperature 0 plays the best-scoring finalist");
+    }
+    require(ids.size() > 40 && uneven > 20, "the test must cover uneven last phases");
+}
+
 int main() {
     try {
+        test_gumbel_plays_the_best_scoring_finalist();
         test_two_player_matches_mcts_search();
         test_finds_the_saving_move();
         test_max_n_backup();

@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -391,9 +393,7 @@ struct MCTSSearch::Impl {
         for (const auto& outcome : best_action->outcomes) {
             probabilities.push_back(outcome.probability);
         }
-        std::discrete_distribution<std::size_t> distribution(probabilities.begin(),
-                                                             probabilities.end());
-        return *best_action->outcomes[distribution(random)].child;
+        return *best_action->outcomes[random::discrete(random, probabilities)].child;
     }
 
     void backup(const std::vector<Node*>& path, double leaf_value) {
@@ -600,11 +600,10 @@ void MCTSSearch::add_root_dirichlet_noise(double alpha, double fraction) {
         return;
     }
 
-    std::gamma_distribution<double> gamma(alpha, 1.0);
     std::vector<double> noise;
     noise.reserve(impl_->root.actions.size());
     for (std::size_t i = 0; i < impl_->root.actions.size(); ++i) {
-        noise.push_back(gamma(impl_->random));
+        noise.push_back(random::gamma(impl_->random, alpha));
     }
     const double total = std::accumulate(noise.begin(), noise.end(), 0.0);
     if (total <= kProbabilityTolerance) {

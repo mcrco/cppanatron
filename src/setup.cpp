@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cppanatron/game.hpp"
+#include "cppanatron/random.hpp"
 
 namespace cppanatron {
 namespace {
@@ -189,7 +190,7 @@ void Game::apply_setup(const GameSetup& setup) {
             development_deck_.end(), static_cast<std::size_t>(deck[i]),
             static_cast<DevelopmentCard>(i));
     }
-    std::shuffle(development_deck_.begin(), development_deck_.end(), random_);
+    random::shuffle(development_deck_.begin(), development_deck_.end(), random_);
 
     is_initial_build_phase_ = false;
     current_prompt_ = ActionPrompt::play_turn;

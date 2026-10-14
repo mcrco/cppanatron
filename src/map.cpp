@@ -8,6 +8,8 @@
 #include <string>
 #include <tuple>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -206,7 +208,7 @@ std::vector<TopologyEntry> make_topology(bool mini) {
 
 template <typename T>
 void shuffle(std::vector<T>& values, std::mt19937_64& random) {
-    std::shuffle(values.begin(), values.end(), random);
+    random::shuffle(values.begin(), values.end(), random);
 }
 
 std::vector<Coordinate> official_spiral_coordinates(bool mini) {

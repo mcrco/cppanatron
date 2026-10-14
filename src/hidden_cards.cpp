@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "cppanatron/game.hpp"
+#include "cppanatron/random.hpp"
 
 namespace cppanatron {
 
@@ -69,7 +70,7 @@ void Game::redeal_hidden_cards(const std::vector<HiddenHand>& hands, std::uint64
             static_cast<DevelopmentCard>(i));
     }
     std::mt19937_64 shuffle_random(seed);
-    std::shuffle(development_deck_.begin(), development_deck_.end(), shuffle_random);
+    random::shuffle(development_deck_.begin(), development_deck_.end(), shuffle_random);
     // Future dice and steals must not follow the old (hidden) random stream.
     random_.seed(shuffle_random());
     playable_actions_ = generate_playable_actions();

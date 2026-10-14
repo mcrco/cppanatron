@@ -18,6 +18,8 @@
 #include <thread>
 #include <utility>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -730,7 +732,7 @@ struct SearchPool::Impl {
         for (std::uint32_t e = chance.first_edge; e < chance.first_edge + chance.num_edges; ++e) {
             total += tree.edges[e].prior;
         }
-        double draw = std::uniform_real_distribution<double>(0.0, total)(rng);
+        double draw = random::uniform(rng) * total;
         for (std::uint32_t e = chance.first_edge; e < chance.first_edge + chance.num_edges; ++e) {
             draw -= tree.edges[e].prior;
             if (draw < 0.0) {
@@ -932,10 +934,9 @@ struct SearchPool::Impl {
         }
         if (config.root == RootSelection::puct && config.dirichlet_alpha > 0.0 &&
             config.dirichlet_fraction > 0.0) {
-            std::gamma_distribution<double> gamma(config.dirichlet_alpha, 1.0);
             std::vector<double> noise(count);
             for (double& value : noise) {
-                value = gamma(search.rng);
+                value = random::gamma(search.rng, config.dirichlet_alpha);
             }
             double total = std::accumulate(noise.begin(), noise.end(), 0.0);
             if (total <= kTiny) {
@@ -966,9 +967,8 @@ struct SearchPool::Impl {
                                     static_cast<double>(search.worlds.size());
             }
         }
-        std::uniform_real_distribution<double> uniform(std::numeric_limits<double>::min(), 1.0);
         for (std::size_t i = 0; i < count; ++i) {
-            gumbel.noise.push_back(config.gumbel_scale * -std::log(-std::log(uniform(search.rng))));
+            gumbel.noise.push_back(config.gumbel_scale * random::gumbel(search.rng));
         }
         gumbel.own_visits.assign(count, 0);
         if (root_value.has_value()) {
@@ -1548,8 +1548,7 @@ struct SearchPool::Impl {
         if (std::accumulate(weights.begin(), weights.end(), 0.0) <= 0.0) {
             std::fill(weights.begin(), weights.end(), 1.0);
         }
-        std::discrete_distribution<std::size_t> distribution(weights.begin(), weights.end());
-        return action_of(distribution(search.rng));
+        return action_of(random::discrete(search.rng, weights));
     }
 
     SearchStats stats(const Search& search) const {

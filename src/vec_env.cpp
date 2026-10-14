@@ -13,6 +13,8 @@
 #include <thread>
 #include <utility>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -33,7 +35,7 @@ std::uint64_t mix(std::uint64_t value) {
 
 template <typename T>
 std::size_t pick(std::size_t count, T& random) {
-    return std::uniform_int_distribution<std::size_t>(0, count - 1)(random);
+    return random::index(random, count);
 }
 
 /**
@@ -394,7 +396,7 @@ void VecEnv::start_game(Env& env) {
     for (const Scenario& scenario : config_.scenarios) {
         weights.push_back(scenario.weight);
     }
-    const int index = std::discrete_distribution<int>(weights.begin(), weights.end())(env.random);
+    const int index = static_cast<int>(random::discrete(env.random, weights));
     const Scenario& scenario = config_.scenarios[static_cast<std::size_t>(index)];
 
     std::shared_ptr<const CatanMap> map;
@@ -411,7 +413,7 @@ void VecEnv::start_game(Env& env) {
     std::vector<int> slots(num_players);
     std::iota(slots.begin(), slots.end(), 0);
     if (scenario.shuffle_seats) {
-        std::shuffle(slots.begin(), slots.end(), env.random);
+        random::shuffle(slots.begin(), slots.end(), env.random);
     }
     std::vector<SeatKind> seats(num_players, SeatKind::learner);
     if (!scenario.seats.empty()) {

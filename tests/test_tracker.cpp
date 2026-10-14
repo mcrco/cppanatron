@@ -143,7 +143,10 @@ void test_tracker_follows_random_games() {
                                 "after a monopoly everyone knows where the resource is");
                     }
                 }
-                if (step % 37 == 0) {
+                // Like the late trackers below: whether a finished game is won
+                // decides how sample_world caps victory point cards, so worlds
+                // sampled from a finished game may differ.
+                if (step % 37 == 0 && !game.winning_color().has_value()) {
                     const int observer = static_cast<int>(rng() % static_cast<std::uint64_t>(n));
                     check_samples(
                         game, trackers[static_cast<std::size_t>(observer)],
@@ -174,7 +177,7 @@ void test_tracker_follows_random_games() {
 void test_tracker_ignores_hidden_differences() {
     int compared = 0;
     for (int n = 3; n <= 4; ++n) {
-        for (std::uint64_t seed = 1; seed <= 6; ++seed) {
+        for (std::uint64_t seed = 1; seed <= 12; ++seed) {
             Game truth(seats(n), MapType::base, seed * 13 + static_cast<std::uint64_t>(n), rules_for(n));
             std::mt19937_64 rng(seed);
             // Play into the game first so hands hold something.

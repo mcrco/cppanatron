@@ -60,6 +60,10 @@ if(CPPANATRON_BUILD_TESTS)
     target_link_libraries(cppanatron_search_pool_tests PRIVATE cppanatron::cppanatron)
     add_test(NAME cppanatron_search_pool_tests COMMAND cppanatron_search_pool_tests)
 
+    add_executable(cppanatron_random_tests tests/test_random.cpp)
+    target_link_libraries(cppanatron_random_tests PRIVATE cppanatron::cppanatron)
+    add_test(NAME cppanatron_random_tests COMMAND cppanatron_random_tests)
+
     add_executable(cppanatron_action_dump tools/dump_action_space.cpp)
     target_link_libraries(cppanatron_action_dump PRIVATE cppanatron::cppanatron)
 

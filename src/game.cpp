@@ -4,6 +4,8 @@
 #include <numeric>
 #include <stdexcept>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -102,7 +104,7 @@ Game::Game(
                 rules_.development_deck[static_cast<std::size_t>(card)]),
             card);
     }
-    std::shuffle(development_deck_.begin(), development_deck_.end(), random_);
+    random::shuffle(development_deck_.begin(), development_deck_.end(), random_);
     playable_actions_ = generate_playable_actions();
 }
 
@@ -495,7 +497,7 @@ void Game::determinize_development_cards(
         }
     }
     std::mt19937_64 shuffle_random(seed);
-    std::shuffle(development_deck_.begin(), development_deck_.end(), shuffle_random);
+    random::shuffle(development_deck_.begin(), development_deck_.end(), shuffle_random);
     playable_actions_ = generate_playable_actions();
 }
 
@@ -754,8 +756,9 @@ void Game::yield_resources(int number) {
 }
 
 void Game::apply_roll(const Action& action, std::optional<Dice> replay_dice) {
-    std::uniform_int_distribution<int> die(1, 6);
-    const Dice dice = replay_dice.value_or(Dice{die(random_), die(random_)});
+    const Dice dice = replay_dice.has_value()
+                          ? *replay_dice
+                          : Dice{random::between(random_, 1, 6), random::between(random_, 1, 6)};
     const int number = dice.first + dice.second;
     PlayerState& state = player(action.color);
     state.has_rolled = true;
@@ -841,8 +844,7 @@ void Game::apply_move_robber(
             }
             stolen = *replay_stolen_resource;
         } else {
-            std::uniform_int_distribution<std::size_t> choose(0, cards.size() - 1);
-            stolen = cards[choose(random_)];
+            stolen = cards[random::index(random_, cards.size())];
         }
         const std::size_t resource = resource_index(stolen);
         --victim.resources[resource];

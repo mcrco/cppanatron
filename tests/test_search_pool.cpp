@@ -122,7 +122,8 @@ void test_two_player_matches_mcts_search() {
     for (std::uint64_t seed = 1; seed <= 4; ++seed) {
         Game game(seats(2), MapType::base, seed);
         std::mt19937_64 rng(seed);
-        for (std::uint64_t step = 0; step < seed - 1; ++step) {
+        const std::uint64_t steps = (seed - 1) % 2;
+        for (std::uint64_t step = 0; step < steps; ++step) {
             const auto& actions = game.playable_actions();
             game.execute(actions[rng() % actions.size()]);
         }
@@ -139,7 +140,11 @@ void test_two_player_matches_mcts_search() {
             hashed_logits(*leaf, logits);
             reference.evaluate_leaf(logits, 2.0 * hashed_value(*leaf) - 1.0);
         }
-        require(reference.metrics().maximum_depth < 8, "the comparison must stay clear of dice");
+        // The two searches draw chance outcomes differently (MCTSSearch samples
+        // a one-outcome draw at every step), so no path may reach the first
+        // roll: the 2p initial placement is 8 plies, `steps` already played.
+        require(reference.metrics().maximum_depth + steps <= 8,
+                "the comparison must stay clear of dice");
 
         SearchConfig config;
         config.c_puct = 0.75;

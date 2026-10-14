@@ -190,6 +190,15 @@ in `tests/python` uses it three ways:
   more seeds);
 - `test_bindings.py` covers the Python API itself.
 
+Every draw (dice, steals, deck shuffles, map generation, VecEnv sampling,
+search chance nodes, Dirichlet and Gumbel noise, sampled worlds) goes through
+the samplers in `include/cppanatron/random.hpp` over `std::mt19937_64`, not
+the standard library's distributions, so a seed gives the same results with
+any compiler or standard library (`tests/test_random.cpp` and
+`tests/python/test_golden_random.py` pin seeded games, maps, schedules and
+worlds; floating-point noise can still differ in the last bit where math
+libraries round `log` differently).
+
 Parity means matching legal actions, state transitions, terminal conditions,
 observations, rewards and flat action indices. Random streams differ across
 languages; replaying recorded outcomes must reproduce identical states. Map and

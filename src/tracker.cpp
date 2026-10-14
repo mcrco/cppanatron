@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "cppanatron/random.hpp"
+
 namespace cppanatron {
 namespace {
 
@@ -854,7 +856,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
     for (std::size_t r = 0; r < 5; ++r) {
         cards.insert(cards.end(), static_cast<std::size_t>(pool[r]), static_cast<int>(r));
     }
-    std::shuffle(cards.begin(), cards.end(), rng);
+    random::shuffle(cards.begin(), cards.end(), rng);
     std::size_t cursor = 0;
     for (int seat : others) {
         auto& resources = hands[static_cast<std::size_t>(seat)].resources;
@@ -901,7 +903,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
     };
     bool fits = false;
     for (int attempt = 0; attempt < kVictoryPointDealAttempts && !fits; ++attempt) {
-        std::shuffle(unseen.begin(), unseen.end(), rng);
+        random::shuffle(unseen.begin(), unseen.end(), rng);
         fits = deal_fits();
     }
     if (!fits) {
@@ -915,7 +917,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
                 rest.push_back(card);
             }
         }
-        std::shuffle(rest.begin(), rest.end(), rng);
+        random::shuffle(rest.begin(), rest.end(), rng);
         victory_points -= std::accumulate(floors.begin(), floors.end(), 0);
         const int in_deck = std::clamp(victory_points, 0, tracker.development_deck_size());
         victory_points -= in_deck;
@@ -933,7 +935,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
                 hand.push_back(rest.back());
                 rest.pop_back();
             }
-            std::shuffle(hand.begin(), hand.end(), rng);
+            random::shuffle(hand.begin(), hand.end(), rng);
             dealt.insert(dealt.end(), hand.begin(), hand.end());
         }
         if (victory_points != 0) {

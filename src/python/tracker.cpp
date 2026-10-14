@@ -103,6 +103,9 @@ void bind_tracker(nb::module_& module) {
             "observer's own hand only; other seats' cards start unknown, which is\n"
             "exact for a fresh game.")
         .def("copy", [](const HandTracker& tracker) { return HandTracker(tracker); })
+        .def(
+            "__eq__", [](const HandTracker& lhs, const HandTracker& rhs) { return lhs == rhs; },
+            nb::is_operator())
         .def("__copy__", [](const HandTracker& tracker) { return HandTracker(tracker); })
         .def(
             "__deepcopy__", [](const HandTracker& tracker, nb::handle) { return HandTracker(tracker); },

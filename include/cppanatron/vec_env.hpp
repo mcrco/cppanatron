@@ -11,6 +11,7 @@
 
 #include "cppanatron/game.hpp"
 #include "cppanatron/graph_encoder.hpp"
+#include "cppanatron/tracker.hpp"
 #include "cppanatron/value_player.hpp"
 
 namespace cppanatron {
@@ -72,6 +73,13 @@ struct VecEnvConfig {
      * act (and estimate every seat's value) from the acting row.
      */
     bool encode_waiting{false};
+    /**
+     * Keep a HandTracker for every learner seat, fed every transition in the
+     * env (the learners' actions, forced moves, bot moves) and the seat's own
+     * options when it is to move (friendly-robber bounds). For determinized
+     * search and belief agents; costs a game copy per transition.
+     */
+    bool trackers{false};
     /**
      * Start the next game as soon as one ends (training). When false
      * (schedule mode, for evaluation) a finished env stays idle until the
@@ -248,6 +256,8 @@ public:
     /** Whether an env holds a game (always, unless in schedule mode). */
     [[nodiscard]] bool active(int env_index) const;
     [[nodiscard]] const std::vector<int>& lineup_slots(int env_index) const;
+    /** With config.trackers: a learner seat's tracker of the env's game. */
+    [[nodiscard]] const HandTracker& tracker(int env_index, int seat) const;
 
     [[nodiscard]] const Game& game(int env_index) const;
     [[nodiscard]] int scenario_index(int env_index) const;
@@ -265,6 +275,8 @@ private:
     void check_action(int env_index);
     void step_env(int env_index);
     void start_game(Env& env);
+    void play(Env& env, Action action);
+    void observe_options(Env& env);
     void begin_game(
         Env& env, int scenario, std::shared_ptr<const CatanMap> map, std::uint64_t game_seed,
         std::vector<SeatKind> seats, std::vector<int> lineup_slots, std::uint64_t bot_seed);

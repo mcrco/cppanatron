@@ -561,3 +561,95 @@ def test_expert_actions_label_acting_rows_with_fs_choice():
         if step % 2:
             buffers["actions"][labels >= 0] = labels[labels >= 0]
         env.step()
+
+
+# ---------------------------------------------------------------- hand trackers
+
+
+def test_trackers_follow_every_transition_like_a_replay():
+    """With every seat learning, a step is the action plus forced moves; the
+    env's trackers equal trackers fed that replay, options included."""
+    rules = cpp.GameRules(vps_to_win=6, friendly_robber=True)
+    env = cpp.VecEnv([cpp.Scenario(num_players=3, rules=rules, turn_limit=300)],
+                     num_envs=3, seed=12, trackers=True)
+    buffers = env.allocate()
+    env.reset()
+    space = env.encoder.action_space
+    rng = np.random.default_rng(4)
+    compared = 0
+    for _ in range(600):
+        sample_actions(env, buffers, rng)
+        expected = []
+        for e in range(env.num_envs):
+            game = env.game(e)
+            trackers = [env.tracker(e, seat) for seat in range(3)]
+
+            def play(action):
+                before = game.copy()
+                game.execute(action)
+                for tracker in trackers:
+                    tracker.observe(before, action, game)
+                if game.winning_color is None:
+                    trackers[game.current_player_index].observe_options(
+                        game, game.playable_actions)
+
+            play(space.decode(game, int(buffers["actions"][e * 3 + game.current_player_index])))
+            while (game.winning_color is None and game.num_turns < 300
+                   and len(game.playable_actions) == 1):
+                play(game.playable_actions[0])
+            expected.append((game, trackers))
+        env.step()
+        for e, (game, trackers) in enumerate(expected):
+            if buffers["terminals"][e * 3]:
+                continue
+            assert env.game(e).search_equivalent(game)
+            for seat in range(3):
+                assert env.tracker(e, seat) == trackers[seat]
+                assert env.tracker(e, seat).consistent_with(game)
+            compared += 1
+    assert compared > 1_000
+
+
+def test_trackers_see_bot_moves_and_feed_search():
+    env = cpp.VecEnv(
+        [cpp.Scenario(num_players=4, seats=["learner", "R", "F", "learner"], shuffle_seats=True,
+                      rules=cpp.GameRules(friendly_robber=True))],
+        num_envs=4, seed=21, num_threads=2, trackers=True)
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(9)
+    codec = env.encoder.action_space
+    pool = cpp.SearchPool(codec, env.encoder,
+                          cpp.SearchConfig(simulations=8, max_players=4, determinizations=2))
+    searched = 0
+    for step in range(250):
+        for e in range(env.num_envs):
+            game = env.game(e)
+            for seat, kind in enumerate(env.seat_kinds(e)):
+                if kind != cpp.SeatKind.LEARNER:
+                    with pytest.raises(IndexError, match="learner seats"):
+                        env.tracker(e, seat)
+                    continue
+                tracker = env.tracker(e, seat)
+                assert tracker.observer == seat and tracker.consistent_with(game)
+                tracker.check_public(game)
+            if step % 50 == 0:
+                seat = game.current_player_index
+                world = cpp.sample_world(game, env.tracker(e, seat), seed=step)
+                assert world.current_player_index == seat
+                pool.add(game, step, env.tracker(e, seat))
+                searched += 1
+        sample_actions(env, buffers, rng)
+        env.step()
+    observations = np.zeros((32, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(32, dtype=np.int64)
+    while n := pool.collect(observations, ids):
+        pool.apply(np.zeros((n, len(codec)), dtype=np.float32),
+                   np.full((n, 4), 0.25, dtype=np.float32))
+    assert searched == 20
+
+    plain = cpp.VecEnv([cpp.Scenario()], num_envs=1)
+    plain.allocate()
+    plain.reset()
+    with pytest.raises(RuntimeError, match="no trackers"):
+        plain.tracker(0, 0)

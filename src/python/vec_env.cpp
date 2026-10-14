@@ -14,6 +14,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include "cppanatron/tracker.hpp"
 #include "cppanatron/value_player.hpp"
 #include "cppanatron/vec_env.hpp"
 
@@ -219,7 +220,7 @@ void bind_vec_env(nb::module_& module) {
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
                std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
                int num_threads, float vp_reward, bool encode_waiting, bool auto_reset,
-               std::optional<InfoLevel> critic_level) {
+               std::optional<InfoLevel> critic_level, bool trackers) {
                 VecEnvConfig config;
                 if (!dims.has_value()) {
                     std::vector<std::shared_ptr<const CatanMap>> maps;
@@ -244,13 +245,14 @@ void bind_vec_env(nb::module_& module) {
                 config.encode_waiting = encode_waiting;
                 config.auto_reset = auto_reset;
                 config.critic_level = critic_level;
+                config.trackers = trackers;
                 new (self) PyVecEnv(std::move(config));
             },
             nb::arg("scenarios"), nb::kw_only(), nb::arg("num_envs") = 1,
             nb::arg("dims") = nb::none(), nb::arg("level") = InfoLevel::private_,
             nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
             nb::arg("encode_waiting") = false, nb::arg("auto_reset") = true,
-            nb::arg("critic_level") = nb::none(),
+            nb::arg("critic_level") = nb::none(), nb::arg("trackers") = false,
             "``dims`` defaults to the smallest covering every scenario's maps and\n"
             "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
             "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
@@ -261,7 +263,10 @@ void bind_vec_env(nb::module_& module) {
             "each game ended. Pass ``dims`` covering the maps you will schedule.\n\n"
             "``critic_level`` (an InfoLevel) appends a critic block to every encoded\n"
             "row: the players block at that level, the only block that differs\n"
-            "between levels (see ``layout()``).")
+            "between levels (see ``layout()``).\n\n"
+            "``trackers=True`` keeps a HandTracker per learner seat, fed every\n"
+            "transition in the env (learner, forced and bot moves) and the seat's own\n"
+            "options, for determinized search and belief agents (``tracker(e, seat)``).")
         .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
         .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
         .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })
@@ -530,6 +535,14 @@ void bind_vec_env(nb::module_& module) {
             nb::arg("env_index"),
             "Who plays each seat of the env's game: the scheduled lineup slots, or\n"
             "positions in the scenario's seat list for auto-reset games.")
+        .def(
+            "tracker",
+            [](const PyVecEnv& self, int env_index, int seat) {
+                return HandTracker(self.env.tracker(env_index, seat));
+            },
+            nb::arg("env_index"), nb::arg("seat"),
+            "With ``trackers=True``: a copy of a learner seat's HandTracker of the\n"
+            "env's game, for SearchPool.add and sample_world.")
         .def(
             "game_seed",
             [](const PyVecEnv& self, int env_index) { return self.env.game_seed(env_index); },

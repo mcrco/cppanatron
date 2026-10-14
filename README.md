@@ -108,6 +108,12 @@ decisions per seat, so the games played do not depend on `num_envs`, threads
 or finishing order. Random bots draw from a stream seeded per game, and the
 optional `lineup_slot` buffer says who plays each row's seat.
 
+`trackers=True` keeps a `HandTracker` for every learner seat, fed every
+transition in the env (learner actions, forced moves, bot moves) and the
+seat's own friendly-robber options; `env.tracker(e, seat)` returns a copy for
+`SearchPool.add` and `sample_world`, so determinized search and belief agents
+run on the threaded VecEnv.
+
 `env.expert_actions(out)` labels every acting row with the index of the action
 Catanatron's value function player (F) would choose there (-1 elsewhere),
 computed on the env threads, for imitation learning.

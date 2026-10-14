@@ -6,6 +6,7 @@
 #include <exception>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
@@ -173,6 +174,8 @@ struct VecEnv::Env {
     std::vector<SeatKind> seats;
     std::vector<int> lineup_slots;
     std::vector<std::uint64_t> seat_decisions;
+    /** With config.trackers: each learner seat's HandTracker of this game. */
+    std::map<std::size_t, HandTracker> trackers;
     /** Schedule mode: games finished since the last pop_finished. */
     std::vector<FinishedGame> finished;
     /** Actual victory points at the last reward, for shaping. */
@@ -441,6 +444,41 @@ void VecEnv::begin_game(
     env.victory_points.assign(env.seats.size(), 0);
     env.seat_decisions.assign(env.seats.size(), 0);
     env.decisions = 0;
+    env.trackers.clear();
+    if (config_.trackers) {
+        for (std::size_t seat = 0; seat < env.seats.size(); ++seat) {
+            if (env.seats[seat] == SeatKind::learner) {
+                env.trackers.emplace(seat, HandTracker(*env.game, static_cast<int>(seat)));
+            }
+        }
+        observe_options(env);
+    }
+}
+
+// By value: the action may live in the game's playable actions, which
+// executing it replaces.
+void VecEnv::play(Env& env, const Action action) {
+    if (env.trackers.empty()) {
+        env.game->execute(action);
+        return;
+    }
+    const Game before = *env.game;
+    env.game->execute(action);
+    for (auto& [seat, tracker] : env.trackers) {
+        (void)seat;
+        tracker.observe(before, action, *env.game);
+    }
+    observe_options(env);
+}
+
+void VecEnv::observe_options(Env& env) {
+    // What the seat to move learns from its own legal actions (the friendly
+    // robber spares seats under 3 points, bounding their victory point cards).
+    const Game& game = *env.game;
+    const auto tracker = env.trackers.find(static_cast<std::size_t>(game.current_player_index()));
+    if (tracker != env.trackers.end() && !game.winning_color().has_value()) {
+        tracker->second.observe_options(game, game.playable_actions());
+    }
 }
 
 void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
@@ -564,13 +602,13 @@ void VecEnv::play_until_learner(int env_index) {
                     env.games_without_learner = 0;
                     return;
                 }
-                game.execute(actions.front());
+                play(env, actions.front());
                 break;
             case SeatKind::random:
-                game.execute(actions[pick(actions.size(), env.bots)]);
+                play(env, actions[pick(actions.size(), env.bots)]);
                 break;
             case SeatKind::value:
-                game.execute(value_action(game, ValueWeights{}, scenario.value_enemies));
+                play(env, value_action(game, ValueWeights{}, scenario.value_enemies));
                 break;
         }
     }
@@ -638,7 +676,7 @@ void VecEnv::step_env(int env_index) {
         return;  // idle since its game ended; its rows already say so
     }
     ++env.seat_decisions[static_cast<std::size_t>(env.game->current_player_index())];
-    env.game->execute(env.pending);
+    play(env, env.pending);
     ++env.decisions;
 
     const std::uint64_t episodes = env.stats.total.episodes;
@@ -818,6 +856,23 @@ const Game& VecEnv::game(int env_index) const {
 
 int VecEnv::scenario_index(int env_index) const {
     return envs_.at(static_cast<std::size_t>(env_index)).scenario;
+}
+
+const HandTracker& VecEnv::tracker(int env_index, int seat) const {
+    const Env& env = envs_.at(static_cast<std::size_t>(env_index));
+    if (!config_.trackers) {
+        throw std::logic_error("this VecEnv keeps no trackers (trackers is off)");
+    }
+    if (env.game == nullptr) {
+        throw std::logic_error("env " + std::to_string(env_index) + " holds no game");
+    }
+    const auto tracker = env.trackers.find(static_cast<std::size_t>(seat));
+    if (tracker == env.trackers.end()) {
+        throw std::out_of_range(
+            "env " + std::to_string(env_index) + " keeps no tracker for seat " +
+            std::to_string(seat) + " (trackers follow learner seats)");
+    }
+    return tracker->second;
 }
 
 std::uint64_t VecEnv::game_seed(int env_index) const {

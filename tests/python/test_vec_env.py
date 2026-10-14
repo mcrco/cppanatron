@@ -59,6 +59,25 @@ def test_buffers_must_match_shapes_and_dtypes():
         env.step()
 
 
+def test_flag_buffers_may_be_bool_like_pufferlibs():
+    env = cpp.VecEnv([cpp.Scenario(num_players=2, turn_limit=10)], num_envs=3, seed=1)
+    buffers = env.allocate()
+    for name in ("terminals", "truncations", "acting", "learner"):
+        buffers[name] = np.zeros(env.num_rows, dtype=np.bool_)
+    env.bind(**buffers)
+    env.reset()
+    assert buffers["acting"].sum() == 3 and buffers["learner"].all()
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        sample_actions(env, buffers, rng)
+        env.step()
+        if buffers["truncations"].any():
+            break
+    assert buffers["terminals"].dtype == np.bool_
+    assert set(buffers["terminals"].view(np.uint8).tolist()) <= {0, 1}
+    assert buffers["truncations"].any() and buffers["terminals"][buffers["truncations"]].all()
+
+
 def test_mixed_scenarios_pad_rows_and_never_leave_forced_moves():
     maps = [cpp.CatanMap.from_spec(SHAPES[name][0](4)) for name in ("strip", "lake")]
     env = cpp.VecEnv(

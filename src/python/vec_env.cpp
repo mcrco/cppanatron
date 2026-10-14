@@ -65,6 +65,17 @@ T* checked(nb::handle array, const char* name, std::size_t rows, std::size_t col
     return buffer.data();
 }
 
+/**
+ * A flag buffer: uint8, or NumPy bool (one byte holding 0 or 1, as PufferLib
+ * allocates terminals and truncations), which the engine writes as uint8.
+ */
+std::uint8_t* checked_flags(nb::handle array, const char* name, std::size_t rows) {
+    if (nb::isinstance<Buffer<bool, 1>>(array)) {
+        return reinterpret_cast<std::uint8_t*>(checked<bool, 1>(array, name, rows));
+    }
+    return checked<std::uint8_t, 1>(array, name, rows);
+}
+
 nb::dict bucket_to_python(const EpisodeStats::Bucket& bucket, std::size_t seats) {
     nb::dict result;
     const auto episodes = static_cast<double>(bucket.episodes);
@@ -223,11 +234,11 @@ void bind_vec_env(nb::module_& module) {
                     observations, "observations (float32)", rows, self.env.observation_size());
                 buffers.actions = checked<std::int32_t, 1>(actions, "actions (int32)", rows);
                 buffers.rewards = checked<float, 1>(rewards, "rewards (float32)", rows);
-                buffers.terminals = checked<std::uint8_t, 1>(terminals, "terminals (uint8)", rows);
+                buffers.terminals = checked_flags(terminals, "terminals (uint8 or bool)", rows);
                 buffers.truncations =
-                    checked<std::uint8_t, 1>(truncations, "truncations (uint8)", rows);
-                buffers.acting = checked<std::uint8_t, 1>(acting, "acting (uint8)", rows);
-                buffers.learner = checked<std::uint8_t, 1>(learner, "learner (uint8)", rows);
+                    checked_flags(truncations, "truncations (uint8 or bool)", rows);
+                buffers.acting = checked_flags(acting, "acting (uint8 or bool)", rows);
+                buffers.learner = checked_flags(learner, "learner (uint8 or bool)", rows);
                 buffers.seat = checked<std::int32_t, 1>(seat, "seat (int32)", rows);
                 buffers.env_index =
                     checked<std::int32_t, 1>(env_index, "env_index (int32)", rows);
@@ -254,8 +265,8 @@ void bind_vec_env(nb::module_& module) {
             nb::arg("num_players"),
             "Bind caller-owned arrays (no conversion; wrong dtypes raise):\n"
             "observations float32 [rows, observation_size], actions int32 [rows],\n"
-            "rewards float32 [rows], terminals/truncations/acting/learner uint8\n"
-            "[rows], seat/env_index int32 [rows], num_players int32 [num_envs].")
+            "rewards float32 [rows], terminals/truncations/acting/learner uint8 or\n"
+            "bool [rows], seat/env_index int32 [rows], num_players int32 [num_envs].")
         .def(
             "allocate",
             [](nb::handle self) {

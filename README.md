@@ -90,8 +90,8 @@ shuffle_seats=True, turn_limit=..., weight=...)` describes each kind of game;
 every reset draws one by weight. Each env has a row per seat slot (`row = env
 * max_players + seat`); `allocate()` (or `bind(...)` with caller-owned NumPy
 arrays: observations float32 `[rows, observation_size]`, actions int32,
-rewards float32, terminals/truncations/acting/learner uint8, seat/env_index
-int32, num_players int32 per env) sets up the buffers. `step()` releases the
+rewards float32, terminals/truncations/acting/learner uint8 or bool,
+seat/env_index int32, num_players int32 per env) sets up the buffers. `step()` releases the
 GIL, applies the acting rows' actions, plays forced moves and bot seats until
 a learner must decide, and writes every row; a finished game pays 1 to the
 winner's row, flags every row of its env terminal (a game cut off at the turn

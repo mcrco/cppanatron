@@ -8,9 +8,9 @@ captures every piece of state both engines track, playable actions included,
 so differential tests can compare them after each transition.
 
 Both engines share a board: it is generated natively (or given as an explicit
-``MapSpec``) and rebuilt tile for tile in Catanatron. ``catanatron_unsupported``
-tells whether the installed Catanatron plays a map's shape correctly. Requires
-``catanatron``.
+``MapSpec``) and rebuilt tile for tile in Catanatron. Requires ``catanatron``
+(our fork, whose maps carry their own node graphs, for shapes other than the
+template layouts).
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from catanatron.models.enums import (
     ActionType,
 )
 from catanatron.models.actions import generate_playable_actions
-from catanatron.models.board import Board as CatanatronBoard
 from catanatron.models.player import Color
 from catanatron.state_functions import player_key
 
@@ -39,7 +38,6 @@ from .catanatron import (
     from_catanatron_card,
     from_catanatron_color,
     from_catanatron_resource,
-    catanatron_map_from_spec,
     reference_game,
     to_catanatron_action,
     to_catanatron_color,
@@ -352,41 +350,6 @@ class CppanatronParityGame(ParityGame):
         )
 
 
-def catanatron_unsupported(spec: _core.MapSpec | dict) -> str | None:
-    """Why the installed Catanatron cannot play this map, or None if it can.
-
-    Stock Catanatron reads node adjacency from a graph of the BASE map
-    (``catanatron.models.board.STATIC_GRAPH``), which only fits maps laid out
-    like the templates. This probes the public Board API instead of that
-    detail, so it reports support as soon as Catanatron gains per-map graphs:
-    on a fresh board, a settlement on each land node must block exactly that
-    node and its land neighbors and open exactly the roads at it, as in
-    cppanatron.
-    """
-    native = _core.CatanMap.from_spec(spec)
-    land_nodes = set(native.node_ids)
-    color = Color.RED
-    try:
-        reference = catanatron_map_from_spec(spec)
-        for node in native.node_ids:
-            board = CatanatronBoard(reference)
-            board.build_settlement(color, node, initial_build_phase=True)
-            neighbors = native.neighbors(node)
-            open_nodes = set(board.buildable_node_ids(color, initial_build_phase=True))
-            roads = {tuple(sorted(edge)) for edge in board.buildable_edges(color)}
-            if open_nodes != land_nodes - {node, *neighbors} or roads != {
-                tuple(sorted((node, neighbor))) for neighbor in neighbors
-            }:
-                return (
-                    f"Catanatron's node graph disagrees at node {node}: stock Catanatron "
-                    "takes adjacency from the BASE map (models/board.py STATIC_GRAPH) and "
-                    "needs per-map graphs for this shape"
-                )
-    except Exception as error:  # noqa: BLE001 - any refusal means unsupported
-        return f"Catanatron rejects this map: {error!r}"
-    return None
-
-
 def new_game(
     engine: Engine,
     players: int | Sequence[Color] = 2,
@@ -445,7 +408,6 @@ def new_game(
 
 __all__ = [
     "CHANCE_ACTIONS",
-    "catanatron_unsupported",
     "ENGINES",
     "CatanatronParityGame",
     "CppanatronParityGame",

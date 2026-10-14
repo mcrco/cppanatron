@@ -100,12 +100,11 @@ episode aggregates. `tools/bench_vec_env.py` measures throughput.
 
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
-the observation layout of Catanatron's board tensor. Stock Catanatron takes
-node adjacency from the BASE map, so it plays explicit maps with the template
-layouts only; `cppanatron.parity.catanatron_unsupported(spec)` probes whether
-the installed Catanatron plays a shape. The older two-player flat environment (`GameBatch`), search leaves
-(`MCTSSearch`) and observations write straight into caller-owned NumPy buffers
-as well.
+the observation layout of Catanatron's board tensor. Our Catanatron fork gives
+every map its own node graph of land-tile edges, the same adjacency, so both
+engines play any shape alike. The older two-player flat environment
+(`GameBatch`), search leaves (`MCTSSearch`) and observations write straight
+into caller-owned NumPy buffers as well.
 
 ## Hidden information and batched search
 
@@ -161,8 +160,8 @@ in `tests/python` uses it three ways:
   snapshots, including the exact playable-action set, before every transition,
   on template maps and explicit ones (templates as specs; hexagons, the 5–6
   player board, a rectangle, a random island, a strip, a lake, islands and a
-  board without water for 2–6 players, which xfail until Catanatron uses
-  per-map node graphs) (`CPPANATRON_PARITY_GAMES=50` fuzzes more seeds);
+  board without water) for 2–6 players (`CPPANATRON_PARITY_GAMES=50` fuzzes
+  more seeds);
 - `test_bindings.py` covers the Python API itself.
 
 Parity means matching legal actions, state transitions, terminal conditions,

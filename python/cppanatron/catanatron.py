@@ -7,10 +7,8 @@ members here.
 
 Maps convert through ``MapSpec``: ``catanatron_map_from_spec`` walks the tiles
 in spec order like Catanatron's ``initialize_tiles``, so both engines number
-nodes and edges identically. Stock Catanatron's ``Board`` takes node adjacency
-from a module-level graph of the BASE map (``STATIC_GRAPH``), so it only plays
-maps whose land graph matches it (the template layouts) until its board uses
-a per-map graph; ``cppanatron.parity.catanatron_unsupported`` tells which.
+nodes and edges identically. Both engines join nodes along land-tile edges
+only (Catanatron's ``CatanMap.graph`` in our fork), so any shape plays alike.
 """
 
 from __future__ import annotations

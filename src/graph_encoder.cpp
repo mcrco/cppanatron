@@ -445,6 +445,12 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
 
     // ---- edges
     std::vector<Edge> buildable_edges = board.buildable_edges(me);
+    if (game.current_prompt() == ActionPrompt::build_initial_road &&
+        observer == game.current_player_index()) {
+        // The initial road must touch the settlement just placed.
+        const int last = game.player(me).settlements.back();
+        std::erase_if(buildable_edges, [last](Edge edge) { return edge.a != last && edge.b != last; });
+    }
     std::sort(buildable_edges.begin(), buildable_edges.end());
     const auto& edges = map.land_edges();
     for (std::size_t slot = 0; slot < edges.size(); ++slot) {

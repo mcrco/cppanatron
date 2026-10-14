@@ -134,6 +134,29 @@ def test_the_mask_block_is_the_action_spaces_mask_for_the_seat_to_act(num_player
         game.execute(rng.choice(game.playable_actions))
 
 
+@pytest.mark.parametrize("num_players", [2, 4])
+def test_buildable_edges_follow_the_initial_road_rule(num_players):
+    """While a seat places an initial road, its buildable edges are its legal roads."""
+    encoder = cpp.GraphEncoder(DIMS)
+    space = encoder.action_space
+    road_offset, _ = space.layout()["road"]
+    edges_offset, (_, width) = encoder.layout()["edges"]
+    buildable = encoder.feature_names("edges").index("buildable")
+    rng = random.Random(num_players)
+    game = cpp.Game(num_players, seed=num_players)
+    checked = 0
+    while game.is_initial_build_phase:
+        if game.current_prompt == cpp.ActionPrompt.BUILD_INITIAL_ROAD:
+            seat = game.current_player_index
+            row = encoder.encode(game, seat)
+            edges = row[edges_offset: edges_offset + DIMS.max_edges * width].reshape(-1, width)
+            roads = {space.index(game, a) - road_offset for a in game.playable_actions}
+            assert set(np.flatnonzero(edges[:, buildable])) == roads
+            checked += 1
+        game.execute(rng.choice(game.playable_actions))
+    assert checked == 2 * num_players
+
+
 def test_encode_into_writes_the_same_row():
     encoder = cpp.GraphEncoder(DIMS)
     game = random_game(3, 5, 150)

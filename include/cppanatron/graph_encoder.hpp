@@ -110,7 +110,9 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  * edges (Fe = 2 + P), per land edge:
  *   valid                 the slot is an edge of this map
  *   road_<k>[P]           a road of relative seat k is here
- *   buildable             the observer may build a road here, cost aside
+ *   buildable             the observer may build a road here, cost aside (while
+ *                         it places an initial road: only at the settlement
+ *                         it just placed)
  *
  * edge_nodes (E x 2) and tile_nodes (T x 6): node slots of each edge's ends
  * and each tile's corners (NORTH clockwise), as floats; -1 pads empty slots.

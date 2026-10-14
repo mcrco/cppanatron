@@ -272,6 +272,9 @@ void HandTracker::apply(const TrackerEvent& event) {
         case TrackerEventType::transfer: {
             next.check_seat(event.player);
             next.check_seat(event.other);
+            if (event.player == event.other) {
+                throw std::invalid_argument("a seat cannot trade with itself");
+            }
             next.take(event.other, event.cards);
             const auto index = static_cast<std::size_t>(event.player);
             for (std::size_t r = 0; r < 5; ++r) {
@@ -475,6 +478,11 @@ std::vector<TrackerEvent> HandTracker::events(
         case ActionType::confirm_trade: {
             const auto& confirmed = std::get<ConfirmedTrade>(action.value);
             const int partner = seat_of(before, confirmed.partner);
+            // Like Catanatron, the engine lets the offerer accept and confirm
+            // its own offer; nothing moves.
+            if (partner == player) {
+                return events;
+            }
             if (sum(confirmed.trade.offering) > 0) {
                 events.push_back(TrackerEvent::transfer(player, partner, confirmed.trade.offering));
             }

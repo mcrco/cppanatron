@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <numeric>
@@ -400,6 +401,78 @@ void test_steal_and_monopoly_events() {
 
 }  // namespace
 
+/** A game after a random initial phase, rebuilt by apply_setup with edits. */
+Game positioned(int n, std::uint64_t seed, const GameRules& rules,
+                const std::function<void(std::vector<PlayerSetup>&, GameSetup&)>& edit) {
+    const Game placed = setup_game(n, seed, rules);
+    std::vector<PlayerSetup> players;
+    for (const PlayerState& state : placed.players()) {
+        PlayerSetup player;
+        player.settlements = state.settlements;
+        player.roads = state.roads;
+        players.push_back(player);
+    }
+    GameSetup setup;
+    edit(players, setup);
+    setup.players = players;
+    Game game(seats(n), MapType::base, seed, rules);
+    game.apply_setup(setup);
+    return game;
+}
+
+/** The engine lets an offerer accept and confirm its own offer; nothing moves. */
+void test_self_confirmed_trade() {
+    Game game = positioned(3, 9, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup& setup) {
+        players[1].resources = {0, 0, 1, 0, 0};
+        players[2].resources = {1, 1, 0, 0, 0};
+        setup.current_player = 1;
+        setup.has_rolled = true;
+    });
+    std::vector<HandTracker> trackers{HandTracker(game, 0), HandTracker(game, 1), HandTracker(game, 2)};
+    const auto step = [&](const Action action) {  // a copy: execute replaces playable actions
+        const Game before = game;
+        game.execute(action);
+        for (auto& tracker : trackers) {
+            tracker.observe(before, action, game);
+            require(tracker.consistent_with(game), "a self trade must not break the tracker");
+        }
+    };
+    DomesticTrade trade;
+    trade.offering = {1, 0, 0, 0, 0};
+    trade.asking = {0, 0, 1, 0, 0};
+    step({Color::blue, ActionType::offer_trade, trade});
+    bool confirmed = false;
+    while (game.current_prompt() == ActionPrompt::decide_trade ||
+           game.current_prompt() == ActionPrompt::decide_acceptees) {
+        const auto& actions = game.playable_actions();
+        const bool offerer = game.current_color() == Color::blue;
+        const auto wanted = game.current_prompt() == ActionPrompt::decide_acceptees
+            ? ActionType::confirm_trade
+            : (offerer ? ActionType::accept_trade : ActionType::reject_trade);
+        const auto it = std::find_if(actions.begin(), actions.end(), [&](const Action& action) {
+            return action.type == wanted &&
+                   (wanted != ActionType::confirm_trade ||
+                    std::get<ConfirmedTrade>(action.value).partner == Color::blue);
+        });
+        require(it != actions.end(), "the offerer can accept and confirm its own offer");
+        confirmed = confirmed || wanted == ActionType::confirm_trade;
+        step(*it);
+    }
+    require(confirmed, "the self trade was confirmed");
+    require(trackers[0].unknown_count(1) == 1 && trackers[0].known_resources(1)[2] == 0,
+            "a self trade reveals nothing");
+
+    bool threw = false;
+    HandTracker tracker(game, 0);
+    const HandTracker unchanged = tracker;
+    try {
+        tracker.transfer(1, 1, {0, 0, 1, 0, 0});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw && tracker == unchanged, "a transfer to oneself is rejected and changes nothing");
+}
+
 int main() {
     try {
         test_tracker_follows_random_games();
@@ -407,6 +480,7 @@ int main() {
         test_victory_point_cards_respect_the_target();
         test_samples_match_expected_hands();
         test_steal_and_monopoly_events();
+        test_self_confirmed_trade();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

@@ -310,6 +310,23 @@ def test_vp_shaping_rewards_learner_points():
     assert shaped > 0
 
 
+def test_shaped_wins_stay_within_one():
+    env = cpp.VecEnv([cpp.Scenario(num_players=2, rules=cpp.GameRules(vps_to_win=5))],
+                     num_envs=8, seed=3, vp_reward=2.0)
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(6)
+    wins = 0
+    for _ in range(1_500):
+        sample_actions(env, buffers, rng)
+        env.step()
+        won = buffers["terminals"].astype(bool) & ~buffers["truncations"].astype(bool)
+        if won.any():
+            assert buffers["rewards"][won].max() == 1.0
+            wins += 1
+    assert wins > 0
+
+
 def test_unplayable_actions_are_refused_before_any_env_moves():
     env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=8, seed=1, num_threads=3)
     buffers = env.allocate()

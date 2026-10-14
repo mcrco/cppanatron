@@ -461,7 +461,9 @@ void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
         const auto& colors = game.colors();
         const auto winner = static_cast<std::size_t>(
             std::find(colors.begin(), colors.end(), *game.winning_color()) - colors.begin());
-        buffers_.rewards[row(env_index, static_cast<int>(winner))] += 1.0F;
+        // The win plus this step's shaping stays within PufferLib's [-1, 1] clamp.
+        float& reward = buffers_.rewards[row(env_index, static_cast<int>(winner))];
+        reward = std::min(reward + 1.0F, 1.0F);
         episode.seat_wins[winner] = 1;
         episode.learner_wins = env.seats[winner] == SeatKind::learner ? 1 : 0;
     }

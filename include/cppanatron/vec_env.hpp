@@ -61,6 +61,8 @@ struct VecEnvConfig {
     /**
      * Optional shaping: each learner row also gets vp_reward times its change
      * in actual victory points / victory points to win. 0 is win/loss only.
+     * The winner's reward on its winning step is capped at 1 (PufferLib
+     * clamps rewards to [-1, 1]).
      */
     float vp_reward{0.0F};
     /**

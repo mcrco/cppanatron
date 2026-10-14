@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -158,6 +159,26 @@ public:
     void encode_waiting(std::span<float> out) const;
 
 private:
+    /** Everything about a map the rows need, and the row's map-only features. */
+    struct MapCache;
+    /** Positions of the features written per call, within their slot. */
+    struct Offsets {
+        std::size_t tile_robber{};
+        std::size_t tile_buildings{};
+        std::size_t node_settlement{};
+        std::size_t node_city{};
+        std::size_t node_pips{};
+        std::size_t node_robber{};
+        std::size_t node_open{};
+        std::size_t node_buildable{};
+        std::size_t node_distance{};
+        std::size_t edge_road{};
+        std::size_t edge_buildable{};
+    };
+
+    /** The cache for a map, built once per thread for each live map. */
+    [[nodiscard]] const MapCache& map_cache(const std::shared_ptr<const CatanMap>& map) const;
+
     EncoderDims dims_;
     InfoLevel level_;
     GraphActionSpace action_space_;
@@ -167,6 +188,7 @@ private:
     std::vector<std::string> node_names_;
     std::vector<std::string> edge_names_;
     std::vector<Block> layout_;
+    Offsets offsets_;
     std::size_t size_{};
 };
 

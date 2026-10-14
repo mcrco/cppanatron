@@ -157,6 +157,70 @@ def test_buildable_edges_follow_the_initial_road_rule(num_players):
     assert checked == 2 * num_players
 
 
+@pytest.mark.parametrize("num_players", [2, 3, 5])
+def test_buildability_features_match_the_board(num_players):
+    """Nodes and edges marked buildable are exactly the board's, cost aside."""
+    encoder = cpp.GraphEncoder(DIMS)
+    nodes_offset, (_, node_width) = encoder.layout()["nodes"]
+    edges_offset, (_, edge_width) = encoder.layout()["edges"]
+    node_names, edge_names = encoder.feature_names("nodes"), encoder.feature_names("edges")
+    open_, node_buildable = node_names.index("open"), node_names.index("buildable")
+    edge_buildable = edge_names.index("buildable")
+    rng = random.Random(num_players)
+    catan_map = cpp.CatanMap.from_spec(SHAPES["extension"][0](0))
+    game = cpp.Game(num_players, map=catan_map, seed=num_players)
+    ids = catan_map.node_ids
+    for step in range(1_200):
+        if game.winning_color is not None:
+            break
+        if step % 5 == 0:
+            for seat in range(num_players):
+                color = game.colors[seat]
+                row = encoder.encode(game, seat)
+                nodes = row[nodes_offset: nodes_offset + DIMS.max_nodes * node_width]
+                nodes = nodes.reshape(-1, node_width)[: len(ids)]
+                edges = row[edges_offset: edges_offset + DIMS.max_edges * edge_width]
+                edges = edges.reshape(-1, edge_width)[: catan_map.num_edges]
+                board = game.board
+                assert {ids[i] for i in np.flatnonzero(nodes[:, open_])} == set(
+                    board.buildable_node_ids(color, initial_build_phase=True))
+                assert {ids[i] for i in np.flatnonzero(nodes[:, node_buildable])} == set(
+                    board.buildable_node_ids(color, game.is_initial_build_phase))
+                expected = set(board.buildable_edges(color))
+                if (game.current_prompt == cpp.ActionPrompt.BUILD_INITIAL_ROAD
+                        and seat == game.current_player_index):
+                    last = game.player(seat).settlements[-1]
+                    expected = {e for e in expected if last in e}
+                assert {catan_map.land_edges[i] for i in np.flatnonzero(edges[:, edge_buildable])} \
+                    == expected
+        game.execute(rng.choice(game.playable_actions))
+
+
+def test_rows_follow_each_map_through_the_per_map_cache():
+    """Many short-lived maps (more than the per-thread cache holds, addresses
+    reused) each get their own map features."""
+    encoder = cpp.GraphEncoder(DIMS)
+    names = encoder.feature_names("tiles")
+    tiles_offset, (_, width) = encoder.layout()["tiles"]
+    edges_offset, _ = encoder.layout()["edge_nodes"]
+    for seed in range(30):
+        name = sorted(SHAPES)[seed % len(SHAPES)]
+        catan_map = cpp.CatanMap.from_spec(SHAPES[name][0](seed))
+        game = cpp.Game(2, map=catan_map, seed=seed)
+        row = encoder.encode(game, 0)
+        tiles = row[tiles_offset: tiles_offset + DIMS.max_tiles * width].reshape(-1, width)
+        for slot, tile in enumerate(catan_map.land_tiles.values()):
+            resource = "desert" if tile.resource is None else f"resource_{tile.resource.name.lower()}"
+            assert tiles[slot, names.index(resource)] == 1
+            assert tile.number is None or tiles[slot, names.index(f"number_{tile.number}")] == 1
+        assert (tiles[catan_map.num_land_tiles:] == 0).all()
+        slot = {node: i for i, node in enumerate(catan_map.node_ids)}
+        edge_nodes = row[edges_offset: edges_offset + 2 * catan_map.num_edges].reshape(-1, 2)
+        assert [tuple(e) for e in edge_nodes.astype(int)] == [
+            (slot[a], slot[b]) for a, b in catan_map.land_edges]
+        del game, catan_map
+
+
 def test_encode_into_writes_the_same_row():
     encoder = cpp.GraphEncoder(DIMS)
     game = random_game(3, 5, 150)

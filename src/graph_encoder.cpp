@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <stdexcept>
 
@@ -69,42 +70,6 @@ void expect(const Cursor& cursor, const float* slot, std::size_t size, const cha
         throw std::logic_error(std::string("graph encoder wrote the wrong number of ") + block +
                                " features");
     }
-}
-
-/** Multi-source BFS over land edges from a seat's buildings and road ends. */
-std::vector<int> network_distances(const Game& game, Color color) {
-    const CatanMap& map = game.board().map();
-    std::vector<int> distance(static_cast<std::size_t>(map.num_node_ids()), kUnreached);
-    std::vector<int> frontier;
-    const auto reach = [&](int node) {
-        if (distance[static_cast<std::size_t>(node)] != 0) {
-            distance[static_cast<std::size_t>(node)] = 0;
-            frontier.push_back(node);
-        }
-    };
-    const PlayerState& player = game.player(color);
-    for (int node : player.settlements) {
-        reach(node);
-    }
-    for (int node : player.cities) {
-        reach(node);
-    }
-    for (Edge edge : player.roads) {
-        reach(edge.a);
-        reach(edge.b);
-    }
-    for (std::size_t head = 0; head < frontier.size(); ++head) {
-        const int node = frontier[head];
-        const int next = distance[static_cast<std::size_t>(node)] + 1;
-        for (int neighbor : map.neighbors(node)) {
-            int& known = distance[static_cast<std::size_t>(neighbor)];
-            if (known > next) {
-                known = next;
-                frontier.push_back(neighbor);
-            }
-        }
-    }
-    return distance;
 }
 
 }  // namespace
@@ -194,6 +159,24 @@ GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level)
     add_block("tile_nodes", {tiles, 6});
     add_block("action_mask", {action_space_.size()});
     size_ = offset;
+
+    const auto at = [](const std::vector<std::string>& names, const std::string& name) {
+        return static_cast<std::size_t>(
+            std::find(names.begin(), names.end(), name) - names.begin());
+    };
+    offsets_ = {
+        .tile_robber = at(tile_names_, "robber"),
+        .tile_buildings = at(tile_names_, "buildings_0"),
+        .node_settlement = at(node_names_, "settlement_0"),
+        .node_city = at(node_names_, "city_0"),
+        .node_pips = at(node_names_, "pips_wood"),
+        .node_robber = at(node_names_, "robber"),
+        .node_open = at(node_names_, "open"),
+        .node_buildable = at(node_names_, "buildable"),
+        .node_distance = at(node_names_, "distance_0"),
+        .edge_road = at(edge_names_, "road_0"),
+        .edge_buildable = at(edge_names_, "buildable"),
+    };
 }
 
 const std::vector<std::string>& GraphEncoder::feature_names(const std::string& block) const {
@@ -215,6 +198,160 @@ const std::vector<std::string>& GraphEncoder::feature_names(const std::string& b
     throw std::invalid_argument("no per-slot feature names for block " + block);
 }
 
+
+/**
+ * Map-only data, in slots: adjacency for the per-call passes and the row with
+ * every feature that depends on the map alone already written (validity,
+ * terrain, numbers, ports, tile counts, board pips, topology), so encode
+ * starts from a copy of it. Built per thread, per live map and dims.
+ */
+struct GraphEncoder::MapCache {
+    const CatanMap* address{};
+    std::weak_ptr<const CatanMap> map;
+    EncoderDims dims;
+    std::vector<float> base;
+    /** Per node slot: up to 3 neighbor node slots and adjacent land tile slots (-1 pads). */
+    std::vector<std::array<int, 3>> neighbors;
+    std::vector<std::array<int, 3>> tiles;
+    /** Per node slot: pips of adjacent tiles by resource, robber ignored. */
+    std::vector<std::array<int, 5>> pips;
+    /** Per land tile slot: the corner node slots, resource (-1 desert) and pips. */
+    std::vector<std::array<int, 6>> corners;
+    std::vector<int> tile_resource;
+    std::vector<int> tile_pips;
+    /** Per land tile index (tiles()): its land tile slot, or -1. */
+    std::vector<int> tile_slot;
+};
+
+const GraphEncoder::MapCache& GraphEncoder::map_cache(
+    const std::shared_ptr<const CatanMap>& map) const {
+    // A handful of recent maps per thread: VecEnvs and searches revisit the
+    // same few maps, and an entry is only reused while its map is alive.
+    constexpr std::size_t kRecent = 8;
+    thread_local std::array<std::shared_ptr<MapCache>, kRecent> recent{};
+    for (std::size_t i = 0; i < kRecent; ++i) {
+        const auto& entry = recent[i];
+        if (entry != nullptr && entry->address == map.get() && entry->dims == dims_ &&
+            !entry->map.expired()) {
+            std::rotate(recent.begin(), recent.begin() + static_cast<std::ptrdiff_t>(i),
+                        recent.begin() + static_cast<std::ptrdiff_t>(i) + 1);
+            return *recent.front();
+        }
+    }
+
+    auto cache = std::make_shared<MapCache>();
+    cache->address = map.get();
+    cache->map = map;
+    cache->dims = dims_;
+    const auto& nodes = map->land_node_list();
+    const auto& land_tiles = map->land_tile_indices();
+    const auto& edges = map->land_edges();
+    cache->tile_slot.assign(map->tiles().size(), -1);
+    for (std::size_t slot = 0; slot < land_tiles.size(); ++slot) {
+        cache->tile_slot[static_cast<std::size_t>(land_tiles[slot])] = static_cast<int>(slot);
+        const Tile& tile = map->tiles()[static_cast<std::size_t>(land_tiles[slot])];
+        std::array<int, 6> corners{};
+        for (std::size_t corner = 0; corner < 6; ++corner) {
+            corners[corner] = map->node_slot(tile.nodes[corner]);
+        }
+        cache->corners.push_back(corners);
+        cache->tile_resource.push_back(
+            tile.resource.has_value() ? static_cast<int>(*tile.resource) : -1);
+        cache->tile_pips.push_back(tile.resource.has_value() ? pips(*tile.number) : 0);
+    }
+    for (int node : nodes) {
+        std::array<int, 3> neighbors{-1, -1, -1};
+        std::array<int, 3> tiles{-1, -1, -1};
+        std::array<int, 5> node_pips{};
+        const auto& adjacent = map->neighbors(node);
+        for (std::size_t i = 0; i < adjacent.size() && i < 3; ++i) {
+            neighbors[i] = map->node_slot(adjacent[i]);
+        }
+        const auto& touching = map->adjacent_land_tiles(node);
+        for (std::size_t i = 0; i < touching.size() && i < 3; ++i) {
+            const int tile = cache->tile_slot[static_cast<std::size_t>(touching[i])];
+            tiles[i] = tile;
+            if (cache->tile_resource[static_cast<std::size_t>(tile)] >= 0) {
+                node_pips[static_cast<std::size_t>(
+                    cache->tile_resource[static_cast<std::size_t>(tile)])] +=
+                    cache->tile_pips[static_cast<std::size_t>(tile)];
+            }
+        }
+        cache->neighbors.push_back(neighbors);
+        cache->tiles.push_back(tiles);
+        cache->pips.push_back(node_pips);
+    }
+
+    // The map-only features, in the order the names list them.
+    std::vector<float>& row = cache->base;
+    row.assign(size_, 0.0F);
+    const auto block = [&](std::size_t index) { return row.data() + layout_[index].offset; };
+    {
+        std::array<int, 5> board_pips{};
+        for (std::size_t slot = 0; slot < land_tiles.size(); ++slot) {
+            if (cache->tile_resource[slot] >= 0) {
+                board_pips[static_cast<std::size_t>(cache->tile_resource[slot])] +=
+                    cache->tile_pips[slot];
+            }
+        }
+        float* const pips_begin = block(0) + global_names_.size() - board_pips.size();
+        for (std::size_t r = 0; r < board_pips.size(); ++r) {
+            pips_begin[r] = ratio(board_pips[r], 30.0);
+        }
+    }
+    for (std::size_t slot = 0; slot < land_tiles.size(); ++slot) {
+        float* const begin = block(2) + slot * tile_names_.size();
+        Cursor cursor(begin);
+        const Tile& tile = map->tiles()[static_cast<std::size_t>(land_tiles[slot])];
+        cursor.put(true);
+        for (Resource resource : kResources) {
+            cursor.put(tile.resource == resource);
+        }
+        cursor.put(!tile.resource.has_value());
+        for (int number : kNumbers) {
+            cursor.put(tile.number == number);
+        }
+        cursor.put(ratio(cache->tile_pips[slot], 5.0));
+        cursor.skip(1 + static_cast<std::size_t>(dims_.max_players));  // robber, buildings
+        expect(cursor, begin, tile_names_.size(), "tile");
+    }
+    for (std::size_t slot = 0; slot < nodes.size(); ++slot) {
+        float* const begin = block(3) + slot * node_names_.size();
+        Cursor cursor(begin);
+        cursor.put(true);
+        cursor.skip(2 * static_cast<std::size_t>(dims_.max_players));  // buildings
+        cursor.put_bits(map->node_ports(nodes[slot]));
+        for (int value : cache->pips[slot]) {
+            cursor.put(ratio(value, 13.0));
+        }
+        cursor.skip(1);  // robber
+        cursor.put(ratio(static_cast<double>(map->adjacent_land_tiles(nodes[slot]).size()), 3.0));
+        cursor.skip(2 + static_cast<std::size_t>(dims_.max_players));  // open .. distances
+        expect(cursor, begin, node_names_.size(), "node");
+    }
+    for (std::size_t slot = 0; slot < edges.size(); ++slot) {
+        block(4)[slot * edge_names_.size()] = 1.0F;  // valid
+    }
+    float* const edge_nodes = block(5);
+    for (std::size_t slot = 0; slot < static_cast<std::size_t>(dims_.max_edges); ++slot) {
+        const bool valid = slot < edges.size();
+        edge_nodes[2 * slot] = valid ? static_cast<float>(map->node_slot(edges[slot].a)) : -1.0F;
+        edge_nodes[2 * slot + 1] =
+            valid ? static_cast<float>(map->node_slot(edges[slot].b)) : -1.0F;
+    }
+    float* const tile_nodes = block(6);
+    for (std::size_t slot = 0; slot < static_cast<std::size_t>(dims_.max_tiles); ++slot) {
+        for (std::size_t corner = 0; corner < 6; ++corner) {
+            tile_nodes[6 * slot + corner] =
+                slot < land_tiles.size() ? static_cast<float>(cache->corners[slot][corner]) : -1.0F;
+        }
+    }
+
+    std::rotate(recent.begin(), recent.end() - 1, recent.end());
+    recent.front() = std::move(cache);
+    return *recent.front();
+}
+
 void GraphEncoder::encode_waiting(std::span<float> out) const {
     if (out.size() != size_) {
         throw std::invalid_argument("observation buffer must match the encoder size");
@@ -232,35 +369,35 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
     if (observer < 0 || observer >= num_players) {
         throw std::out_of_range("observer is not a seat of this game");
     }
-    std::fill(out.begin(), out.end(), 0.0F);
 
     const Board& board = game.board();
     const CatanMap& map = board.map();
+    const MapCache& cache = map_cache(board.shared_map());
+    std::memcpy(out.data(), cache.base.data(), size_ * sizeof(float));
+
     const GameRules& rules = game.rules();
-    const Color me = game.colors()[static_cast<std::size_t>(observer)];
-    const Coordinate robber = board.robber_coordinate();
-    const int robber_tile = map.coordinate_to_tile().at(robber);
-    const auto seat_color = [&](int slot) {
-        return game.colors()[static_cast<std::size_t>((observer + slot) % num_players)];
-    };
+    const auto seat_of_slot = [&](int slot) { return (observer + slot) % num_players; };
     // Relative slot of each color seated in this game.
     std::array<int, kColors.size()> slot_of{};
     slot_of.fill(-1);
     for (int slot = 0; slot < num_players; ++slot) {
-        slot_of[static_cast<std::size_t>(seat_color(slot))] = slot;
+        slot_of[static_cast<std::size_t>(game.colors()[static_cast<std::size_t>(
+            seat_of_slot(slot))])] = slot;
     }
-    const auto slot_of_color = [&](Color color) { return slot_of[static_cast<std::size_t>(color)]; };
-    const auto tile_pips = [&](int tile_index) {
-        const Tile& tile = map.tiles()[static_cast<std::size_t>(tile_index)];
-        return tile.resource.has_value() ? pips(*tile.number) : 0;
+    const auto slot_of_color = [&](Color color) {
+        return slot_of[static_cast<std::size_t>(color)];
     };
+    const int robber_slot =
+        cache.tile_slot[static_cast<std::size_t>(map.coordinate_to_tile().at(board.robber_coordinate()))];
     const int deck_size = std::accumulate(
         rules.development_deck.begin(), rules.development_deck.end(), 0);
 
     float* const row = out.data();
     const auto block = [&](std::size_t index) { return row + layout_[index].offset; };
+    const auto players = static_cast<std::size_t>(dims_.max_players);
+    const std::size_t num_nodes = map.land_node_list().size();
 
-    // ---- global
+    // ---- global (the board pips are the map's)
     {
         Cursor cursor(block(0));
         for (std::size_t prompt = 0; prompt < kPromptNames.size(); ++prompt) {
@@ -278,16 +415,7 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         for (int count = 1; count <= dims_.max_players; ++count) {
             cursor.put(count == num_players);
         }
-        std::array<int, 5> board_pips{};
-        for (int tile_index : map.land_tile_indices()) {
-            const Tile& tile = map.tiles()[static_cast<std::size_t>(tile_index)];
-            if (tile.resource.has_value()) {
-                board_pips[static_cast<std::size_t>(*tile.resource)] += pips(*tile.number);
-            }
-        }
-        for (int value : board_pips) {
-            cursor.put(ratio(value, 30.0));
-        }
+        cursor.skip(kResources.size());
         expect(cursor, block(0), global_names_.size(), "global");
     }
 
@@ -295,9 +423,9 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
     for (int slot = 0; slot < num_players; ++slot) {
         float* const begin = block(1) + static_cast<std::size_t>(slot) * player_names_.size();
         Cursor cursor(begin);
-        const Color color = seat_color(slot);
-        const int seat = (observer + slot) % num_players;
-        const PlayerState& player = game.player(color);
+        const int seat = seat_of_slot(slot);
+        const Color color = game.colors()[static_cast<std::size_t>(seat)];
+        const PlayerState& player = game.players()[static_cast<std::size_t>(seat)];
         const bool own = slot == 0;
         const bool hand_visible = own || level_ != InfoLevel::private_;
         const bool cards_visible = own || level_ == InfoLevel::full;
@@ -344,11 +472,12 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         std::uint8_t ports = 0;
         const auto collect = [&](int node, int multiplier) {
             ports |= map.node_ports(node);
-            for (int tile_index : map.adjacent_land_tiles(node)) {
-                const Tile& tile = map.tiles()[static_cast<std::size_t>(tile_index)];
-                if (tile.resource.has_value() && tile_index != robber_tile) {
-                    production[static_cast<std::size_t>(*tile.resource)] +=
-                        multiplier * pips(*tile.number);
+            for (int tile : cache.tiles[static_cast<std::size_t>(map.node_slot(node))]) {
+                if (tile >= 0 && tile != robber_slot &&
+                    cache.tile_resource[static_cast<std::size_t>(tile)] >= 0) {
+                    production[static_cast<std::size_t>(
+                        cache.tile_resource[static_cast<std::size_t>(tile)])] +=
+                        multiplier * cache.tile_pips[static_cast<std::size_t>(tile)];
                 }
             }
         };
@@ -365,123 +494,156 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         expect(cursor, begin, player_names_.size(), "player");
     }
 
-    // ---- tiles
-    const auto& land_tiles = map.land_tile_indices();
-    for (std::size_t slot = 0; slot < land_tiles.size(); ++slot) {
-        float* const begin = block(2) + slot * tile_names_.size();
-        Cursor cursor(begin);
-        const Tile& tile = map.tiles()[static_cast<std::size_t>(land_tiles[slot])];
-        cursor.put(true);
-        for (Resource resource : kResources) {
-            cursor.put(tile.resource == resource);
-        }
-        cursor.put(!tile.resource.has_value());
-        for (int number : kNumbers) {
-            cursor.put(tile.number == number);
-        }
-        cursor.put(ratio(tile_pips(land_tiles[slot]), 5.0));
-        cursor.put(land_tiles[slot] == robber_tile);
-        float* const buildings = cursor.position();
-        cursor.skip(static_cast<std::size_t>(dims_.max_players));
-        for (int node : tile.nodes) {
-            const auto building = board.buildings().find(node);
-            if (building != board.buildings().end()) {
-                const int multiplier = building->second.building == Building::city ? 2 : 1;
-                buildings[slot_of_color(building->second.color)] +=
-                    static_cast<float>(multiplier) / 6.0F;
+    // ---- buildings and roads, scattered once into flat per-slot arrays
+    struct Scratch {
+        std::vector<int> owner;           // relative seat of the building at a node slot, or -1
+        std::vector<std::uint8_t> open;   // the distance rule allows a settlement
+        std::vector<std::uint8_t> mine;   // in the observer's road network
+        std::vector<int> tile_weight;     // settlements + 2 x cities per (tile slot, seat)
+        std::vector<int> distance;        // per (seat, node slot)
+        std::vector<int> frontier;
+    };
+    thread_local Scratch scratch;
+    scratch.owner.assign(num_nodes, -1);
+    scratch.open.assign(num_nodes, 1);
+    scratch.mine.assign(num_nodes, 0);
+    scratch.tile_weight.assign(map.land_tile_indices().size() * players, 0);
+    float* const node_block = block(3);
+    float* const tile_block = block(2);
+    const std::size_t node_width = node_names_.size();
+    const std::size_t tile_width = tile_names_.size();
+    for (const auto& [node, building] : board.buildings()) {
+        const auto slot = static_cast<std::size_t>(map.node_slot(node));
+        const int owner = slot_of_color(building.color);
+        const bool city = building.building == Building::city;
+        scratch.owner[slot] = owner;
+        scratch.open[slot] = 0;
+        for (int neighbor : cache.neighbors[slot]) {
+            if (neighbor >= 0) {
+                scratch.open[static_cast<std::size_t>(neighbor)] = 0;
             }
         }
-        expect(cursor, begin, tile_names_.size(), "tile");
-    }
-
-    // ---- nodes
-    std::vector<std::vector<int>> distances;
-    for (int slot = 0; slot < num_players; ++slot) {
-        distances.push_back(network_distances(game, seat_color(slot)));
-    }
-    const std::vector<int> open = board.buildable_node_ids(me, true);
-    const std::vector<int> buildable =
-        board.buildable_node_ids(me, game.is_initial_build_phase());
-    const auto& nodes = map.land_node_list();
-    const auto players = static_cast<std::size_t>(dims_.max_players);
-    for (std::size_t slot = 0; slot < nodes.size(); ++slot) {
-        float* const begin = block(3) + slot * node_names_.size();
-        Cursor cursor(begin);
-        const int node = nodes[slot];
-        cursor.put(true);
-        float* const owners = cursor.position();
-        cursor.skip(2 * players);
-        if (const auto building = board.buildings().find(node);
-            building != board.buildings().end()) {
-            const auto owner = static_cast<std::size_t>(slot_of_color(building->second.color));
-            owners[(building->second.building == Building::city ? players : 0) + owner] = 1.0F;
-        }
-        cursor.put_bits(map.node_ports(node));
-        std::array<int, 5> node_pips{};
-        bool robbed = false;
-        for (int tile_index : map.adjacent_land_tiles(node)) {
-            const Tile& tile = map.tiles()[static_cast<std::size_t>(tile_index)];
-            if (tile_index == robber_tile) {
-                robbed = true;
-            } else if (tile.resource.has_value()) {
-                node_pips[static_cast<std::size_t>(*tile.resource)] += pips(*tile.number);
+        node_block[slot * node_width + (city ? offsets_.node_city : offsets_.node_settlement) +
+                   static_cast<std::size_t>(owner)] = 1.0F;
+        for (int tile : cache.tiles[slot]) {
+            if (tile >= 0) {
+                scratch.tile_weight[static_cast<std::size_t>(tile) * players +
+                                    static_cast<std::size_t>(owner)] += city ? 2 : 1;
             }
         }
-        for (int value : node_pips) {
-            cursor.put(ratio(value, 13.0));
-        }
-        cursor.put(robbed);
-        cursor.put(ratio(static_cast<double>(map.adjacent_land_tiles(node).size()), 3.0));
-        cursor.put(std::binary_search(open.begin(), open.end(), node));
-        cursor.put(std::binary_search(buildable.begin(), buildable.end(), node));
+    }
+    for (std::size_t tile = 0; tile < map.land_tile_indices().size(); ++tile) {
         for (std::size_t seat = 0; seat < players; ++seat) {
-            cursor.put(
-                seat < distances.size()
-                    ? capped(distances[seat][static_cast<std::size_t>(node)], 6.0)
-                    : 0.0F);
+            if (const int weight = scratch.tile_weight[tile * players + seat]; weight != 0) {
+                tile_block[tile * tile_width + offsets_.tile_buildings + seat] =
+                    static_cast<float>(weight) / 6.0F;
+            }
         }
-        expect(cursor, begin, node_names_.size(), "node");
+    }
+    tile_block[static_cast<std::size_t>(robber_slot) * tile_width + offsets_.tile_robber] = 1.0F;
+
+    // ---- nodes: the robber's pips, openness, buildability, network distances
+    for (int node_slot : cache.corners[static_cast<std::size_t>(robber_slot)]) {
+        const auto slot = static_cast<std::size_t>(node_slot);
+        float* const node = node_block + slot * node_width;
+        node[offsets_.node_robber] = 1.0F;
+        const int resource = cache.tile_resource[static_cast<std::size_t>(robber_slot)];
+        if (resource >= 0) {
+            const auto r = static_cast<std::size_t>(resource);
+            node[offsets_.node_pips + r] =
+                ratio(cache.pips[slot][r] - cache.tile_pips[static_cast<std::size_t>(robber_slot)],
+                      13.0);
+        }
+    }
+    // A seat's network: its buildings and the ends of its roads.
+    scratch.distance.assign(players * num_nodes, kUnreached);
+    for (int slot = 0; slot < num_players; ++slot) {
+        const PlayerState& player = game.players()[static_cast<std::size_t>(seat_of_slot(slot))];
+        int* const distance = scratch.distance.data() + static_cast<std::size_t>(slot) * num_nodes;
+        scratch.frontier.clear();
+        const auto reach = [&](int node) {
+            const auto node_slot = static_cast<std::size_t>(map.node_slot(node));
+            if (distance[node_slot] != 0) {
+                distance[node_slot] = 0;
+                scratch.frontier.push_back(static_cast<int>(node_slot));
+            }
+        };
+        for (int node : player.settlements) {
+            reach(node);
+        }
+        for (int node : player.cities) {
+            reach(node);
+        }
+        for (Edge edge : player.roads) {
+            reach(edge.a);
+            reach(edge.b);
+            if (slot == 0) {
+                scratch.mine[static_cast<std::size_t>(map.node_slot(edge.a))] = 1;
+                scratch.mine[static_cast<std::size_t>(map.node_slot(edge.b))] = 1;
+            }
+        }
+        for (std::size_t head = 0; head < scratch.frontier.size(); ++head) {
+            const auto node_slot = static_cast<std::size_t>(scratch.frontier[head]);
+            const int next = distance[node_slot] + 1;
+            for (int neighbor : cache.neighbors[node_slot]) {
+                if (neighbor >= 0 && distance[static_cast<std::size_t>(neighbor)] > next) {
+                    distance[static_cast<std::size_t>(neighbor)] = next;
+                    scratch.frontier.push_back(neighbor);
+                }
+            }
+        }
+    }
+    // Settlements extend the network from its road ends (Board::buildable_node_ids);
+    // during the initial placement every open node is buildable.
+    const bool initial = game.is_initial_build_phase();
+    for (std::size_t slot = 0; slot < num_nodes; ++slot) {
+        float* const node = node_block + slot * node_width;
+        const bool open = scratch.open[slot] != 0;
+        node[offsets_.node_open] = open ? 1.0F : 0.0F;
+        node[offsets_.node_buildable] = open && (initial || scratch.mine[slot] != 0) ? 1.0F : 0.0F;
+        for (int seat = 0; seat < num_players; ++seat) {
+            node[offsets_.node_distance + static_cast<std::size_t>(seat)] =
+                capped(scratch.distance[static_cast<std::size_t>(seat) * num_nodes + slot], 6.0);
+        }
     }
 
-    // ---- edges
-    std::vector<Edge> buildable_edges = board.buildable_edges(me);
-    if (game.current_prompt() == ActionPrompt::build_initial_road &&
-        observer == game.current_player_index()) {
-        // The initial road must touch the settlement just placed.
-        const int last = game.player(me).settlements.back();
-        std::erase_if(buildable_edges, [last](Edge edge) { return edge.a != last && edge.b != last; });
-    }
-    std::sort(buildable_edges.begin(), buildable_edges.end());
+    // ---- edges: roads by seat, and where the observer may build one
+    float* const edge_block = block(4);
+    const std::size_t edge_width = edge_names_.size();
     const auto& edges = map.land_edges();
+    for (const auto& [edge, color] : board.roads()) {
+        edge_block[static_cast<std::size_t>(map.edge_slot(edge)) * edge_width +
+                   offsets_.edge_road + static_cast<std::size_t>(slot_of_color(color))] = 1.0F;
+    }
+    // Board::buildable_edges: free edges with an end in the observer's network
+    // (its buildings and road ends) that holds no opponent's building.
+    const PlayerState& me = game.players()[static_cast<std::size_t>(observer)];
+    for (int node : me.settlements) {
+        scratch.mine[static_cast<std::size_t>(map.node_slot(node))] = 1;
+    }
+    for (int node : me.cities) {
+        scratch.mine[static_cast<std::size_t>(map.node_slot(node))] = 1;
+    }
+    const auto expandable = [&](int node) {
+        const auto slot = static_cast<std::size_t>(map.node_slot(node));
+        return scratch.mine[slot] != 0 && (scratch.owner[slot] < 0 || scratch.owner[slot] == 0);
+    };
+    // The initial road must touch the settlement just placed.
+    const int initial_road_at =
+        game.current_prompt() == ActionPrompt::build_initial_road &&
+                observer == game.current_player_index()
+            ? me.settlements.back()
+            : -1;
     for (std::size_t slot = 0; slot < edges.size(); ++slot) {
-        float* const begin = block(4) + slot * edge_names_.size();
-        Cursor cursor(begin);
-        cursor.put(true);
-        float* const roads = cursor.position();
-        cursor.skip(players);
-        if (const auto owner = board.edge_color(edges[slot]); owner.has_value()) {
-            roads[slot_of_color(*owner)] = 1.0F;
-        }
-        cursor.put(std::binary_search(buildable_edges.begin(), buildable_edges.end(), edges[slot]));
-        expect(cursor, begin, edge_names_.size(), "edge");
-    }
-
-    // ---- topology
-    float* edge_nodes = block(5);
-    for (std::size_t slot = 0; slot < static_cast<std::size_t>(dims_.max_edges); ++slot) {
-        const bool valid = slot < edges.size();
-        edge_nodes[2 * slot] = valid ? static_cast<float>(map.node_slot(edges[slot].a)) : -1.0F;
-        edge_nodes[2 * slot + 1] = valid ? static_cast<float>(map.node_slot(edges[slot].b)) : -1.0F;
-    }
-    float* tile_nodes = block(6);
-    for (std::size_t slot = 0; slot < static_cast<std::size_t>(dims_.max_tiles); ++slot) {
-        for (std::size_t corner = 0; corner < 6; ++corner) {
-            tile_nodes[6 * slot + corner] =
-                slot < land_tiles.size()
-                    ? static_cast<float>(map.node_slot(
-                          map.tiles()[static_cast<std::size_t>(land_tiles[slot])].nodes[corner]))
-                    : -1.0F;
-        }
+        const Edge edge = edges[slot];
+        float* const features = edge_block + slot * edge_width;
+        const bool free = std::none_of(
+            features + offsets_.edge_road, features + offsets_.edge_road + players,
+            [](float road) { return road != 0.0F; });
+        const bool reaches = initial_road_at < 0 || edge.a == initial_road_at ||
+                             edge.b == initial_road_at;
+        features[offsets_.edge_buildable] =
+            free && reaches && (expandable(edge.a) || expandable(edge.b)) ? 1.0F : 0.0F;
     }
 
     // ---- action mask
@@ -490,11 +652,17 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         mask[action_space_.noop()] = 1.0F;
         return;
     }
-    thread_local std::vector<std::uint8_t> legal;
-    legal.resize(action_space_.size());
-    action_space_.mask(game, legal);
-    for (std::size_t i = 0; i < legal.size(); ++i) {
-        mask[i] = legal[i] != 0 ? 1.0F : 0.0F;
+    for (const Action& action : game.playable_actions()) {
+        switch (action.type) {
+            case ActionType::offer_trade:
+            case ActionType::accept_trade:
+            case ActionType::reject_trade:
+            case ActionType::confirm_trade:
+            case ActionType::cancel_trade:
+                continue;
+            default:
+                mask[action_space_.index(game, action)] = 1.0F;
+        }
     }
 }
 

@@ -20,6 +20,7 @@ namespace nb = nanobind;
 void bind_types(nb::module_& module);
 void bind_maps(nb::module_& module);
 void bind_graph(nb::module_& module);
+void bind_vec_env(nb::module_& module);
 void bind_game(nb::module_& module);
 void bind_observation(nb::module_& module);
 void bind_search(nb::module_& module);

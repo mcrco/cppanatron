@@ -1,0 +1,325 @@
+#include "bindings.hpp"
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <variant>
+#include <vector>
+
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/variant.h>
+#include <nanobind/stl/vector.h>
+
+#include "cppanatron/vec_env.hpp"
+
+namespace cppanatron::python {
+namespace {
+
+using SeatSpec = std::variant<SeatKind, std::string>;
+
+SeatKind seat_kind(const SeatSpec& spec) {
+    if (const auto* kind = std::get_if<SeatKind>(&spec)) {
+        return *kind;
+    }
+    const std::string& name = std::get<std::string>(spec);
+    if (name == "learner") {
+        return SeatKind::learner;
+    }
+    if (name == "value" || name == "F") {
+        return SeatKind::value;
+    }
+    if (name == "random" || name == "R") {
+        return SeatKind::random;
+    }
+    throw std::invalid_argument("seat kinds are learner, value (F) or random (R), not " + name);
+}
+
+template <typename T, int Dims>
+using Buffer = nb::ndarray<T, nb::ndim<Dims>, nb::c_contig, nb::device::cpu>;
+
+/** A VecEnv and the NumPy buffers it writes, which it keeps alive. */
+struct PyVecEnv {
+    explicit PyVecEnv(VecEnvConfig config) : env(std::move(config)) {}
+
+    VecEnv env;
+    nb::dict buffers;
+};
+
+template <typename T, int Dims>
+T* checked(nb::handle array, const char* name, std::size_t rows, std::size_t columns = 0) {
+    Buffer<T, Dims> buffer;
+    try {
+        buffer = nb::cast<Buffer<T, Dims>>(array, false);
+    } catch (const nb::cast_error&) {
+        throw std::invalid_argument(
+            std::string(name) + " must be a C-contiguous " + std::to_string(Dims) +
+            "-d NumPy array of the documented dtype");
+    }
+    if (buffer.shape(0) != rows || (Dims == 2 && buffer.shape(Dims - 1) != columns)) {
+        throw std::invalid_argument(std::string(name) + " has the wrong shape");
+    }
+    return buffer.data();
+}
+
+nb::dict bucket_to_python(const EpisodeStats::Bucket& bucket, std::size_t seats) {
+    nb::dict result;
+    const auto episodes = static_cast<double>(bucket.episodes);
+    const auto mean = [&](std::uint64_t value) -> nb::object {
+        return bucket.episodes == 0 ? nb::cast(0.0)
+                                    : nb::cast(static_cast<double>(value) / episodes);
+    };
+    result["episodes"] = bucket.episodes;
+    result["truncated"] = mean(bucket.truncated);
+    result["length"] = mean(bucket.turns);
+    result["decisions"] = mean(bucket.decisions);
+    result["learner_win"] = mean(bucket.learner_wins);
+    result["learner_seats"] = mean(bucket.learner_seats);
+    nb::list seat_wins;
+    for (std::size_t seat = 0; seat < seats; ++seat) {
+        seat_wins.append(mean(bucket.seat_wins[seat]));
+    }
+    result["seat_win"] = seat_wins;
+    return result;
+}
+
+}  // namespace
+
+void bind_vec_env(nb::module_& module) {
+    nb::enum_<SeatKind>(
+        module, "SeatKind",
+        "Who plays a seat: the LEARNER, the VALUE expert (Catanatron's F) or\n"
+        "RANDOM. Strings 'learner', 'value'/'F', 'random'/'R' work too.")
+        .value("LEARNER", SeatKind::learner)
+        .value("VALUE", SeatKind::value)
+        .value("RANDOM", SeatKind::random);
+
+    const Scenario defaults;
+    nb::class_<Scenario>(
+        module, "Scenario",
+        "One kind of game a VecEnv plays: seats, rules, maps, opponents, turn limit\n"
+        "and sampling weight.")
+        .def(
+            "__init__",
+            [](Scenario* self, int num_players, std::optional<GameRules> rules,
+               std::vector<std::shared_ptr<const CatanMap>> maps, MapType map_type,
+               NumberPlacement number_placement, std::optional<std::vector<SeatSpec>> seats,
+               bool shuffle_seats, int turn_limit, double weight, ValueEnemies value_enemies) {
+                Scenario scenario;
+                scenario.num_players = num_players;
+                scenario.rules = rules.value_or(GameRules{});
+                scenario.maps = std::move(maps);
+                scenario.map_type = map_type;
+                scenario.number_placement = number_placement;
+                if (seats.has_value()) {
+                    for (const SeatSpec& seat : *seats) {
+                        scenario.seats.push_back(seat_kind(seat));
+                    }
+                }
+                scenario.shuffle_seats = shuffle_seats;
+                scenario.turn_limit = turn_limit;
+                scenario.weight = weight;
+                scenario.value_enemies = value_enemies;
+                new (self) Scenario(std::move(scenario));
+            },
+            nb::kw_only(), nb::arg("num_players") = defaults.num_players,
+            nb::arg("rules") = nb::none(),
+            nb::arg("maps") = std::vector<std::shared_ptr<const CatanMap>>{},
+            nb::arg("map_type") = defaults.map_type,
+            nb::arg("number_placement") = defaults.number_placement,
+            nb::arg("seats") = nb::none(), nb::arg("shuffle_seats") = defaults.shuffle_seats,
+            nb::arg("turn_limit") = defaults.turn_limit, nb::arg("weight") = defaults.weight,
+            nb::arg("value_enemies") = defaults.value_enemies,
+            "``maps`` is a pool of shared CatanMaps drawn uniformly at each reset;\n"
+            "without it every reset draws a fresh ``map_type`` board. ``seats`` lists\n"
+            "a SeatKind per seat (default: all learners), shuffled per reset with\n"
+            "``shuffle_seats``. Games are truncated at ``turn_limit`` turns.")
+        .def_ro("num_players", &Scenario::num_players)
+        .def_ro("rules", &Scenario::rules)
+        .def_ro("maps", &Scenario::maps)
+        .def_ro("map_type", &Scenario::map_type)
+        .def_ro("number_placement", &Scenario::number_placement)
+        .def_ro("seats", &Scenario::seats)
+        .def_ro("shuffle_seats", &Scenario::shuffle_seats)
+        .def_ro("turn_limit", &Scenario::turn_limit)
+        .def_ro("weight", &Scenario::weight)
+        .def_ro("value_enemies", &Scenario::value_enemies);
+
+    nb::class_<PyVecEnv>(
+        module, "VecEnv",
+        "Many games stepped together for PufferLib-style training (DESIGN 1.4).\n\n"
+        "Each env has ``max_players`` rows (row = env * max_players + seat). After\n"
+        "``bind`` (or ``allocate``) and ``reset``, every ``step`` reads the actions\n"
+        "of acting rows, plays forced moves and bot seats until a learner must\n"
+        "decide, and writes every row. A finished game sets rewards (1 to the\n"
+        "winner) and terminal or truncation flags on all of the env's rows, and\n"
+        "the same step's observations are already the next game's.")
+        .def(
+            "__init__",
+            [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
+               std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
+               int num_threads, float vp_reward, bool encode_waiting) {
+                VecEnvConfig config;
+                if (!dims.has_value()) {
+                    std::vector<std::shared_ptr<const CatanMap>> maps;
+                    int players = 2;
+                    for (const Scenario& scenario : scenarios) {
+                        players = std::max(players, scenario.num_players);
+                        maps.insert(maps.end(), scenario.maps.begin(), scenario.maps.end());
+                        if (scenario.maps.empty()) {
+                            maps.push_back(std::make_shared<const CatanMap>(CatanMap::build(
+                                scenario.map_type, 0, scenario.number_placement)));
+                        }
+                    }
+                    dims = EncoderDims::covering(maps, players);
+                }
+                config.scenarios = std::move(scenarios);
+                config.num_envs = num_envs;
+                config.dims = *dims;
+                config.level = level;
+                config.seed = seed;
+                config.num_threads = num_threads;
+                config.vp_reward = vp_reward;
+                config.encode_waiting = encode_waiting;
+                new (self) PyVecEnv(std::move(config));
+            },
+            nb::arg("scenarios"), nb::kw_only(), nb::arg("num_envs") = 1,
+            nb::arg("dims") = nb::none(), nb::arg("level") = InfoLevel::private_,
+            nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
+            nb::arg("encode_waiting") = false,
+            "``dims`` defaults to the smallest covering every scenario's maps and\n"
+            "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
+            "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
+            "wait (otherwise zeros with the no-op mask).")
+        .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
+        .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
+        .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })
+        .def_prop_ro(
+            "observation_size", [](const PyVecEnv& self) { return self.env.observation_size(); })
+        .def_prop_ro(
+            "action_size",
+            [](const PyVecEnv& self) { return self.env.encoder().action_space().size(); })
+        .def_prop_ro("dims", [](const PyVecEnv& self) { return self.env.config().dims; })
+        .def_prop_ro(
+            "encoder", [](const PyVecEnv& self) { return self.env.encoder(); },
+            "A copy of the env's GraphEncoder (layout, feature names, action space).")
+        .def_prop_ro(
+            "buffers", [](const PyVecEnv& self) { return self.buffers; },
+            "The bound arrays by name.")
+        .def(
+            "bind",
+            [](PyVecEnv& self, nb::handle observations, nb::handle actions, nb::handle rewards,
+               nb::handle terminals, nb::handle truncations, nb::handle acting,
+               nb::handle learner, nb::handle seat, nb::handle env_index,
+               nb::handle num_players) {
+                const std::size_t rows = self.env.num_rows();
+                VecEnvBuffers buffers;
+                buffers.observations = checked<float, 2>(
+                    observations, "observations (float32)", rows, self.env.observation_size());
+                buffers.actions = checked<std::int32_t, 1>(actions, "actions (int32)", rows);
+                buffers.rewards = checked<float, 1>(rewards, "rewards (float32)", rows);
+                buffers.terminals = checked<std::uint8_t, 1>(terminals, "terminals (uint8)", rows);
+                buffers.truncations =
+                    checked<std::uint8_t, 1>(truncations, "truncations (uint8)", rows);
+                buffers.acting = checked<std::uint8_t, 1>(acting, "acting (uint8)", rows);
+                buffers.learner = checked<std::uint8_t, 1>(learner, "learner (uint8)", rows);
+                buffers.seat = checked<std::int32_t, 1>(seat, "seat (int32)", rows);
+                buffers.env_index =
+                    checked<std::int32_t, 1>(env_index, "env_index (int32)", rows);
+                buffers.num_players = checked<std::int32_t, 1>(
+                    num_players, "num_players (int32)",
+                    static_cast<std::size_t>(self.env.num_envs()));
+                self.env.bind(buffers);
+                nb::dict bound;
+                bound["observations"] = observations;
+                bound["actions"] = actions;
+                bound["rewards"] = rewards;
+                bound["terminals"] = terminals;
+                bound["truncations"] = truncations;
+                bound["acting"] = acting;
+                bound["learner"] = learner;
+                bound["seat"] = seat;
+                bound["env_index"] = env_index;
+                bound["num_players"] = num_players;
+                self.buffers = bound;
+            },
+            nb::kw_only(), nb::arg("observations"), nb::arg("actions"), nb::arg("rewards"),
+            nb::arg("terminals"), nb::arg("truncations"), nb::arg("acting"),
+            nb::arg("learner"), nb::arg("seat"), nb::arg("env_index"),
+            nb::arg("num_players"),
+            "Bind caller-owned arrays (no conversion; wrong dtypes raise):\n"
+            "observations float32 [rows, observation_size], actions int32 [rows],\n"
+            "rewards float32 [rows], terminals/truncations/acting/learner uint8\n"
+            "[rows], seat/env_index int32 [rows], num_players int32 [num_envs].")
+        .def(
+            "allocate",
+            [](nb::handle self) {
+                const PyVecEnv& env = nb::cast<const PyVecEnv&>(self);
+                nb::object numpy = nb::module_::import_("numpy");
+                const auto zeros = [&](nb::object shape, const char* dtype) {
+                    return numpy.attr("zeros")(shape, nb::arg("dtype") = dtype);
+                };
+                const std::size_t rows = env.env.num_rows();
+                nb::dict arrays;
+                arrays["observations"] =
+                    zeros(nb::make_tuple(rows, env.env.observation_size()), "float32");
+                arrays["actions"] = zeros(nb::make_tuple(rows), "int32");
+                arrays["rewards"] = zeros(nb::make_tuple(rows), "float32");
+                for (const char* name : {"terminals", "truncations", "acting", "learner"}) {
+                    arrays[name] = zeros(nb::make_tuple(rows), "uint8");
+                }
+                arrays["seat"] = zeros(nb::make_tuple(rows), "int32");
+                arrays["env_index"] = zeros(nb::make_tuple(rows), "int32");
+                arrays["num_players"] = zeros(nb::make_tuple(env.env.num_envs()), "int32");
+                self.attr("bind")(**arrays);
+                return arrays;
+            },
+            "Allocate and bind fresh arrays; returns them by name.")
+        .def(
+            "reset",
+            [](PyVecEnv& self, std::optional<std::uint64_t> seed) {
+                nb::gil_scoped_release release;
+                self.env.reset(seed);
+            },
+            nb::arg("seed") = nb::none(),
+            "Start a fresh game in every env and write every row.")
+        .def(
+            "step",
+            [](PyVecEnv& self) {
+                nb::gil_scoped_release release;
+                self.env.step();
+            },
+            "Apply the acting rows' actions and advance to the next learner decisions.")
+        .def(
+            "pop_stats",
+            [](PyVecEnv& self) {
+                const EpisodeStats stats = self.env.pop_stats();
+                const auto seats = static_cast<std::size_t>(self.env.max_players());
+                nb::dict result = bucket_to_python(stats.total, seats);
+                nb::list scenarios;
+                for (const auto& bucket : stats.scenarios) {
+                    scenarios.append(bucket_to_python(bucket, seats));
+                }
+                result["scenarios"] = scenarios;
+                return result;
+            },
+            "Episodes finished since the last call: count, and means of truncated,\n"
+            "length (turns), learner decisions, learner_win (won by a learner seat),\n"
+            "learner_seats and seat_win per seat; the same per scenario.")
+        .def(
+            "game", [](const PyVecEnv& self, int env_index) { return Game(self.env.game(env_index)); },
+            nb::arg("env_index"), "A copy of an env's current game.")
+        .def(
+            "scenario_index",
+            [](const PyVecEnv& self, int env_index) { return self.env.scenario_index(env_index); },
+            nb::arg("env_index"))
+        .def(
+            "seat_kinds",
+            [](const PyVecEnv& self, int env_index) { return self.env.seat_kinds(env_index); },
+            nb::arg("env_index"));
+}
+
+}  // namespace cppanatron::python

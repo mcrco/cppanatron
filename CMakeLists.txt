@@ -13,6 +13,7 @@ add_library(cppanatron
     src/graph_dims.cpp
     src/graph_action_space.cpp
     src/graph_encoder.cpp
+    src/vec_env.cpp
     src/value_player.cpp
     src/observation.cpp
     src/batch.cpp
@@ -21,6 +22,8 @@ add_library(cppanatron
 add_library(cppanatron::cppanatron ALIAS cppanatron)
 
 target_compile_features(cppanatron PUBLIC cxx_std_20)
+find_package(Threads REQUIRED)
+target_link_libraries(cppanatron PUBLIC Threads::Threads)
 target_include_directories(
     cppanatron
     PUBLIC
@@ -63,6 +66,7 @@ if(CPPANATRON_BUILD_PYTHON)
         src/python/types.cpp
         src/python/maps.cpp
         src/python/graph.cpp
+        src/python/vec_env.cpp
         src/python/game.cpp
         src/python/observation.cpp
         src/python/search.cpp

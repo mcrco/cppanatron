@@ -16,8 +16,13 @@ add_library(cppanatron
     src/mcts.cpp
     src/hidden_cards.cpp
     src/tracker.cpp
+    src/flat_codec.cpp
+    src/search_pool.cpp
 )
 add_library(cppanatron::cppanatron ALIAS cppanatron)
+
+find_package(Threads REQUIRED)
+target_link_libraries(cppanatron PUBLIC Threads::Threads)
 
 target_compile_features(cppanatron PUBLIC cxx_std_20)
 target_include_directories(
@@ -45,11 +50,18 @@ if(CPPANATRON_BUILD_TESTS)
     target_link_libraries(cppanatron_tracker_tests PRIVATE cppanatron::cppanatron)
     add_test(NAME cppanatron_tracker_tests COMMAND cppanatron_tracker_tests)
 
+    add_executable(cppanatron_search_pool_tests tests/test_search_pool.cpp)
+    target_link_libraries(cppanatron_search_pool_tests PRIVATE cppanatron::cppanatron)
+    add_test(NAME cppanatron_search_pool_tests COMMAND cppanatron_search_pool_tests)
+
     add_executable(cppanatron_action_dump tools/dump_action_space.cpp)
     target_link_libraries(cppanatron_action_dump PRIVATE cppanatron::cppanatron)
 
     add_executable(cppanatron_setup_dump tools/dump_setup.cpp)
     target_link_libraries(cppanatron_setup_dump PRIVATE cppanatron::cppanatron)
+
+    add_executable(cppanatron_search_bench tools/bench_search_pool.cpp)
+    target_link_libraries(cppanatron_search_bench PRIVATE cppanatron::cppanatron)
 endif()
 
 if(CPPANATRON_BUILD_PYTHON)

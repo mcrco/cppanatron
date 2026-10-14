@@ -197,6 +197,22 @@ def test_runs_are_determined_by_the_seed(threads):
     assert not all(np.array_equal(a, b) for a, b in zip(first, third))
 
 
+def test_resets_without_a_seed_start_new_games():
+    def first_rows(env, buffers, seed=None):
+        env.reset(seed)
+        return buffers["observations"].copy(), [env.game(e).board.map.spec() for e in range(4)]
+
+    env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=4, seed=7)
+    buffers = env.allocate()
+    first, first_maps = first_rows(env, buffers)
+    second, second_maps = first_rows(env, buffers)
+    assert first_maps != second_maps and not np.array_equal(first, second)
+    replay, replay_maps = first_rows(env, buffers, seed=7)
+    assert replay_maps == first_maps and np.array_equal(replay, first)
+    again, again_maps = first_rows(env, buffers)
+    assert again_maps == second_maps and np.array_equal(again, second)
+
+
 def test_vp_shaping_rewards_learner_points():
     env = cpp.VecEnv([cpp.Scenario(num_players=2)], num_envs=4, seed=2, vp_reward=1.0)
     buffers = env.allocate()

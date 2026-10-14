@@ -136,7 +136,12 @@ public:
     [[nodiscard]] std::size_t observation_size() const noexcept { return encoder_.size(); }
 
     void bind(const VecEnvBuffers& buffers);
-    /** Start a fresh game in every env; `seed` replaces the config seed. */
+    /**
+     * Start a fresh game in every env. A `seed` (or, on the first reset, the
+     * config seed) reseeds every env's random stream, so equal seeds replay
+     * equal runs; without one the streams continue and the games are new,
+     * as in Gymnasium.
+     */
     void reset(std::optional<std::uint64_t> seed = std::nullopt);
     void step();
     /** Aggregates of the episodes finished since the last call. */
@@ -165,6 +170,7 @@ private:
     std::vector<Env> envs_;
     std::unique_ptr<ThreadPool> pool_;
     VecEnvBuffers buffers_{};
+    bool seeded_{false};
     bool started_{false};
 };
 

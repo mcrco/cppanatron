@@ -298,7 +298,10 @@ void bind_vec_env(nb::module_& module) {
                 self.env.reset(seed);
             },
             nb::arg("seed") = nb::none(),
-            "Start a fresh game in every env and write every row.")
+            "Start a fresh game in every env and write every row. A ``seed`` (or the\n"
+            "constructor's, on the first reset) reseeds every env, so equal seeds\n"
+            "replay equal runs; ``seed=None`` later continues the streams and starts\n"
+            "new games (Gymnasium semantics).")
         .def(
             "step",
             [](PyVecEnv& self) {

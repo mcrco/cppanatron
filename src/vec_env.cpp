@@ -238,11 +238,14 @@ void VecEnv::for_each_env(void (VecEnv::*method)(int)) {
 }
 
 void VecEnv::reset(std::optional<std::uint64_t> seed) {
-    if (seed.has_value()) {
-        config_.seed = *seed;
-    }
-    for (std::size_t index = 0; index < envs_.size(); ++index) {
-        envs_[index].random.seed(mix(config_.seed ^ mix(index)));
+    // Like Gymnasium: a seed (or the first reset) reseeds every env's stream;
+    // otherwise the streams continue, so the new games are not replays.
+    if (seed.has_value() || !seeded_) {
+        config_.seed = seed.value_or(config_.seed);
+        for (std::size_t index = 0; index < envs_.size(); ++index) {
+            envs_[index].random.seed(mix(config_.seed ^ mix(index)));
+        }
+        seeded_ = true;
     }
     for_each_env(&VecEnv::start_env);
     started_ = true;

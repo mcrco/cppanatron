@@ -18,8 +18,9 @@ GameBatch::GameBatch(
     if (config.num_envs <= 0) {
         throw std::invalid_argument("num_envs must be positive");
     }
-    if (config.num_players < 2 || config.num_players > 4) {
-        throw std::invalid_argument("num_players must be between two and four");
+    if (config.num_players < 2 ||
+        config.num_players > static_cast<int>(kColors.size())) {
+        throw std::invalid_argument("num_players must be between two and six");
     }
     if (config.turns_limit <= 0) {
         throw std::invalid_argument("turns_limit must be positive");
@@ -63,9 +64,7 @@ void GameBatch::create_game(
         colors_,
         config_.map_type,
         game_seed,
-        config_.discard_limit,
-        config_.friendly_robber,
-        config_.victory_points_to_win,
+        config_.rules,
         config_.number_placement,
         map_seed);
     environment.previous_victory_points.assign(
@@ -221,7 +220,7 @@ void GameBatch::step() {
                             state.actual_victory_points -
                             environment.previous_victory_points[
                                 static_cast<std::size_t>(player)]) /
-                        static_cast<double>(config_.victory_points_to_win) +
+                        static_cast<double>(config_.rules.victory_points_to_win) +
                     0.0025 *
                         (current_production -
                          environment.previous_production[

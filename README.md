@@ -11,11 +11,14 @@ The project is split into:
 - a parity harness and test suite that run the same scenarios on Catanatron and
   on this engine.
 
-Status: the rules engine implements MINI, BASE, and TOURNAMENT maps for 2–4
+Status: the rules engine implements MINI, BASE, and TOURNAMENT maps for 2–6
 players, complete setup and turn transitions, seven/discard/robber handling,
 builds, development cards, maritime and domestic trades, Longest Road, Largest
 Army, terminal scoring, the CatanRL flat action table, and the pinned
-`ValueFunctionPlayer` heuristic.
+`ValueFunctionPlayer` heuristic. `GameRules` sets the
+victory point target, discard limit, friendly robber, bank, development deck and
+pieces per player, e.g. the 5–6 player extension's bank of 24 per resource and
+34-card deck. The 5–6 player special building phase is not implemented.
 
 The engine also includes a policy/value-guided stochastic PUCT implementation.
 It keeps cloned game states, tree traversal, exact dice/development-card/robber
@@ -42,7 +45,10 @@ game.execute(space.decode(index, game))  # dice=(3, 4) would replay a roll
 
 The Python names mirror Catanatron's (`Color.RED`, `ActionType.BUILD_ROAD`,
 `ActionPrompt.PLAY_TURN`, `MapType.BASE`), and `Action` unpacks like
-Catanatron's `(color, action_type, value)` namedtuple. Chance outcomes come from
+Catanatron's `(color, action_type, value)` namedtuple. Rules beyond the base
+game go in one object, `cpp.Game(6, rules=cpp.GameRules(resource_bank=(24,) * 5,
+development_deck=(20, 3, 3, 3, 5)))`; `value_action(game, enemies=cpp.ValueEnemies.ALL)`
+scores every opponent's production rather than only the next seat's. Chance outcomes come from
 the game's RNG unless passed to `execute` (`dice`, `development_card`,
 `stolen_resource`), which replays recorded games exactly. Unplayable actions
 raise `ValueError`, as in Catanatron.

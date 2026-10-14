@@ -3,12 +3,14 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/map.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 
 #include "cppanatron/action_space.hpp"
@@ -164,18 +166,28 @@ void bind_observation(nb::module_& module) {
             "__init__",
             [](Batch* self, int num_envs, int num_players, MapType map_type,
                const ObservationLayout& layout, NumberPlacement number_placement,
-               int discard_limit, bool friendly_robber, int vps_to_win,
+               std::optional<int> discard_limit, std::optional<bool> friendly_robber,
+               std::optional<int> vps_to_win, std::optional<GameRules> rules,
                RewardFunction reward_function, int turns_limit) {
-                new (self) Batch(
-                    {num_envs, num_players, map_type, number_placement, discard_limit,
-                     friendly_robber, vps_to_win, reward_function, turns_limit},
-                    layout);
+                BatchConfig config;
+                config.num_envs = num_envs;
+                config.num_players = num_players;
+                config.map_type = map_type;
+                config.number_placement = number_placement;
+                config.rules = resolve_rules(rules, discard_limit, friendly_robber, vps_to_win);
+                config.reward_function = reward_function;
+                config.turns_limit = turns_limit;
+                validate_rules(config.rules);
+                new (self) Batch(config, layout);
             },
             nb::arg("num_envs"), nb::arg("num_players"), nb::arg("map_type"), nb::arg("layout"),
             nb::kw_only(), nb::arg("number_placement") = NumberPlacement::official_spiral,
-            nb::arg("discard_limit") = 7, nb::arg("friendly_robber") = false,
-            nb::arg("vps_to_win") = 10, nb::arg("reward_function") = RewardFunction::shaped,
-            nb::arg("turns_limit") = 1000)
+            nb::arg("discard_limit") = nb::none(), nb::arg("friendly_robber") = nb::none(),
+            nb::arg("vps_to_win") = nb::none(), nb::arg("rules") = nb::none(),
+            nb::arg("reward_function") = RewardFunction::shaped, nb::arg("turns_limit") = 1000,
+            "``rules`` sets every game rule; otherwise the base game's apply, with\n"
+            "``discard_limit`` (7), ``friendly_robber`` (False) and ``vps_to_win`` (10)\n"
+            "as overrides, as for Game.")
         .def_prop_ro("action_space_size", [](const Batch& self) { return self.action_space_size; })
         .def_prop_ro("observation_size", [](const Batch& self) { return self.observation_size; })
         .def(

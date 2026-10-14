@@ -359,12 +359,24 @@ def new_game(
     vps_to_win: int = 10,
     discard_limit: int = 7,
     friendly_robber: bool = False,
+    resource_bank: Sequence[int] | None = None,
+    development_deck: Sequence[int] | None = None,
 ) -> ParityGame:
     """A game on ``engine``; equal arguments give both engines the same board.
 
     ``seed`` feeds each engine's own RNG, so unforced dice, cards and steals
     differ across engines. Force them wherever results are compared.
+    ``resource_bank`` and ``development_deck`` default to the base game's
+    (Resource and DevelopmentCard order).
     """
+    defaults = _core.GameRules()
+    rules = _core.GameRules(
+        vps_to_win=vps_to_win,
+        discard_limit=discard_limit,
+        friendly_robber=friendly_robber,
+        resource_bank=tuple(resource_bank or defaults.resource_bank),
+        development_deck=tuple(development_deck or defaults.development_deck),
+    )
     native_players = (
         players
         if isinstance(players, int)
@@ -377,9 +389,7 @@ def new_game(
         seed=seed,
         map_seed=map_seed,
         number_placement=_core.NumberPlacement[number_placement.upper()],
-        discard_limit=discard_limit,
-        friendly_robber=friendly_robber,
-        vps_to_win=vps_to_win,
+        rules=rules,
     )
     if engine == "cppanatron":
         return CppanatronParityGame(native)

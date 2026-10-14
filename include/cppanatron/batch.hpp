@@ -21,9 +21,7 @@ struct BatchConfig {
     int num_players{};
     MapType map_type{};
     NumberPlacement number_placement{};
-    int discard_limit{};
-    bool friendly_robber{};
-    int victory_points_to_win{};
+    GameRules rules{};
     RewardFunction reward_function{};
     int turns_limit{};
 };

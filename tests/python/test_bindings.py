@@ -48,8 +48,9 @@ def test_games_seat_explicit_colors():
     assert game.current_color == cpp.Color.ORANGE
     with pytest.raises(ValueError, match="unique"):
         cpp.Game([cpp.Color.RED, cpp.Color.RED])
+    assert cpp.Game(6).colors[4:] == [cpp.Color.GREEN, cpp.Color.BROWN]
     with pytest.raises(ValueError):
-        cpp.Game(5)
+        cpp.Game(7)
 
 
 def test_unplayable_actions_and_bad_indices_raise():

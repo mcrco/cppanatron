@@ -23,6 +23,7 @@ from catanatron.models.actions import generate_playable_actions
 from catanatron.models.enums import Action as CatanatronAction
 from catanatron.models.enums import ActionPrompt as CatanatronActionPrompt
 from catanatron.models.enums import ActionType as CatanatronActionType
+from catanatron.models.decks import Supply
 from catanatron.models.map import (
     BASE_MAP_TEMPLATE,
     MINI_MAP_TEMPLATE,
@@ -111,6 +112,20 @@ def from_catanatron_action(action: CatanatronAction) -> _core.Action:
     )
 
 
+def to_catanatron_supply(rules: _core.GameRules) -> Supply:
+    """Catanatron's bank, deck and piece counts for native rules.
+
+    Scoring, discards and the robber are separate Catanatron Game arguments.
+    """
+    return Supply(
+        resource_bank=tuple(rules.resource_bank),
+        development_deck=tuple(rules.development_deck),
+        roads=rules.roads_per_player,
+        settlements=rules.settlements_per_player,
+        cities=rules.cities_per_player,
+    )
+
+
 def to_catanatron_map(native_map: _core.CatanMap, map_type: _core.MapType) -> CatanatronMap:
     """The Catanatron board with the same tiles, numbers and ports.
 
@@ -153,13 +168,15 @@ def reference_game(
     players = list(players) if players is not None else [SimplePlayer(color) for color in colors]
     if [player.color for player in players] != colors:
         raise ValueError("players must follow the native game's seating order")
+    rules = game.rules
     reference = CatanatronGame(
         players,
         seed=seed,
-        discard_limit=game.discard_limit,
-        friendly_robber=game.friendly_robber,
-        vps_to_win=game.vps_to_win,
+        discard_limit=rules.discard_limit,
+        friendly_robber=rules.friendly_robber,
+        vps_to_win=rules.vps_to_win,
         catan_map=to_catanatron_map(game.board.map, map_type),
+        supply=to_catanatron_supply(rules),
     )
     state = reference.state
     state.players = players
@@ -195,4 +212,5 @@ __all__ = [
     "to_catanatron_map",
     "to_catanatron_prompt",
     "to_catanatron_resource",
+    "to_catanatron_supply",
 ]

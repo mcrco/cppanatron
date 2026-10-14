@@ -294,7 +294,9 @@ void bind_types(nb::module_& module) {
         .value("RED", Color::red)
         .value("BLUE", Color::blue)
         .value("WHITE", Color::white)
-        .value("ORANGE", Color::orange);
+        .value("ORANGE", Color::orange)
+        .value("GREEN", Color::green)
+        .value("BROWN", Color::brown);
     nb::enum_<Resource>(module, "Resource")
         .value("WOOD", Resource::wood)
         .value("BRICK", Resource::brick)

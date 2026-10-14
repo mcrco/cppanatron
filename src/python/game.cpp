@@ -67,7 +67,7 @@ std::vector<Color> game_colors(const std::variant<int, std::vector<Color>>& play
     }
     const int count = std::get<int>(players);
     if (count < 1 || count > static_cast<int>(kColors.size())) {
-        throw std::invalid_argument("a game needs between one and four players");
+        throw std::invalid_argument("a game needs between one and six players");
     }
     return {kColors.begin(), kColors.begin() + count};
 }
@@ -115,7 +115,84 @@ Vector<bool> action_mask(const FlatActionSpace& space, const Game& game) {
 
 }  // namespace
 
+GameRules resolve_rules(
+    const std::optional<GameRules>& rules,
+    std::optional<int> discard_limit,
+    std::optional<bool> friendly_robber,
+    std::optional<int> vps_to_win) {
+    if (rules.has_value()) {
+        if (discard_limit.has_value() || friendly_robber.has_value() || vps_to_win.has_value()) {
+            throw std::invalid_argument(
+                "set discard_limit, friendly_robber and vps_to_win inside rules, not beside it");
+        }
+        return *rules;
+    }
+    GameRules result;
+    result.discard_limit = discard_limit.value_or(result.discard_limit);
+    result.friendly_robber = friendly_robber.value_or(result.friendly_robber);
+    result.victory_points_to_win = vps_to_win.value_or(result.victory_points_to_win);
+    return result;
+}
+
 void bind_game(nb::module_& module) {
+    const GameRules defaults;
+    nb::class_<GameRules>(
+        module, "GameRules",
+        "Rule settings: scoring, discards, the robber, and the bank, deck and pieces.\n"
+        "Defaults are the base game's. Counts follow Resource and DevelopmentCard order.")
+        .def(
+            "__init__",
+            [](GameRules* self, int vps_to_win, int discard_limit, bool friendly_robber,
+               const std::array<int, 5>& resource_bank, const std::array<int, 5>& development_deck,
+               int roads_per_player, int settlements_per_player, int cities_per_player) {
+                GameRules rules;
+                rules.victory_points_to_win = vps_to_win;
+                rules.discard_limit = discard_limit;
+                rules.friendly_robber = friendly_robber;
+                rules.resource_bank = resource_bank;
+                rules.development_deck = development_deck;
+                rules.roads_per_player = roads_per_player;
+                rules.settlements_per_player = settlements_per_player;
+                rules.cities_per_player = cities_per_player;
+                validate_rules(rules);
+                new (self) GameRules(rules);
+            },
+            nb::kw_only(), nb::arg("vps_to_win") = defaults.victory_points_to_win,
+            nb::arg("discard_limit") = defaults.discard_limit,
+            nb::arg("friendly_robber") = defaults.friendly_robber,
+            nb::arg("resource_bank") = defaults.resource_bank,
+            nb::arg("development_deck") = defaults.development_deck,
+            nb::arg("roads_per_player") = defaults.roads_per_player,
+            nb::arg("settlements_per_player") = defaults.settlements_per_player,
+            nb::arg("cities_per_player") = defaults.cities_per_player)
+        .def_ro("vps_to_win", &GameRules::victory_points_to_win)
+        .def_ro("discard_limit", &GameRules::discard_limit)
+        .def_ro("friendly_robber", &GameRules::friendly_robber)
+        .def_prop_ro(
+            "resource_bank", [](const GameRules& rules) { return to_tuple(rules.resource_bank); },
+            "Starting bank ordered WOOD, BRICK, SHEEP, WHEAT, ORE.")
+        .def_prop_ro(
+            "development_deck",
+            [](const GameRules& rules) { return to_tuple(rules.development_deck); },
+            "Starting deck counts in DevelopmentCard order.")
+        .def_ro("roads_per_player", &GameRules::roads_per_player)
+        .def_ro("settlements_per_player", &GameRules::settlements_per_player)
+        .def_ro("cities_per_player", &GameRules::cities_per_player)
+        .def(
+            "__eq__", [](const GameRules& lhs, const GameRules& rhs) { return lhs == rhs; },
+            nb::is_operator())
+        .def("__repr__", [](const GameRules& rules) {
+            return nb::str(
+                       "GameRules(vps_to_win={}, discard_limit={}, friendly_robber={}, "
+                       "resource_bank={}, development_deck={}, roads_per_player={}, "
+                       "settlements_per_player={}, cities_per_player={})")
+                .format(
+                    rules.victory_points_to_win, rules.discard_limit, rules.friendly_robber,
+                    to_tuple(rules.resource_bank), to_tuple(rules.development_deck),
+                    rules.roads_per_player, rules.settlements_per_player,
+                    rules.cities_per_player);
+        });
+
     nb::class_<Tile>(module, "Tile", "A board hexagon: land, water or port.")
         .def_ro("kind", &Tile::kind)
         .def_ro("id", &Tile::id)
@@ -273,20 +350,24 @@ void bind_game(nb::module_& module) {
             "__init__",
             [](Game* self, const std::variant<int, std::vector<Color>>& players, MapType map_type,
                std::uint64_t seed, std::optional<std::uint64_t> map_seed,
-               NumberPlacement number_placement, int discard_limit, bool friendly_robber,
-               int vps_to_win) {
+               NumberPlacement number_placement, std::optional<int> discard_limit,
+               std::optional<bool> friendly_robber, std::optional<int> vps_to_win,
+               std::optional<GameRules> rules) {
                 new (self) Game(
-                    game_colors(players), map_type, seed, discard_limit, friendly_robber,
-                    vps_to_win, number_placement, map_seed);
+                    game_colors(players), map_type, seed,
+                    resolve_rules(rules, discard_limit, friendly_robber, vps_to_win),
+                    number_placement, map_seed);
             },
             nb::arg("players") = 2, nb::kw_only(), nb::arg("map_type") = MapType::base,
             nb::arg("seed") = 0, nb::arg("map_seed") = nb::none(),
             nb::arg("number_placement") = NumberPlacement::official_spiral,
-            nb::arg("discard_limit") = 7, nb::arg("friendly_robber") = false,
-            nb::arg("vps_to_win") = 10,
-            "Create a game for ``players`` (a count or explicit seating order).\n\n"
+            nb::arg("discard_limit") = nb::none(), nb::arg("friendly_robber") = nb::none(),
+            nb::arg("vps_to_win") = nb::none(), nb::arg("rules") = nb::none(),
+            "Create a game for ``players`` (a count up to six, or explicit seating).\n\n"
             "``seed`` drives dice, cards and steals; ``map_seed`` (default ``seed``)\n"
-            "drives the board.")
+            "drives the board. ``rules`` sets every rule at once; otherwise the base\n"
+            "game's apply, with ``discard_limit`` (7), ``friendly_robber`` (False) and\n"
+            "``vps_to_win`` (10) as overrides.")
         .def("__repr__", [](const Game& game) {
             return nb::str("Game(colors={!r}, current_color={!r}, current_prompt={!r}, num_turns={})")
                 .format(game.colors(), game.current_color(), game.current_prompt(), game.num_turns());
@@ -309,6 +390,7 @@ void bind_game(nb::module_& module) {
         .def_prop_ro("vps_to_win", &Game::victory_points_to_win)
         .def_prop_ro("discard_limit", &Game::discard_limit)
         .def_prop_ro("friendly_robber", &Game::friendly_robber)
+        .def_prop_ro("rules", &Game::rules, nb::rv_policy::copy)
         .def_prop_ro(
             "resource_bank", [](const Game& game) { return to_tuple(game.resource_bank()); })
         .def_prop_ro("development_cards_remaining", &Game::development_cards_remaining)
@@ -430,16 +512,25 @@ void bind_game(nb::module_& module) {
         .def_rw("hand_devs", &ValueWeights::hand_devs)
         .def_rw("army_size", &ValueWeights::army_size);
 
+    nb::enum_<ValueEnemies>(
+        module, "ValueEnemies",
+        "Whose production the value heuristic counts against a player: the next\n"
+        "seat (Catanatron's original) or the mean over all opponents.")
+        .value("NEXT", ValueEnemies::next)
+        .value("ALL", ValueEnemies::all);
+
     module.def(
         "value_action", &value_action, nb::arg("game"), nb::arg("weights") = ValueWeights{},
-        nb::call_guard<nb::gil_scoped_release>(),
+        nb::arg("enemies") = ValueEnemies::next, nb::call_guard<nb::gil_scoped_release>(),
         "The action Catanatron's ValueFunctionPlayer would choose.");
     module.def(
         "value_score",
-        [](const Game& game, const PlayerRef& player, const ValueWeights& weights) {
-            return value_score(game, resolve_color(game, player), weights);
+        [](const Game& game, const PlayerRef& player, const ValueWeights& weights,
+           ValueEnemies enemies) {
+            return value_score(game, resolve_color(game, player), weights, enemies);
         },
         nb::arg("game"), nb::arg("player"), nb::arg("weights") = ValueWeights{},
+        nb::arg("enemies") = ValueEnemies::next,
         "Catanatron's value heuristic for a player by seat index or Color.");
 }
 

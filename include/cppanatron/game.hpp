@@ -8,6 +8,7 @@
 
 #include "cppanatron/action.hpp"
 #include "cppanatron/board.hpp"
+#include "cppanatron/rules.hpp"
 
 namespace cppanatron {
 
@@ -37,6 +38,7 @@ struct PlayerState {
 
 class Game {
 public:
+    /** A base-game game; GameRules sets everything else to the base game's. */
     Game(
         std::vector<Color> colors,
         MapType map_type = MapType::base,
@@ -44,6 +46,15 @@ public:
         int discard_limit = 7,
         bool friendly_robber = false,
         int victory_points_to_win = 10,
+        NumberPlacement number_placement = NumberPlacement::official_spiral,
+        std::optional<std::uint64_t> map_seed = std::nullopt);
+
+    /** A game under explicit rules: bank, deck and pieces included. */
+    Game(
+        std::vector<Color> colors,
+        MapType map_type,
+        std::uint64_t seed,
+        const GameRules& rules,
         NumberPlacement number_placement = NumberPlacement::official_spiral,
         std::optional<std::uint64_t> map_seed = std::nullopt);
 
@@ -93,6 +104,7 @@ public:
     }
     [[nodiscard]] int discard_limit() const noexcept { return discard_limit_; }
     [[nodiscard]] bool friendly_robber() const noexcept { return friendly_robber_; }
+    [[nodiscard]] const GameRules& rules() const noexcept { return rules_; }
 
     /**
      * Scenario setup: overwrite a player's resource hand.
@@ -182,6 +194,7 @@ private:
     std::vector<PlayerState> players_;
     Board board_;
     std::mt19937_64 random_;
+    GameRules rules_;
     int discard_limit_{};
     bool friendly_robber_{};
     int victory_points_to_win_{};

@@ -16,6 +16,14 @@ std::size_t resource_index(Resource resource) {
     return static_cast<std::size_t>(resource);
 }
 
+GameRules base_game_rules(int discard_limit, bool friendly_robber, int victory_points_to_win) {
+    GameRules rules;
+    rules.victory_points_to_win = victory_points_to_win;
+    rules.discard_limit = discard_limit;
+    rules.friendly_robber = friendly_robber;
+    return rules;
+}
+
 }  // namespace
 
 Game::Game(
@@ -27,6 +35,21 @@ Game::Game(
     int victory_points_to_win,
     NumberPlacement number_placement,
     std::optional<std::uint64_t> map_seed)
+    : Game(
+          std::move(colors),
+          map_type,
+          seed,
+          base_game_rules(discard_limit, friendly_robber, victory_points_to_win),
+          number_placement,
+          map_seed) {}
+
+Game::Game(
+    std::vector<Color> colors,
+    MapType map_type,
+    std::uint64_t seed,
+    const GameRules& rules,
+    NumberPlacement number_placement,
+    std::optional<std::uint64_t> map_seed)
     : colors_(std::move(colors)),
       players_(colors_.size()),
       board_(CatanMap::build(
@@ -34,13 +57,16 @@ Game::Game(
           map_seed.value_or(seed),
           number_placement)),
       random_(seed),
-      discard_limit_(discard_limit),
-      friendly_robber_(friendly_robber),
-      victory_points_to_win_(victory_points_to_win),
+      rules_(rules),
+      discard_limit_(rules.discard_limit),
+      friendly_robber_(rules.friendly_robber),
+      victory_points_to_win_(rules.victory_points_to_win),
+      resource_bank_(rules.resource_bank),
       acceptees_(colors_.size()),
       discard_counts_(colors_.size()) {
+    validate_rules(rules_);
     if (colors_.empty() || colors_.size() > kColors.size()) {
-        throw std::invalid_argument("game requires one to four colors");
+        throw std::invalid_argument("game requires one to six colors");
     }
     auto unique_colors = colors_;
     std::sort(unique_colors.begin(), unique_colors.end());
@@ -48,16 +74,25 @@ Game::Game(
         unique_colors.end()) {
         throw std::invalid_argument("player colors must be unique");
     }
-    development_deck_.insert(
-        development_deck_.end(), 14, DevelopmentCard::knight);
-    development_deck_.insert(
-        development_deck_.end(), 2, DevelopmentCard::year_of_plenty);
-    development_deck_.insert(
-        development_deck_.end(), 2, DevelopmentCard::road_building);
-    development_deck_.insert(
-        development_deck_.end(), 2, DevelopmentCard::monopoly);
-    development_deck_.insert(
-        development_deck_.end(), 5, DevelopmentCard::victory_point);
+    for (PlayerState& player : players_) {
+        player.roads_available = rules_.roads_per_player;
+        player.settlements_available = rules_.settlements_per_player;
+        player.cities_available = rules_.cities_per_player;
+    }
+    // Catanatron's insertion order, so the default deck shuffles as it always has.
+    for (DevelopmentCard card : {
+             DevelopmentCard::knight,
+             DevelopmentCard::year_of_plenty,
+             DevelopmentCard::road_building,
+             DevelopmentCard::monopoly,
+             DevelopmentCard::victory_point,
+         }) {
+        development_deck_.insert(
+            development_deck_.end(),
+            static_cast<std::size_t>(
+                rules_.development_deck[static_cast<std::size_t>(card)]),
+            card);
+    }
     std::shuffle(development_deck_.begin(), development_deck_.end(), random_);
     playable_actions_ = generate_playable_actions();
 }
@@ -98,7 +133,8 @@ bool Game::search_equivalent(const Game& other) const noexcept {
            board_.roads() == other.board_.roads() &&
            board_.robber_coordinate() == other.board_.robber_coordinate() &&
            board_.longest_road_color() == other.board_.longest_road_color() &&
-           random_ == other.random_ && discard_limit_ == other.discard_limit_ &&
+           random_ == other.random_ && rules_ == other.rules_ &&
+           discard_limit_ == other.discard_limit_ &&
            friendly_robber_ == other.friendly_robber_ &&
            victory_points_to_win_ == other.victory_points_to_win_ &&
            resource_bank_ == other.resource_bank_ &&

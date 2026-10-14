@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "cppanatron/action.hpp"
 #include "cppanatron/game.hpp"
 
@@ -21,12 +23,21 @@ struct ValueWeights {
     double army_size{10.1};
 };
 
+/**
+ * Whose production counts against the player: the next seat only, as in
+ * Catanatron's original heuristic, or the mean over every opponent. The two
+ * agree in two-player games.
+ */
+enum class ValueEnemies : std::uint8_t { next, all };
+
 [[nodiscard]] double value_score(
     const Game& game,
     Color perspective,
-    const ValueWeights& weights = {});
+    const ValueWeights& weights = {},
+    ValueEnemies enemies = ValueEnemies::next);
 [[nodiscard]] Action value_action(
     const Game& game,
-    const ValueWeights& weights = {});
+    const ValueWeights& weights = {},
+    ValueEnemies enemies = ValueEnemies::next);
 
 }  // namespace cppanatron

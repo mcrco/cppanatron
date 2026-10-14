@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "cppanatron/action.hpp"
@@ -32,6 +33,17 @@ void bind_search(nb::module_& module);
  * match on everything else.
  */
 [[nodiscard]] const Action& resolve_playable(const Game& game, const Action& action);
+
+/**
+ * Rules for a game or batch: ``rules`` when given, else the base game with any
+ * of the loose ``discard_limit``/``friendly_robber``/``vps_to_win`` arguments.
+ * Passing both is an error, since one would silently override the other.
+ */
+[[nodiscard]] GameRules resolve_rules(
+    const std::optional<GameRules>& rules,
+    std::optional<int> discard_limit,
+    std::optional<bool> friendly_robber,
+    std::optional<int> vps_to_win);
 
 [[nodiscard]] nb::tuple coordinate_to_python(Coordinate coordinate);
 [[nodiscard]] Coordinate coordinate_from_python(nb::handle value);

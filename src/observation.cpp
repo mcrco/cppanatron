@@ -171,8 +171,21 @@ void write_private_player_features(
         });
 }
 
-int color_index(Color color) {
-    return static_cast<int>(color);
+/** Seat index of every color in this game, indexed by the color's value. */
+std::array<int, kColors.size()> seats_by_color(const Game& game) {
+    std::array<int, kColors.size()> seats{};
+    seats.fill(-1);
+    const auto& colors = game.colors();
+    for (std::size_t seat = 0; seat < colors.size(); ++seat) {
+        seats[static_cast<std::size_t>(colors[seat])] = static_cast<int>(seat);
+    }
+    return seats;
+}
+
+void require_supported_player_count(int num_players) {
+    if (num_players < 2 || num_players > static_cast<int>(kColors.size())) {
+        throw std::invalid_argument("observation supports two to six players");
+    }
 }
 
 }  // namespace
@@ -239,18 +252,14 @@ const std::pair<int, int>& ObservationLayout::tile_position(
 }
 
 std::size_t full_numeric_observation_size(int num_players) {
-    if (num_players < 2 || num_players > 4) {
-        throw std::invalid_argument("observation supports two to four players");
-    }
+    require_supported_player_count(num_players);
     return static_cast<std::size_t>(32 * num_players + 10);
 }
 
 std::size_t board_observation_size(
     int num_players,
     const ObservationLayout& layout) {
-    if (num_players < 2 || num_players > 4) {
-        throw std::invalid_argument("observation supports two to four players");
-    }
+    require_supported_player_count(num_players);
     const int channels = 2 * num_players + 12;
     return static_cast<std::size_t>(
         layout.width() * layout.height() * channels);
@@ -332,9 +341,13 @@ void write_full_observation(
                    (x * layout.height() + y) * channels + channel);
     };
 
+    const auto seats = seats_by_color(game);
+    const auto seat_of = [&](Color color) {
+        return seats[static_cast<std::size_t>(color)];
+    };
     for (const auto& [node, building] : game.board().buildings()) {
         const int relative_player =
-            (color_index(building.color) - base_player + num_players) %
+            (seat_of(building.color) - base_player + num_players) %
             num_players;
         const auto [x, y] = layout.node_position(node);
         output[board_index(x, y, 2 * relative_player)] =
@@ -342,7 +355,7 @@ void write_full_observation(
     }
     for (const auto& [edge, color] : game.board().roads()) {
         const int relative_player =
-            (color_index(color) - base_player + num_players) % num_players;
+            (seat_of(color) - base_player + num_players) % num_players;
         const auto [x, y] = layout.edge_position(edge);
         output[board_index(x, y, 2 * relative_player + 1)] = 1.0F;
     }

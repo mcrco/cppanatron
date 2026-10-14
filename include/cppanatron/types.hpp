@@ -8,7 +8,7 @@
 
 namespace cppanatron {
 
-enum class Color : std::uint8_t { red, blue, white, orange };
+enum class Color : std::uint8_t { red, blue, white, orange, green, brown };
 enum class Resource : std::uint8_t { wood, brick, sheep, wheat, ore };
 enum class DevelopmentCard : std::uint8_t {
     knight,
@@ -29,11 +29,14 @@ inline constexpr std::array<Resource, 5> kResources{
     Resource::ore,
 };
 
-inline constexpr std::array<Color, 4> kColors{
+/** Seating order for games of N players: the first N colors. */
+inline constexpr std::array<Color, 6> kColors{
     Color::red,
     Color::blue,
     Color::white,
     Color::orange,
+    Color::green,
+    Color::brown,
 };
 
 struct Coordinate {

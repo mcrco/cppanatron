@@ -25,6 +25,7 @@ using cppanatron::ActionType;
 using cppanatron::Dice;
 using cppanatron::Game;
 using cppanatron::FlatActionSpace;
+using cppanatron::GameRules;
 using cppanatron::MCTSSearch;
 
 void require(bool condition, const std::string& message) {
@@ -919,6 +920,55 @@ void test_domestic_trade_reject_and_cancel() {
 
 }  // namespace
 
+void test_six_player_games_and_rules() {
+    require(FlatActionSpace(5, MapType::base).size() == 370, "BASE 5p action space size");
+    require(FlatActionSpace(6, MapType::base).size() == 389, "BASE 6p action space size");
+    require_throws(
+        [] { (void)FlatActionSpace(7, MapType::base); }, "seven players have no colors");
+
+    const std::vector<Color> six(cppanatron::kColors.begin(), cppanatron::kColors.end());
+    Game game(six, MapType::base, 71);
+    while (game.is_initial_build_phase()) {
+        game.execute(game.playable_actions().front());
+    }
+    for (const auto& player : game.players()) {
+        require(player.settlements.size() == 2, "six players each place two settlements");
+    }
+
+    // The default rules must leave every seeded game unchanged.
+    const Game loose(six, MapType::base, 5);
+    const Game explicit_rules(six, MapType::base, 5, GameRules{});
+    require(loose.search_equivalent(explicit_rules), "default rules match the loose constructor");
+    require(loose.development_cards_remaining() == 25, "base deck has 25 cards");
+
+    GameRules extension;
+    extension.resource_bank = {24, 24, 24, 24, 24};
+    extension.development_deck = {20, 3, 3, 3, 5};
+    extension.roads_per_player = 13;
+    extension.settlements_per_player = 4;
+    extension.cities_per_player = 3;
+    const Game extended(six, MapType::base, 5, extension);
+    require(extended.rules() == extension, "a game keeps its rules");
+    require(extended.resource_bank() == extension.resource_bank, "bank follows the rules");
+    require(extended.development_cards_remaining() == 34, "extension deck has 34 cards");
+    const auto& deck = extended.development_deck();
+    require(
+        std::count(deck.begin(), deck.end(), cppanatron::DevelopmentCard::knight) == 20,
+        "extension deck has 20 knights");
+    for (const auto& player : extended.players()) {
+        require(
+            player.roads_available == 13 && player.settlements_available == 4 &&
+                player.cities_available == 3,
+            "pieces follow the rules");
+    }
+
+    GameRules too_few_settlements;
+    too_few_settlements.settlements_per_player = 1;
+    require_throws(
+        [&] { (void)Game(six, MapType::base, 5, too_few_settlements); },
+        "a player needs two settlements for the initial build phase");
+}
+
 int main() {
     try {
         test_topology_contract();
@@ -947,6 +997,7 @@ int main() {
         test_maritime_trade_and_other_development_cards();
         test_domestic_trade_negotiation();
         test_domestic_trade_reject_and_cancel();
+        test_six_player_games_and_rules();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

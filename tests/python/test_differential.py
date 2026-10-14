@@ -35,20 +35,21 @@ def assert_same_snapshot(expected: Snapshot, actual: Snapshot, context: str) -> 
         assert want == got, f"{context}: {field} differs"
 
 
-@pytest.mark.parametrize("number_placement", ["official_spiral", "random"])
-@pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
-@pytest.mark.parametrize("num_players", [2, 3, 4])
-@pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
-def test_random_games_stay_in_lockstep(num_players, map_type, number_placement, game_index):
-    seed = 1_000 * num_players + 97 * game_index + len(map_type) + len(number_placement)
-    options = dict(
-        map_type=map_type,
-        seed=seed,
-        number_placement=number_placement,
-        vps_to_win=8,
-    )
-    reference = new_game("catanatron", num_players, **options)
-    native = new_game("cppanatron", num_players, **options)
+#: The parity suite seats at most four players on MINI's 24 nodes.
+PLAYER_COUNTS_AND_MAPS = [
+    (num_players, map_type)
+    for num_players in (2, 3, 4, 5, 6)
+    for map_type in ("MINI", "BASE", "TOURNAMENT")
+    if num_players <= 4 or map_type != "MINI"
+]
+
+#: The 5-6 player extension's bank and development deck.
+EXTENSION_SUPPLY = dict(resource_bank=(24, 24, 24, 24, 24), development_deck=(20, 3, 3, 3, 5))
+
+
+def play_in_lockstep(num_players: int, seed: int, **options) -> None:
+    reference = new_game("catanatron", num_players, seed=seed, **options)
+    native = new_game("cppanatron", num_players, seed=seed, **options)
     rng = random.Random(seed)
 
     for step in range(MAX_STEPS):
@@ -61,9 +62,29 @@ def test_random_games_stay_in_lockstep(num_players, map_type, number_placement, 
         native.execute(action, outcome)
 
 
-@pytest.mark.parametrize("map_type", ["MINI", "BASE", "TOURNAMENT"])
-@pytest.mark.parametrize("num_players", [2, 3, 4])
-def test_the_value_expert_matches_catanatrons_value_function_player(num_players, map_type):
+@pytest.mark.parametrize("number_placement", ["official_spiral", "random"])
+@pytest.mark.parametrize(("num_players", "map_type"), PLAYER_COUNTS_AND_MAPS)
+@pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
+def test_random_games_stay_in_lockstep(num_players, map_type, number_placement, game_index):
+    seed = 1_000 * num_players + 97 * game_index + len(map_type) + len(number_placement)
+    play_in_lockstep(
+        num_players, seed, map_type=map_type, number_placement=number_placement, vps_to_win=8
+    )
+
+
+@pytest.mark.parametrize("num_players", [5, 6])
+@pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
+def test_extension_supply_games_stay_in_lockstep(num_players, game_index):
+    """A bigger bank and deck change scarcity, draws and when the deck runs out."""
+    seed = 3_000 * num_players + 97 * game_index
+    play_in_lockstep(num_players, seed, map_type="BASE", vps_to_win=8, **EXTENSION_SUPPLY)
+
+
+@pytest.mark.parametrize("enemies", ["next", "all"])
+@pytest.mark.parametrize(("num_players", "map_type"), PLAYER_COUNTS_AND_MAPS)
+def test_the_value_expert_matches_catanatrons_value_function_player(
+    num_players, map_type, enemies
+):
     """The ported heuristic scores every position like Catanatron's base_fn, and
     the native expert picks an action Catanatron values as highly."""
     seed = 7_000 + num_players + len(map_type)
@@ -71,20 +92,26 @@ def test_the_value_expert_matches_catanatrons_value_function_player(num_players,
     reference = new_game("catanatron", num_players, **options)
     native = new_game("cppanatron", num_players, **options)
     rng = random.Random(seed)
-    value = base_fn()
+    value = base_fn(enemies=enemies)
+    native_enemies = cpp.ValueEnemies[enemies.upper()]
 
     for step in range(400):
         snapshot = reference.snapshot()
         if snapshot.winning_color is not None:
             break
         for color in snapshot.colors:
-            assert cpp.value_score(native.game, from_catanatron_color(color)) == pytest.approx(
+            native_value = cpp.value_score(
+                native.game, from_catanatron_color(color), enemies=native_enemies
+            )
+            assert native_value == pytest.approx(
                 value(reference.game, color), rel=1e-14, abs=1e-6
             ), f"seed {seed}, step {step}: value of {color} differs"
         if not any(a.action_type in CHANCE_ACTIONS for a in snapshot.playable_actions):
-            expert = ValueFunctionPlayer(snapshot.current_color)
+            expert = ValueFunctionPlayer(
+                snapshot.current_color, ValueFunctionPlayer.Params(enemies=enemies)
+            )
             expected = expert.decide(reference.game, reference.game.playable_actions)
-            chosen = to_catanatron_action(cpp.value_action(native.game))
+            chosen = to_catanatron_action(cpp.value_action(native.game, enemies=native_enemies))
             if chosen != expected:  # Equal-valued actions may break ties differently.
                 after_expected, after_chosen = reference.game.copy(), reference.game.copy()
                 after_expected.execute(expected)

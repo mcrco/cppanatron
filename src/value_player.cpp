@@ -167,19 +167,33 @@ int owned_tile_count(const Game& game, Color color) {
 double value_score(
     const Game& game,
     Color perspective,
-    const ValueWeights& weights) {
+    const ValueWeights& weights,
+    ValueEnemies enemies) {
     const PlayerState& player = game.player(perspective);
     const auto perspective_it =
         std::find(game.colors().begin(), game.colors().end(), perspective);
     const int perspective_index = static_cast<int>(
         std::distance(game.colors().begin(), perspective_it));
-    const Color enemy = game.colors()[static_cast<std::size_t>(
-        (perspective_index + 1) % static_cast<int>(game.colors().size()))];
+    const int num_players = static_cast<int>(game.colors().size());
+    const auto enemy_at = [&](int offset) {
+        return game.colors()[static_cast<std::size_t>(
+            (perspective_index + offset) % num_players)];
+    };
 
     const double production =
         production_value(production_for(game, perspective, true), true);
-    const double enemy_production =
-        production_value(production_for(game, enemy, true), false);
+    double enemy_production = 0.0;
+    if (enemies == ValueEnemies::next) {
+        enemy_production =
+            production_value(production_for(game, enemy_at(1), true), false);
+    } else {
+        // Same summation order as the Python reference, then the mean.
+        for (int offset = 1; offset < num_players; ++offset) {
+            enemy_production +=
+                production_value(production_for(game, enemy_at(offset), true), false);
+        }
+        enemy_production /= static_cast<double>(std::max(num_players - 1, 1));
+    }
     const auto [reachable_zero, reachable_one] =
         reachable_production(game, perspective);
 
@@ -221,7 +235,10 @@ double value_score(
                weights.army_size;
 }
 
-Action value_action(const Game& game, const ValueWeights& weights) {
+Action value_action(
+    const Game& game,
+    const ValueWeights& weights,
+    ValueEnemies enemies) {
     if (game.playable_actions().empty()) {
         throw std::logic_error("value player has no playable actions");
     }
@@ -234,7 +251,7 @@ Action value_action(const Game& game, const ValueWeights& weights) {
     for (const Action& action : game.playable_actions()) {
         Game candidate = game;
         candidate.execute(action);
-        const double value = value_score(candidate, action.color, weights);
+        const double value = value_score(candidate, action.color, weights, enemies);
         if (value > best_value) {
             best_value = value;
             best_action = action;

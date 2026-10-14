@@ -116,8 +116,8 @@ std::string flat_action_key(const Action& action) {
 }
 
 FlatActionSpace::FlatActionSpace(int num_players, MapType map_type) {
-    if (num_players < 1 || num_players > 4) {
-        throw std::invalid_argument("num_players must be between one and four");
+    if (num_players < 1 || num_players > static_cast<int>(kColors.size())) {
+        throw std::invalid_argument("num_players must be between one and six");
     }
     const CatanMap map = CatanMap::build(map_type, 0);
     const Color placeholder = Color::red;

@@ -137,8 +137,11 @@ public:
     /**
      * Start a search of `game` for its player to move. With determinizations
      * the root worlds are sampled from `tracker`, which must follow the
-     * player to move; without them the tracker is ignored. A finished game
-     * gives a search that is done at once, with no visits.
+     * player to move. Without determinizations the search reads `game` as
+     * is, hidden cards included (an oracle unless `game` is itself a
+     * sample), so passing a tracker then throws std::invalid_argument
+     * unless `ignore_tracker` says that is intended. A finished game gives
+     * a search that is done at once, with no visits.
      *
      * Determinized roots offer exactly the legal actions `game` gives its
      * player to move, which that player knows even where they depend on
@@ -146,7 +149,9 @@ public:
      * are resampled (a bounded number of times), and every root is
      * restricted to the real options the worlds share.
      */
-    std::int64_t add(const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr);
+    std::int64_t add(
+        const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
+        bool ignore_tracker = false);
 
     /**
      * Advance every unfinished search to its next leaves (roots first) and

@@ -1593,10 +1593,19 @@ std::size_t SearchPool::observation_size() const noexcept { return impl_->encode
 std::size_t SearchPool::action_size() const noexcept { return impl_->codec->size(); }
 int SearchPool::max_players() const noexcept { return impl_->config.max_players; }
 
-std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTracker* tracker) {
+std::int64_t SearchPool::add(
+    const Game& game, std::uint64_t seed, const HandTracker* tracker, bool ignore_tracker) {
     const int players = static_cast<int>(game.colors().size());
     if (players > impl_->config.max_players) {
         throw std::invalid_argument("the game has more seats than max_players");
+    }
+    if (impl_->config.determinizations == 0 && tracker != nullptr && !ignore_tracker) {
+        throw std::invalid_argument(
+            "determinizations=0 searches the game as given, hidden cards included, and "
+            "ignores the tracker; set determinizations or pass ignore_tracker");
+    }
+    if (impl_->config.determinizations > 0 && tracker == nullptr) {
+        throw std::invalid_argument("determinized search needs the root player's HandTracker");
     }
     auto search = std::make_unique<Search>();
     search->id = impl_->next_id;
@@ -1618,9 +1627,6 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
     } else {
         std::vector<Game> worlds;
         if (impl_->config.determinizations > 0) {
-            if (tracker == nullptr) {
-                throw std::invalid_argument("determinized search needs the root player's HandTracker");
-            }
             if (tracker->observer() != search->root_player) {
                 throw std::invalid_argument("the tracker must follow the player to move");
             }

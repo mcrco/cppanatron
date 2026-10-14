@@ -773,6 +773,25 @@ void test_failures_leave_the_pool_usable() {
 }
 
 /** New searches go to the least loaded threads, whatever their ids. */
+/** A tracker with determinizations=0 would silently make a fair search an oracle. */
+void test_tracker_needs_determinizations() {
+    const Played played = play_random(3, 6, 100);
+    const auto codec = std::make_shared<FlatActionCodec>(3, MapType::base);
+    SearchConfig config;
+    config.max_players = 3;
+    SearchPool oracle(codec, std::make_shared<ToyEncoder>(), config);
+    const HandTracker& tracker = played.trackers[static_cast<std::size_t>(played.game.current_player_index())];
+    bool threw = false;
+    try {
+        (void)oracle.add(played.game, 1, &tracker);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw && oracle.size() == 0, "a tracker without determinizations is refused");
+    (void)oracle.add(played.game, 1, &tracker, true);
+    require(oracle.size() == 1, "unless the caller says it is intended");
+}
+
 void test_searches_spread_over_threads() {
     const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
     SearchConfig config;
@@ -810,6 +829,7 @@ int main() {
         test_determinized_advance_refuses_monopoly();
         test_failures_leave_the_pool_usable();
         test_searches_spread_over_threads();
+        test_tracker_needs_determinizations();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

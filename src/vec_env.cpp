@@ -158,6 +158,12 @@ struct VecEnv::Env {
     std::vector<int> victory_points;
     std::uint64_t decisions{};
     EpisodeStats stats;
+    /**
+     * Per seat slot: the row already holds the waiting observation (zeros
+     * and the no-op), which does not depend on the game, so it need not be
+     * written again until the row is encoded.
+     */
+    std::vector<bool> waiting_written;
     /** Games finished in a row without a learner decision. */
     int games_without_learner{};
     /** The acting row's decoded action, or why it cannot be played. */
@@ -280,6 +286,10 @@ void VecEnv::bind(const VecEnvBuffers& buffers) {
         throw std::invalid_argument("every VecEnv buffer must be bound");
     }
     buffers_ = buffers;
+    // New buffers hold anything.
+    for (Env& env : envs_) {
+        env.waiting_written.assign(static_cast<std::size_t>(max_players()), false);
+    }
 }
 
 std::size_t VecEnv::row(int env_index, int seat) const noexcept {
@@ -464,6 +474,7 @@ void VecEnv::play_until_learner(int env_index) {
 
 void VecEnv::start_env(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
+    env.waiting_written.assign(static_cast<std::size_t>(max_players()), false);
     for (int seat = 0; seat < max_players(); ++seat) {
         const std::size_t index = row(env_index, seat);
         buffers_.rewards[index] = 0.0F;
@@ -523,7 +534,7 @@ void VecEnv::step_env(int env_index) {
 }
 
 void VecEnv::write_rows(int env_index) {
-    const Env& env = envs_[static_cast<std::size_t>(env_index)];
+    Env& env = envs_[static_cast<std::size_t>(env_index)];
     const Game& game = *env.game;
     const int num_players = static_cast<int>(game.colors().size());
     const int current = game.current_player_index();
@@ -540,10 +551,14 @@ void VecEnv::write_rows(int env_index) {
         buffers_.learner[index] = learns ? 1 : 0;
         buffers_.acting[index] = acts ? 1 : 0;
         const std::span<float> observation(buffers_.observations + index * size, size);
+        const auto slot = static_cast<std::size_t>(seat);
         if (acts || (learns && config_.encode_waiting)) {
             encoder_.encode(game, seat, observation);
-        } else {
+            env.waiting_written[slot] = false;
+        } else if (!env.waiting_written[slot]) {
+            // Waiting and padded rows only change when a row stops acting.
             encoder_.encode_waiting(observation);
+            env.waiting_written[slot] = true;
         }
     }
 }

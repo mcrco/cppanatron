@@ -108,6 +108,28 @@ def test_mixed_scenarios_pad_rows_and_never_leave_forced_moves():
     assert env.pop_stats()["episodes"] == 0
 
 
+def test_waiting_rows_stay_right_across_rebinds():
+    """Waiting rows are only rewritten when they change, or when new buffers arrive."""
+    env = cpp.VecEnv(
+        [cpp.Scenario(num_players=2), cpp.Scenario(num_players=4, seats=["learner", "R"] * 2)],
+        num_envs=4, seed=6, num_threads=2,
+    )
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(7)
+    for _ in range(40):
+        sample_actions(env, buffers, rng)
+        env.step()
+        check_rows(env, buffers)
+    sample_actions(env, buffers, rng)
+    actions = buffers["actions"].copy()
+    fresh = {name: np.full_like(array, 7) for name, array in buffers.items()}
+    fresh["actions"][:] = actions
+    env.bind(**fresh)
+    env.step()
+    check_rows(env, fresh)
+
+
 def test_self_play_steps_match_a_replayed_game():
     """With every seat learning, a step is the action plus forced moves, and the
     winner's row gets the reward; copies replay the env's chance outcomes."""

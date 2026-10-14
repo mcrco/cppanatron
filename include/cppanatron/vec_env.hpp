@@ -67,7 +67,8 @@ struct VecEnvConfig {
 /**
  * Caller-owned buffers, rows = num_envs x max_players, row = env x
  * max_players + seat (absolute seat index; seats past the game's player
- * count are padding).
+ * count are padding). Callers read but do not write the observations: the
+ * VecEnv only rewrites a waiting row's zeros and no-op when it changes.
  */
 struct VecEnvBuffers {
     float* observations{};        // [rows, encoder size]

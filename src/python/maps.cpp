@@ -153,6 +153,36 @@ nb::dict spec_to_dict(const MapSpec& spec) {
     return result;
 }
 
+void hash_combine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+}
+
+template <typename T>
+std::size_t hash_optional(const std::optional<T>& value) {
+    return value.has_value() ? static_cast<std::size_t>(*value) + 1 : 0;
+}
+
+/** Field hash matching TileSpec's value equality. */
+std::size_t hash_tile(const TileSpec& tile) {
+    std::size_t seed = std::hash<int>{}(tile.coordinate.x);
+    hash_combine(seed, std::hash<int>{}(tile.coordinate.y));
+    hash_combine(seed, std::hash<int>{}(tile.coordinate.z));
+    hash_combine(seed, static_cast<std::size_t>(tile.kind));
+    hash_combine(seed, hash_optional(tile.resource));
+    hash_combine(seed, hash_optional(tile.number));
+    hash_combine(seed, hash_optional(tile.direction));
+    hash_combine(seed, hash_optional(tile.port_resource));
+    return seed;
+}
+
+std::size_t hash_spec(const MapSpec& spec) {
+    std::size_t seed = spec.tiles.size();
+    for (const TileSpec& tile : spec.tiles) {
+        hash_combine(seed, hash_tile(tile));
+    }
+    return seed;
+}
+
 std::shared_ptr<const CatanMap> share(CatanMap map) {
     return std::make_shared<const CatanMap>(std::move(map));
 }
@@ -188,6 +218,8 @@ void bind_maps(nb::module_& module) {
         .def(
             "__eq__", [](const TileSpec& lhs, const TileSpec& rhs) { return lhs == rhs; },
             nb::is_operator())
+        // Immutable from Python (read-only fields), so equal specs hash alike.
+        .def("__hash__", &hash_tile)
         .def("__repr__", [](const TileSpec& tile) {
             return nb::str("TileSpec({!r})").format(tile_to_dict(tile));
         });
@@ -227,6 +259,8 @@ void bind_maps(nb::module_& module) {
         .def(
             "__eq__", [](const MapSpec& lhs, const MapSpec& rhs) { return lhs == rhs; },
             nb::is_operator())
+        // Immutable from Python (``tiles`` returns a copy), so specs work as keys.
+        .def("__hash__", &hash_spec)
         .def("__repr__", [](const MapSpec& spec) {
             return nb::str("MapSpec(<{} tiles>)").format(spec.tiles.size());
         });

@@ -39,6 +39,16 @@ def test_template_maps_round_trip_through_their_spec(map_type, seed):
     assert tile_keys(game.board.map) == tile_keys(built)
 
 
+def test_equal_specs_hash_alike():
+    first = cpp.MapSpec.build(cpp.MapType.BASE, 1)
+    second = cpp.MapSpec.from_dict(first.to_dict())
+    assert first == second and hash(first) == hash(second)
+    assert len({first, second, cpp.MapSpec.build(cpp.MapType.BASE, 2)}) == 2
+    assert {first: "base"}[second] == "base"
+    assert hash(first.tiles[0]) == hash(second.tiles[0])
+    assert len({first.tiles[0], second.tiles[0]}) == 1
+
+
 def test_spec_dicts_have_exactly_the_documented_shape():
     tiles = cpp.MapSpec.build(cpp.MapType.BASE, 3).to_dict()["tiles"]
     keys = {"coordinate", "type", "resource", "number", "direction", "port_resource"}

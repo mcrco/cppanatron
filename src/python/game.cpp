@@ -183,6 +183,28 @@ void bind_game(nb::module_& module) {
                     rules.cities_per_player);
         });
 
+    nb::class_<HiddenHand>(
+        module, "HiddenHand",
+        "One seat's hidden cards for Game.redeal_hidden_cards: resources and unplayed\n"
+        "development cards (Resource and DevelopmentCard order), and which of the\n"
+        "four playable kinds it held when its turn began.")
+        .def(
+            "__init__",
+            [](HiddenHand* self, const std::array<int, 5>& resources,
+               const std::array<int, 5>& development_cards,
+               const std::array<bool, 4>& development_card_owned_at_start) {
+                new (self) HiddenHand{resources, development_cards, development_card_owned_at_start};
+            },
+            nb::kw_only(), nb::arg("resources") = std::array<int, 5>{},
+            nb::arg("development_cards") = std::array<int, 5>{},
+            nb::arg("development_card_owned_at_start") = std::array<bool, 4>{})
+        .def_prop_ro("resources", [](const HiddenHand& hand) { return to_tuple(hand.resources); })
+        .def_prop_ro(
+            "development_cards", [](const HiddenHand& hand) { return to_tuple(hand.development_cards); })
+        .def_prop_ro(
+            "development_card_owned_at_start",
+            [](const HiddenHand& hand) { return to_tuple(hand.development_card_owned_at_start); });
+
     nb::class_<PlayerSetup>(
         module, "PlayerSetup",
         "One seat's pieces and cards for Game.apply_setup. Counts follow Resource and\n"
@@ -495,7 +517,21 @@ void bind_game(nb::module_& module) {
             nb::arg("player"), nb::arg("cards"), nb::arg("seed") = 0,
             "Information-set determinization: deal a player's hidden development cards\n"
             "from the cards they could hold (their hand plus the deck), return the rest\n"
-            "to a reshuffled deck, and keep victory points consistent.");
+            "to a reshuffled deck, and keep victory points consistent.")
+        .def(
+            "redeal_hidden_cards",
+            [](Game& game, const std::vector<HiddenHand>& hands, std::uint64_t seed) {
+                game.redeal_hidden_cards(hands, seed);
+            },
+            nb::arg("hands"), nb::arg("seed") = 0,
+            "Information-set determinization of every hidden card at once: one\n"
+            "HiddenHand per seat replaces its resources, development cards and which\n"
+            "kinds it held when its turn began. Hand sizes must not change, the hands\n"
+            "must hold the same resources in total (the bank stays), and development\n"
+            "cards must come from the deck plus every hand; the rest becomes the deck,\n"
+            "shuffled by ``seed``, which also reseeds the game's random stream.\n"
+            "Victory points follow the victory point cards. Raises ValueError for\n"
+            "hands the cards cannot make.");
 
     nb::class_<FlatActionSpace>(
         module, "FlatActionSpace",

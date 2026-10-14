@@ -263,3 +263,52 @@ def test_search_writes_leaves_into_the_callers_buffer():
         search.select_leaf(np.zeros(3, dtype=np.float32))
     with pytest.raises(ValueError, match="flat action space"):
         search.initialize_root(np.zeros(3, dtype=np.float32))
+
+
+def test_redeal_hidden_cards_moves_hidden_cards_between_hands():
+    """Swap a victory point card for a knight between two hands, deck empty."""
+    rules = cpp.GameRules(development_deck=(1, 0, 0, 0, 1))
+    game = cpp.Game(3, map_type=cpp.MapType.TOURNAMENT, seed=4, rules=rules)
+    game.apply_setup(
+        [
+            cpp.PlayerSetup(settlements=[1], roads=[(1, 6)], resources=(1, 0, 0, 2, 0),
+                            development_cards=(1, 0, 0, 0, 0)),
+            cpp.PlayerSetup(settlements=[3], roads=[(3, 4)], resources=(0, 1, 0, 0, 0),
+                            development_cards=(0, 0, 0, 0, 1)),
+            cpp.PlayerSetup(settlements=[42]),
+        ]
+    )
+    assert game.development_cards_remaining == 0
+    before = [game.player(seat).actual_victory_points for seat in range(3)]
+    bank = game.resource_bank
+    hands = [
+        cpp.HiddenHand(resources=(1, 0, 0, 2, 0),
+                       development_cards=(0, 0, 0, 0, 1)),
+        cpp.HiddenHand(resources=(0, 1, 0, 0, 0), development_cards=(1, 0, 0, 0, 0),
+                       development_card_owned_at_start=(True, False, False, False)),
+        cpp.HiddenHand(),
+    ]
+    game.redeal_hidden_cards(hands, seed=3)
+    assert game.player(0).development_cards == (0, 0, 0, 0, 1)
+    assert game.player(1).development_cards == (1, 0, 0, 0, 0)
+    assert game.player(1).development_card_owned_at_start == (True, False, False, False)
+    assert [game.player(seat).actual_victory_points for seat in range(3)] == [
+        before[0] + 1, before[1] - 1, before[2]]
+    assert game.resource_bank == bank and game.development_cards_remaining == 0
+
+    bad = [
+        # A hand size changes.
+        [cpp.HiddenHand(resources=(2, 0, 0, 2, 0), development_cards=(0, 0, 0, 0, 1)),
+         hands[1], hands[2]],
+        # Resources move across the bank.
+        [cpp.HiddenHand(resources=(0, 0, 0, 3, 0), development_cards=(0, 0, 0, 0, 1)),
+         hands[1], hands[2]],
+        # A card nobody has.
+        [cpp.HiddenHand(resources=(1, 0, 0, 2, 0), development_cards=(0, 1, 0, 0, 0)),
+         hands[1], hands[2]],
+        # Not one hand per seat.
+        hands[:2],
+    ]
+    for redeal in bad:
+        with pytest.raises(ValueError):
+            game.redeal_hidden_cards(redeal)

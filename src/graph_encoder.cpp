@@ -360,68 +360,14 @@ void GraphEncoder::encode_waiting(std::span<float> out) const {
     out[mask_offset() + action_space_.noop()] = 1.0F;
 }
 
-void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) const {
-    if (out.size() != size_) {
-        throw std::invalid_argument("observation buffer must match the encoder size");
-    }
-    dims_.require_fits(game);
+void GraphEncoder::write_players(
+    const Game& game, int observer, const MapCache& cache, int robber_slot, float* out) const {
     const int num_players = static_cast<int>(game.colors().size());
-    if (observer < 0 || observer >= num_players) {
-        throw std::out_of_range("observer is not a seat of this game");
-    }
-
-    const Board& board = game.board();
-    const CatanMap& map = board.map();
-    const MapCache& cache = map_cache(board.shared_map());
-    std::memcpy(out.data(), cache.base.data(), size_ * sizeof(float));
-
-    const GameRules& rules = game.rules();
     const auto seat_of_slot = [&](int slot) { return (observer + slot) % num_players; };
-    // Relative slot of each color seated in this game.
-    std::array<int, kColors.size()> slot_of{};
-    slot_of.fill(-1);
+    const CatanMap& map = game.board().map();
+    const GameRules& rules = game.rules();
     for (int slot = 0; slot < num_players; ++slot) {
-        slot_of[static_cast<std::size_t>(game.colors()[static_cast<std::size_t>(
-            seat_of_slot(slot))])] = slot;
-    }
-    const auto slot_of_color = [&](Color color) {
-        return slot_of[static_cast<std::size_t>(color)];
-    };
-    const int robber_slot =
-        cache.tile_slot[static_cast<std::size_t>(map.coordinate_to_tile().at(board.robber_coordinate()))];
-    const int deck_size = std::accumulate(
-        rules.development_deck.begin(), rules.development_deck.end(), 0);
-
-    float* const row = out.data();
-    const auto block = [&](std::size_t index) { return row + layout_[index].offset; };
-    const auto players = static_cast<std::size_t>(dims_.max_players);
-    const std::size_t num_nodes = map.land_node_list().size();
-
-    // ---- global (the board pips are the map's)
-    {
-        Cursor cursor(block(0));
-        for (std::size_t prompt = 0; prompt < kPromptNames.size(); ++prompt) {
-            cursor.put(static_cast<std::size_t>(game.current_prompt()) == prompt);
-        }
-        cursor.put(game.is_road_building());
-        for (std::size_t r = 0; r < kResources.size(); ++r) {
-            cursor.put(ratio(game.resource_bank()[r], rules.resource_bank[r]));
-        }
-        cursor.put(ratio(static_cast<double>(game.development_cards_remaining()), deck_size));
-        cursor.put(capped(game.num_turns(), 500.0));
-        cursor.put(ratio(game.victory_points_to_win(), 20.0));
-        cursor.put(ratio(game.discard_limit(), 20.0));
-        cursor.put(game.friendly_robber());
-        for (int count = 1; count <= dims_.max_players; ++count) {
-            cursor.put(count == num_players);
-        }
-        cursor.skip(kResources.size());
-        expect(cursor, block(0), global_names_.size(), "global");
-    }
-
-    // ---- players
-    for (int slot = 0; slot < num_players; ++slot) {
-        float* const begin = block(1) + static_cast<std::size_t>(slot) * player_names_.size();
+        float* const begin = out + static_cast<std::size_t>(slot) * player_names_.size();
         Cursor cursor(begin);
         const int seat = seat_of_slot(slot);
         const Color color = game.colors()[static_cast<std::size_t>(seat)];
@@ -493,6 +439,86 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         cursor.put_bits(ports);
         expect(cursor, begin, player_names_.size(), "player");
     }
+
+}
+
+void GraphEncoder::encode_players(const Game& game, int observer, std::span<float> out) const {
+    if (out.size() != players_size()) {
+        throw std::invalid_argument("players buffer must hold max_players x player features");
+    }
+    dims_.require_fits(game);
+    if (observer < 0 || observer >= static_cast<int>(game.colors().size())) {
+        throw std::out_of_range("observer is not a seat of this game");
+    }
+    const Board& board = game.board();
+    const MapCache& cache = map_cache(board.shared_map());
+    const int robber_slot = cache.tile_slot[static_cast<std::size_t>(
+        board.map().coordinate_to_tile().at(board.robber_coordinate()))];
+    std::fill(out.begin(), out.end(), 0.0F);
+    write_players(game, observer, cache, robber_slot, out.data());
+}
+
+void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) const {
+    if (out.size() != size_) {
+        throw std::invalid_argument("observation buffer must match the encoder size");
+    }
+    dims_.require_fits(game);
+    const int num_players = static_cast<int>(game.colors().size());
+    if (observer < 0 || observer >= num_players) {
+        throw std::out_of_range("observer is not a seat of this game");
+    }
+
+    const Board& board = game.board();
+    const CatanMap& map = board.map();
+    const MapCache& cache = map_cache(board.shared_map());
+    std::memcpy(out.data(), cache.base.data(), size_ * sizeof(float));
+
+    const GameRules& rules = game.rules();
+    const auto seat_of_slot = [&](int slot) { return (observer + slot) % num_players; };
+    // Relative slot of each color seated in this game.
+    std::array<int, kColors.size()> slot_of{};
+    slot_of.fill(-1);
+    for (int slot = 0; slot < num_players; ++slot) {
+        slot_of[static_cast<std::size_t>(game.colors()[static_cast<std::size_t>(
+            seat_of_slot(slot))])] = slot;
+    }
+    const auto slot_of_color = [&](Color color) {
+        return slot_of[static_cast<std::size_t>(color)];
+    };
+    const int robber_slot =
+        cache.tile_slot[static_cast<std::size_t>(map.coordinate_to_tile().at(board.robber_coordinate()))];
+    const int deck_size = std::accumulate(
+        rules.development_deck.begin(), rules.development_deck.end(), 0);
+
+    float* const row = out.data();
+    const auto block = [&](std::size_t index) { return row + layout_[index].offset; };
+    const auto players = static_cast<std::size_t>(dims_.max_players);
+    const std::size_t num_nodes = map.land_node_list().size();
+
+    // ---- global (the board pips are the map's)
+    {
+        Cursor cursor(block(0));
+        for (std::size_t prompt = 0; prompt < kPromptNames.size(); ++prompt) {
+            cursor.put(static_cast<std::size_t>(game.current_prompt()) == prompt);
+        }
+        cursor.put(game.is_road_building());
+        for (std::size_t r = 0; r < kResources.size(); ++r) {
+            cursor.put(ratio(game.resource_bank()[r], rules.resource_bank[r]));
+        }
+        cursor.put(ratio(static_cast<double>(game.development_cards_remaining()), deck_size));
+        cursor.put(capped(game.num_turns(), 500.0));
+        cursor.put(ratio(game.victory_points_to_win(), 20.0));
+        cursor.put(ratio(game.discard_limit(), 20.0));
+        cursor.put(game.friendly_robber());
+        for (int count = 1; count <= dims_.max_players; ++count) {
+            cursor.put(count == num_players);
+        }
+        cursor.skip(kResources.size());
+        expect(cursor, block(0), global_names_.size(), "global");
+    }
+
+    // ---- players
+    write_players(game, observer, cache, robber_slot, block(1));
 
     // ---- buildings and roads, scattered once into flat per-slot arrays
     struct Scratch {

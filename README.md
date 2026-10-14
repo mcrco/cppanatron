@@ -108,6 +108,11 @@ decisions per seat, so the games played do not depend on `num_envs`, threads
 or finishing order. Random bots draw from a stream seeded per game, and the
 optional `lineup_slot` buffer says who plays each row's seat.
 
+`critic_level=cpp.InfoLevel.FULL` (with, say, `level=PRIVATE`) appends a
+critic block to every encoded row: the players block at the critic's level,
+the only block the levels differ in. `env.layout()` gives its offset as
+`critic_players`; `GraphEncoder.encode_players` writes the same block.
+
 `cppanatron.catanatron` converts actions, colors and boards to and from
 Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
 the observation layout of Catanatron's board tensor. Our Catanatron fork gives

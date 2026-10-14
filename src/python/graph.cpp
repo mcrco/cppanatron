@@ -192,6 +192,20 @@ void bind_graph(nb::module_& module) {
             nb::arg("game"), nb::arg("observer"),
             "A fresh float32 row for seat ``observer`` (an index into game.colors).")
         .def(
+            "encode_players",
+            [](const GraphEncoder& encoder, const Game& game, int observer) {
+                check_observer(game, observer);
+                std::vector<float> block(encoder.players_size());
+                {
+                    nb::gil_scoped_release release;
+                    encoder.encode_players(game, observer, block);
+                }
+                return to_numpy(std::move(block));
+            },
+            nb::arg("game"), nb::arg("observer"),
+            "Only the players block (flattened max_players x features) for seat\n"
+            "``observer``: the block the information levels differ in.")
+        .def(
             "encode_into",
             [](const GraphEncoder& encoder, const Game& game, int observer,
                OutputVector<float> out) {

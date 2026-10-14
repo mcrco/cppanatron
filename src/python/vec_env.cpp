@@ -217,7 +217,8 @@ void bind_vec_env(nb::module_& module) {
             "__init__",
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
                std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
-               int num_threads, float vp_reward, bool encode_waiting, bool auto_reset) {
+               int num_threads, float vp_reward, bool encode_waiting, bool auto_reset,
+               std::optional<InfoLevel> critic_level) {
                 VecEnvConfig config;
                 if (!dims.has_value()) {
                     std::vector<std::shared_ptr<const CatanMap>> maps;
@@ -241,12 +242,14 @@ void bind_vec_env(nb::module_& module) {
                 config.vp_reward = vp_reward;
                 config.encode_waiting = encode_waiting;
                 config.auto_reset = auto_reset;
+                config.critic_level = critic_level;
                 new (self) PyVecEnv(std::move(config));
             },
             nb::arg("scenarios"), nb::kw_only(), nb::arg("num_envs") = 1,
             nb::arg("dims") = nb::none(), nb::arg("level") = InfoLevel::private_,
             nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
             nb::arg("encode_waiting") = false, nb::arg("auto_reset") = true,
+            nb::arg("critic_level") = nb::none(),
             "``dims`` defaults to the smallest covering every scenario's maps and\n"
             "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
             "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
@@ -254,7 +257,10 @@ void bind_vec_env(nb::module_& module) {
             "``auto_reset=False`` is schedule mode, for evaluation: ``reset`` leaves\n"
             "every env idle, ``start_games`` puts exact games (map, seeds, seats) into\n"
             "idle envs, a finished env stays idle, and ``pop_finished`` reports how\n"
-            "each game ended. Pass ``dims`` covering the maps you will schedule.")
+            "each game ended. Pass ``dims`` covering the maps you will schedule.\n\n"
+            "``critic_level`` (an InfoLevel) appends a critic block to every encoded\n"
+            "row: the players block at that level, the only block that differs\n"
+            "between levels (see ``layout()``).")
         .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
         .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
         .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })
@@ -264,6 +270,24 @@ void bind_vec_env(nb::module_& module) {
             "action_size",
             [](const PyVecEnv& self) { return self.env.encoder().action_space().size(); })
         .def_prop_ro("dims", [](const PyVecEnv& self) { return self.env.config().dims; })
+        .def_prop_ro("level", [](const PyVecEnv& self) { return self.env.config().level; })
+        .def_prop_ro(
+            "critic_level", [](const PyVecEnv& self) { return self.env.config().critic_level; })
+        .def(
+            "layout",
+            [](const PyVecEnv& self) {
+                nb::dict result = nb::cast<nb::dict>(
+                    nb::cast(self.env.encoder()).attr("layout")());
+                if (const GraphEncoder* critic = self.env.critic_encoder()) {
+                    result["critic_players"] = nb::make_tuple(
+                        self.env.encoder().size(),
+                        nb::make_tuple(self.env.max_players(), critic->player_size()));
+                }
+                return result;
+            },
+            "``{block: (offset, shape)}`` of a row: the encoder's blocks, then\n"
+            "``critic_players`` (max_players x player features at critic_level) when\n"
+            "a critic level is set. Its feature names are the players block's.")
         .def_prop_ro(
             "encoder", [](const PyVecEnv& self) { return self.env.encoder(); },
             "A copy of the env's GraphEncoder (layout, feature names, action space).")

@@ -49,6 +49,13 @@ struct VecEnvConfig {
     int num_envs{1};
     EncoderDims dims{};
     InfoLevel level{InfoLevel::private_};
+    /**
+     * Asymmetric actor/critic: when set, every encoded row is followed by a
+     * critic block, the players block encoded at this level (the information
+     * levels differ in that block alone), e.g. a full-information critic for
+     * a private actor. Unset: rows are the actor's encoding only.
+     */
+    std::optional<InfoLevel> critic_level;
     std::uint64_t seed{0};
     int num_threads{1};
     /**
@@ -112,7 +119,7 @@ struct FinishedGame {
  * VecEnv only rewrites a waiting row's zeros and no-op when it changes.
  */
 struct VecEnvBuffers {
-    float* observations{};        // [rows, encoder size]
+    float* observations{};        // [rows, observation_size()]
     std::int32_t* actions{};      // [rows], read for acting rows only
     float* rewards{};             // [rows]
     std::uint8_t* terminals{};    // [rows]
@@ -190,7 +197,14 @@ public:
     [[nodiscard]] std::size_t num_rows() const noexcept {
         return static_cast<std::size_t>(num_envs()) * static_cast<std::size_t>(max_players());
     }
-    [[nodiscard]] std::size_t observation_size() const noexcept { return encoder_.size(); }
+    /** Row size: the encoder's, plus the critic block when critic_level is set. */
+    [[nodiscard]] std::size_t observation_size() const noexcept {
+        return encoder_.size() + (critic_encoder_.has_value() ? critic_encoder_->players_size() : 0);
+    }
+    /** The critic block's encoder (players block at critic_level), if any. */
+    [[nodiscard]] const GraphEncoder* critic_encoder() const noexcept {
+        return critic_encoder_.has_value() ? &*critic_encoder_ : nullptr;
+    }
 
     void bind(const VecEnvBuffers& buffers);
     /**
@@ -253,6 +267,7 @@ private:
 
     VecEnvConfig config_;
     GraphEncoder encoder_;
+    std::optional<GraphEncoder> critic_encoder_;
     std::vector<Env> envs_;
     std::unique_ptr<ThreadPool> pool_;
     VecEnvBuffers buffers_{};

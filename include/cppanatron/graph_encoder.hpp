@@ -158,6 +158,17 @@ public:
     /** Writes the waiting row: zeros with only the no-op set in the mask. */
     void encode_waiting(std::span<float> out) const;
 
+    /** Size of the players block: max_players x player features. */
+    [[nodiscard]] std::size_t players_size() const noexcept {
+        return static_cast<std::size_t>(dims_.max_players) * player_names_.size();
+    }
+    /**
+     * Writes only the players block (as encode would) for `observer`. The
+     * information levels differ in this block alone, so with the actor's row
+     * it is what a critic at another level needs.
+     */
+    void encode_players(const Game& game, int observer, std::span<float> out) const;
+
 private:
     /** Everything about a map the rows need, and the row's map-only features. */
     struct MapCache;
@@ -178,6 +189,8 @@ private:
 
     /** The cache for a map, built once per thread for each live map. */
     [[nodiscard]] const MapCache& map_cache(const std::shared_ptr<const CatanMap>& map) const;
+    void write_players(
+        const Game& game, int observer, const MapCache& cache, int robber_slot, float* out) const;
 
     EncoderDims dims_;
     InfoLevel level_;

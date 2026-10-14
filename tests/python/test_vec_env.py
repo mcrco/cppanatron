@@ -475,3 +475,46 @@ def test_auto_reset_lineup_slots_name_the_scenario_seats():
         assert buffers["lineup_slot"][e * 3: e * 3 + 3].tolist() == slots
         orders.add(tuple(slots))
     assert len(orders) > 1
+
+
+# ---------------------------------------------------------------- asymmetric critic
+
+
+def test_critic_rows_carry_the_players_block_at_the_critic_level():
+    env = cpp.VecEnv([cpp.Scenario(num_players=3, seats=["learner", "learner", "R"])],
+                     num_envs=3, seed=4, level=cpp.InfoLevel.PRIVATE,
+                     critic_level=cpp.InfoLevel.FULL)
+    plain = cpp.VecEnv([cpp.Scenario(num_players=3)], num_envs=1)
+    assert plain.critic_level is None and "critic_players" not in plain.layout()
+    critic = cpp.GraphEncoder(env.dims, cpp.InfoLevel.FULL)
+    width = len(critic.feature_names("players"))
+    offset, shape = env.layout()["critic_players"]
+    assert (offset, shape) == (env.encoder.size, (env.max_players, width))
+    assert env.observation_size == env.encoder.size + env.max_players * width
+    assert env.critic_level == cpp.InfoLevel.FULL and env.level == cpp.InfoLevel.PRIVATE
+
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(3)
+    players_offset, _ = critic.layout()["players"]
+    mask_offset, _ = env.encoder.layout()["action_mask"]
+    noop = env.encoder.action_space.noop
+    differ = 0
+    for _ in range(150):
+        for row, observation in enumerate(buffers["observations"]):
+            e, seat = divmod(row, env.max_players)
+            if buffers["acting"][row]:
+                game = env.game(e)
+                actor = env.encoder.encode(game, seat)
+                full = critic.encode(game, seat)
+                assert np.array_equal(observation[:offset], actor)
+                assert np.array_equal(observation[offset:],
+                                      full[players_offset: players_offset + shape[0] * width])
+                assert np.array_equal(observation[offset:], critic.encode_players(game, seat))
+                differ += not np.array_equal(observation[offset:],
+                                             actor[players_offset: players_offset + shape[0] * width])
+            else:
+                assert np.flatnonzero(observation).tolist() == [mask_offset + noop]
+        sample_actions(env, buffers, rng)
+        env.step()
+    assert differ > 0  # the full-information critic sees what the private actor does not

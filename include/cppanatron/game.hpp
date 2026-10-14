@@ -9,6 +9,7 @@
 #include "cppanatron/action.hpp"
 #include "cppanatron/board.hpp"
 #include "cppanatron/rules.hpp"
+#include "cppanatron/setup.hpp"
 
 namespace cppanatron {
 
@@ -136,6 +137,16 @@ public:
      */
     void determinize_development_cards(
         Color color, const std::array<int, 5>& cards, std::uint64_t seed);
+
+    /**
+     * Scenario setup: put a freshly created game into an exact position.
+     *
+     * See GameSetup. Throws std::invalid_argument for positions the rules
+     * cannot produce (buildings too close, unconnected roads, more pieces or
+     * cards than exist) and std::logic_error once the game has started. The
+     * deck is reshuffled from the game's random stream.
+     */
+    void apply_setup(const GameSetup& setup);
 
     /**
      * Exact logical-state equality for search deduplication.

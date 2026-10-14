@@ -48,7 +48,10 @@ The Python names mirror Catanatron's (`Color.RED`, `ActionType.BUILD_ROAD`,
 Catanatron's `(color, action_type, value)` namedtuple. Rules beyond the base
 game go in one object, `cpp.Game(6, rules=cpp.GameRules(resource_bank=(24,) * 5,
 development_deck=(20, 3, 3, 3, 5)))`; `value_action(game, enemies=cpp.ValueEnemies.ALL)`
-scores every opponent's production rather than only the next seat's. Chance outcomes come from
+scores every opponent's production rather than only the next seat's.
+`game.apply_setup([cpp.PlayerSetup(settlements=[...], roads=[...], resources=...), ...],
+current_player=1, has_rolled=True)` puts a fresh game into an exact position;
+the bank, deck, victory points and awards are derived. Chance outcomes come from
 the game's RNG unless passed to `execute` (`dice`, `development_card`,
 `stolen_resource`), which replays recorded games exactly. Unplayable actions
 raise `ValueError`, as in Catanatron.

@@ -193,6 +193,52 @@ void bind_game(nb::module_& module) {
                     rules.cities_per_player);
         });
 
+    nb::class_<PlayerSetup>(
+        module, "PlayerSetup",
+        "One seat's pieces and cards for Game.apply_setup. Counts follow Resource and\n"
+        "DevelopmentCard order; development_cards includes victory point cards.")
+        .def(
+            "__init__",
+            [](PlayerSetup* self, std::vector<int> settlements, std::vector<int> cities,
+               const std::vector<std::array<int, 2>>& roads, const std::array<int, 5>& resources,
+               const std::array<int, 5>& development_cards,
+               const std::array<int, 5>& played_development_cards) {
+                PlayerSetup setup;
+                setup.settlements = std::move(settlements);
+                setup.cities = std::move(cities);
+                for (const auto& road : roads) {
+                    setup.roads.push_back(edge_from_python(road));
+                }
+                setup.resources = resources;
+                setup.development_cards = development_cards;
+                setup.played_development_cards = played_development_cards;
+                new (self) PlayerSetup(std::move(setup));
+            },
+            nb::kw_only(), nb::arg("settlements") = std::vector<int>{},
+            nb::arg("cities") = std::vector<int>{},
+            nb::arg("roads") = std::vector<std::array<int, 2>>{},
+            nb::arg("resources") = std::array<int, 5>{},
+            nb::arg("development_cards") = std::array<int, 5>{},
+            nb::arg("played_development_cards") = std::array<int, 5>{})
+        .def_ro("settlements", &PlayerSetup::settlements)
+        .def_ro("cities", &PlayerSetup::cities)
+        .def_prop_ro(
+            "roads",
+            [](const PlayerSetup& setup) {
+                nb::list roads;
+                for (Edge edge : setup.roads) {
+                    roads.append(edge_to_python(edge));
+                }
+                return roads;
+            })
+        .def_prop_ro("resources", [](const PlayerSetup& setup) { return to_tuple(setup.resources); })
+        .def_prop_ro(
+            "development_cards",
+            [](const PlayerSetup& setup) { return to_tuple(setup.development_cards); })
+        .def_prop_ro(
+            "played_development_cards",
+            [](const PlayerSetup& setup) { return to_tuple(setup.played_development_cards); });
+
     nb::class_<Tile>(module, "Tile", "A board hexagon: land, water or port.")
         .def_ro("kind", &Tile::kind)
         .def_ro("id", &Tile::id)
@@ -461,6 +507,37 @@ void bind_game(nb::module_& module) {
             nb::arg("player"), nb::arg("cards"),
             "Scenario setup: overwrite unplayed development cards, playable this turn.\n"
             "Victory point cards must be bought instead.")
+        .def(
+            "apply_setup",
+            [](Game& game, const std::vector<PlayerSetup>& players,
+               std::optional<std::array<int, 3>> robber, int current_player, bool has_rolled,
+               bool has_played_development_card, int completed_turns,
+               std::optional<int> longest_road, std::optional<int> largest_army) {
+                GameSetup setup;
+                setup.players = players;
+                if (robber.has_value()) {
+                    setup.robber = Coordinate{(*robber)[0], (*robber)[1], (*robber)[2]};
+                }
+                setup.current_player = current_player;
+                setup.has_rolled = has_rolled;
+                setup.has_played_development_card = has_played_development_card;
+                setup.completed_turns = completed_turns;
+                setup.longest_road = longest_road;
+                setup.largest_army = largest_army;
+                game.apply_setup(setup);
+            },
+            nb::arg("players"), nb::kw_only(), nb::arg("robber") = nb::none(),
+            nb::arg("current_player") = 0, nb::arg("has_rolled") = false,
+            nb::arg("has_played_development_card") = false, nb::arg("completed_turns") = 0,
+            nb::arg("longest_road") = nb::none(), nb::arg("largest_army") = nb::none(),
+            "Scenario setup: put a freshly created game into an exact position.\n\n"
+            "``players`` holds one PlayerSetup per seat. The bank and deck are the\n"
+            "rules' starting counts minus every hand and played card, and the deck\n"
+            "is reshuffled. Victory points and awards follow from the pieces and\n"
+            "cards; ``longest_road``/``largest_army`` name the holder's seat (-1 for\n"
+            "nobody) when the leader is tied or must be explicit. The position is at\n"
+            "``current_player``'s turn, before or after the roll, with every held\n"
+            "card playable. Raises ValueError for positions the rules cannot produce.")
         .def(
             "determinize_development_cards",
             [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,

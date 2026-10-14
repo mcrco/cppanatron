@@ -41,6 +41,21 @@ public:
     void build_road(Color color, Edge edge);
     void build_city(Color color, int node_id);
 
+    /**
+     * Scenario setup: replace every building and road and move the robber.
+     *
+     * Validates the distance rule and that every road connects to a building
+     * of its color (through any nodes, since a later settlement may have cut
+     * the road), then rebuilds road networks and lengths from scratch. Nobody
+     * holds Longest Road until set_longest_road_holder.
+     */
+    void restore(
+        const std::map<int, BuildingState>& buildings,
+        const std::map<Edge, Color>& roads,
+        Coordinate robber);
+    /** Scenario setup: who holds Longest Road after restore. */
+    void set_longest_road_holder(std::optional<Color> color);
+
     [[nodiscard]] std::optional<Color> node_color(int node_id) const;
     [[nodiscard]] std::optional<Color> edge_color(Edge edge) const;
     [[nodiscard]] bool is_enemy_node(int node_id, Color color) const;

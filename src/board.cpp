@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include <string>
 
 namespace cppanatron {
 namespace {
@@ -371,6 +372,110 @@ int Board::longest_acyclic_path(
         visit(node, 0);
     }
     return best;
+}
+
+void Board::restore(
+    const std::map<int, BuildingState>& buildings,
+    const std::map<Edge, Color>& roads,
+    Coordinate robber) {
+    if (map_.tile_at(robber).kind != TileKind::land) {
+        throw std::invalid_argument("robber must be on a land tile");
+    }
+    const auto edge_name = [](Edge edge) {
+        return "(" + std::to_string(edge.a) + ", " + std::to_string(edge.b) + ")";
+    };
+    const std::set<Edge> land_edges(map_.land_edges().begin(), map_.land_edges().end());
+    for (const auto& [node_id, building] : buildings) {
+        (void)building;
+        if (!map_.land_nodes().contains(node_id)) {
+            throw std::invalid_argument("node " + std::to_string(node_id) + " is not on land");
+        }
+        for (int neighbor : neighbors(node_id)) {
+            if (buildings.contains(neighbor)) {
+                throw std::invalid_argument(
+                    "buildings at nodes " + std::to_string(node_id) + " and " +
+                    std::to_string(neighbor) + " break the distance rule");
+            }
+        }
+    }
+    for (const auto& [edge, color] : roads) {
+        (void)color;
+        if (edge != edge.normalized() || !land_edges.contains(edge)) {
+            throw std::invalid_argument("road " + edge_name(edge) + " is not a land edge");
+        }
+    }
+    // Every road must reach a building of its color. Walk through any node:
+    // an opponent's later settlement may have cut the network in two.
+    std::set<Edge> unreached;
+    for (const auto& [edge, color] : roads) {
+        (void)color;
+        unreached.insert(edge);
+    }
+    for (const auto& [node_id, building] : buildings) {
+        std::vector<int> agenda{node_id};
+        std::set<int> seen{node_id};
+        while (!agenda.empty()) {
+            const int node = agenda.back();
+            agenda.pop_back();
+            for (int neighbor : neighbors(node)) {
+                const Edge edge = Edge{node, neighbor}.normalized();
+                const auto road = roads.find(edge);
+                if (road == roads.end() || road->second != building.color) {
+                    continue;
+                }
+                unreached.erase(edge);
+                if (seen.insert(neighbor).second) {
+                    agenda.push_back(neighbor);
+                }
+            }
+        }
+    }
+    if (!unreached.empty()) {
+        throw std::invalid_argument(
+            "road " + edge_name(*unreached.begin()) +
+            " does not connect to a building of its color");
+    }
+
+    buildings_ = buildings;
+    roads_ = roads;
+    robber_coordinate_ = robber;
+    board_buildable_ids_ = map_.land_nodes();
+    for (const auto& [node_id, building] : buildings_) {
+        (void)building;
+        board_buildable_ids_.erase(node_id);
+        for (int neighbor : neighbors(node_id)) {
+            board_buildable_ids_.erase(neighbor);
+        }
+    }
+    connected_components_.clear();
+    road_lengths_.clear();
+    std::set<Color> colors;
+    for (const auto& [node_id, building] : buildings_) {
+        (void)node_id;
+        colors.insert(building.color);
+    }
+    for (Color color : colors) {
+        rebuild_connected_components(color);
+    }
+    // As in play, only players who have built a road have a cached length.
+    for (const auto& [edge, color] : roads_) {
+        (void)edge;
+        if (road_lengths_.contains(color)) {
+            continue;
+        }
+        int best = 0;
+        for (const auto& component : connected_components_[color]) {
+            best = std::max(best, longest_acyclic_path(component, color));
+        }
+        road_lengths_[color] = best;
+    }
+    road_color_.reset();
+    road_length_ = 0;
+}
+
+void Board::set_longest_road_holder(std::optional<Color> color) {
+    road_color_ = color;
+    road_length_ = color.has_value() ? longest_road(*color) : 0;
 }
 
 }  // namespace cppanatron

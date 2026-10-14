@@ -8,6 +8,7 @@ add_library(cppanatron
     src/map.cpp
     src/board.cpp
     src/game.cpp
+    src/setup.cpp
     src/action_space.cpp
     src/value_player.cpp
     src/observation.cpp

@@ -130,9 +130,13 @@ counts and the unseen cards (deck plus other hands). Feed it true transitions
 with `observe(before, action, after)`, or, when you only have views (a server
 bot), public events: `gain`, `lose`, `transfer`, `steal` (resource only if you
 were thief or victim), `monopoly`, `buy_development_card` (card only for
-yourself), `play_development_card`, `end_turn`. `sample_world(game, tracker,
-seed)` deals a full game consistent with that knowledge, never reading the
-hidden cards of `game`; `expected_resources(seat)` gives the mean hand.
+yourself), `play_development_card`, `end_turn`, `public_victory_points` (after
+every step: victory point cards are capped by the fewest points a seat held
+without winning), and `observe_options(view, legal)` when you are to move (the
+friendly robber's options reveal who is under 3 points). `sample_world(game,
+tracker, seed)` deals a full game consistent with that knowledge, never
+reading the hidden cards of `game`; `expected_resources(seat)` gives the mean
+hand.
 
 `SearchPool` runs many N-player searches in lockstep. It takes an
 `ActionCodec` and an `ObservationEncoder` (implemented in C++; `FlatActionCodec`
@@ -153,6 +157,13 @@ while n := pool.collect(obs, rows):          # leaves of every search, GIL relea
     pool.apply(logits, values)
 action = pool.select(ids[0])                 # also visits(), q(), policy_target(), value()
 ```
+
+A rejected `apply` (wrong shape, non-finite values) changes nothing and can be
+retried; `cancel()` withdraws the last collect's rows. `advance(id, action)`
+reuses a subtree when it is safe; with determinizations it refuses drawn
+outcomes, monopolies and anything the worlds disagree on, and the caller then
+adds a new search from the real position with the updated tracker.
+Determinized roots offer exactly the real game's legal actions.
 
 Values are per-seat win probabilities (slot 0 = the leaf's player to move);
 each node picks by its own player's value (max^n), which for two players whose

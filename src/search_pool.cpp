@@ -13,6 +13,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <string>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -23,6 +24,8 @@ namespace {
 constexpr std::uint32_t kNone = std::numeric_limits<std::uint32_t>::max();
 constexpr std::size_t kMaxSeats = kColors.size();
 constexpr double kTiny = 1e-12;
+/** Samples tried per determinized root world before settling for a partial one. */
+constexpr int kWorldAttempts = 64;
 /** Log-priors of masked-out or underflowed actions, for Gumbel scores. */
 constexpr double kMinLogPrior = -69.0;
 
@@ -295,6 +298,10 @@ std::uint64_t outcome_fingerprint(const Game& game) {
 struct Leaf {
     std::uint32_t world{};
     std::uint32_t node{};
+    /** A root awaiting its first evaluation (no virtual visits, no simulation). */
+    bool root{};
+    /** The Gumbel root edge this simulation was sent down, or kNone. */
+    std::uint32_t root_edge{kNone};
 };
 
 struct GumbelRoot {
@@ -310,10 +317,17 @@ struct GumbelRoot {
 
 struct Search {
     std::int64_t id{};
+    /** The worker thread that always runs this search (allocator affinity). */
+    std::size_t lane{};
     std::mt19937_64 rng;
     int players{};
     int root_player{};
     bool determinized{};
+    /**
+     * Determinized roots: the real game's legal actions (the root player
+     * knows its own options), to which every world's root is restricted.
+     */
+    std::vector<std::uint8_t> root_mask;
     std::vector<Tree> worlds;
     /** World of each simulation, cyclically; merged samples appear repeatedly. */
     std::vector<std::uint32_t> schedule;
@@ -371,6 +385,35 @@ std::vector<double> softmax(const std::vector<double>& logits) {
         value /= total;
     }
     return result;
+}
+
+/** What every seat sees of two positions of one game, plus `observer`'s own cards. */
+bool same_public_state(const Game& lhs, const Game& rhs, int observer) {
+    const auto total = [](const std::array<int, 5>& counts) {
+        return std::accumulate(counts.begin(), counts.end(), 0);
+    };
+    if (lhs.resource_bank() != rhs.resource_bank() ||
+        lhs.development_cards_remaining() != rhs.development_cards_remaining() ||
+        lhs.current_player_index() != rhs.current_player_index() ||
+        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns()) {
+        return false;
+    }
+    for (std::size_t seat = 0; seat < lhs.players().size(); ++seat) {
+        const PlayerState& a = lhs.players()[seat];
+        const PlayerState& b = rhs.players()[seat];
+        if (total(a.resources) != total(b.resources) ||
+            total(a.development_cards) != total(b.development_cards) ||
+            a.played_development_cards != b.played_development_cards ||
+            a.victory_points != b.victory_points || a.has_rolled != b.has_rolled ||
+            lhs.remaining_discards(lhs.colors()[seat]) != rhs.remaining_discards(rhs.colors()[seat])) {
+            return false;
+        }
+        if (static_cast<int>(seat) == observer &&
+            (a.resources != b.resources || a.development_cards != b.development_cards)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool same_hidden_state(const Game& lhs, const Game& rhs) {
@@ -576,11 +619,18 @@ struct SearchPool::Impl {
              kNone});
     }
 
-    void expand(Tree& tree, std::uint32_t node, std::span<const float> logits) const {
+    void expand(
+        Tree& tree, std::uint32_t node, std::span<const float> logits,
+        const std::vector<std::uint8_t>* restrict_to = nullptr) const {
         thread_local std::vector<std::uint8_t> mask;
         mask.assign(codec->size(), 0);
         Node& target = tree.nodes[node];
         codec->mask(*target.game, mask);
+        if (restrict_to != nullptr && !restrict_to->empty()) {
+            for (std::size_t i = 0; i < mask.size(); ++i) {
+                mask[i] &= (*restrict_to)[i];
+            }
+        }
         std::vector<std::uint32_t> legal;
         double top = -std::numeric_limits<double>::infinity();
         for (std::uint32_t i = 0; i < mask.size(); ++i) {
@@ -975,7 +1025,7 @@ struct SearchPool::Impl {
                 Node& root = search.worlds[w].nodes.front();
                 if (!root.expanded && !root.pending) {
                     root.pending = true;
-                    search.issued.push_back({w, 0});
+                    search.issued.push_back({w, 0, true, kNone});
                     ++search.pending;
                     ++issued;
                 }
@@ -993,12 +1043,21 @@ struct SearchPool::Impl {
                     break;
                 }
             }
-            const Descent descent = descend(search, tree, root_edge);
-            if (descent.stop == Stop::collision) {
+            const auto unpop = [&] {
                 if (root_edge.has_value()) {
                     search.gumbel->queue.push_back(*root_edge);
                     --search.gumbel->own_visits[*root_edge];
                 }
+            };
+            Descent descent;
+            try {
+                descent = descend(search, tree, root_edge);
+            } catch (...) {
+                unpop();
+                throw;
+            }
+            if (descent.stop == Stop::collision) {
+                unpop();
                 break;
             }
             ++search.started;
@@ -1008,7 +1067,9 @@ struct SearchPool::Impl {
                 for (std::uint32_t n = descent.node; n != kNone; n = tree.nodes[n].parent) {
                     ++tree.nodes[n].visits;
                 }
-                search.issued.push_back({world, descent.node});
+                search.issued.push_back(
+                    {world, descent.node, false,
+                     root_edge.has_value() ? static_cast<std::uint32_t>(*root_edge) : kNone});
                 ++search.pending;
                 ++issued;
                 continue;
@@ -1029,6 +1090,25 @@ struct SearchPool::Impl {
         finish_if_done(search);
     }
 
+    /** Undo the issue of a leaf that will not be evaluated. */
+    static void withdraw(Search& search, const Leaf& leaf) {
+        Tree& tree = search.worlds[leaf.world];
+        tree.nodes[leaf.node].pending = false;
+        --search.pending;
+        if (leaf.root) {
+            return;
+        }
+        for (std::uint32_t n = leaf.node; n != kNone; n = tree.nodes[n].parent) {
+            --tree.nodes[n].visits;
+        }
+        --search.started;
+        if (leaf.root_edge != kNone && search.gumbel.has_value()) {
+            search.gumbel->queue.push_back(leaf.root_edge);
+            --search.gumbel->own_visits[leaf.root_edge];
+        }
+        search.done = false;
+    }
+
     void evaluate(Search& search, const Leaf& leaf, std::span<const float> logits,
                   std::span<const float> values) const {
         Tree& tree = search.worlds[leaf.world];
@@ -1042,7 +1122,7 @@ struct SearchPool::Impl {
             absolute[static_cast<std::size_t>((node.to_play + slot) % search.players)] =
                 std::clamp(static_cast<double>(value), 0.0, 1.0);
         }
-        expand(tree, leaf.node, logits);
+        expand(tree, leaf.node, logits, leaf.node == 0 ? &search.root_mask : nullptr);
         if (config.release_games && leaf.node != 0) {
             tree.nodes[leaf.node].game.reset();
         }
@@ -1065,7 +1145,7 @@ struct SearchPool::Impl {
 
     std::size_t collect(std::span<float> observations, std::span<std::int64_t> ids) {
         if (!batch.empty()) {
-            throw std::logic_error("apply the last collect before collecting again");
+            throw std::logic_error("apply (or cancel) the last collect before collecting again");
         }
         const std::size_t capacity = ids.size();
         const std::size_t width = encoder->size();
@@ -1097,16 +1177,27 @@ struct SearchPool::Impl {
             }
             std::vector<std::size_t> lanes(active.size());
             for (std::size_t i = 0; i < active.size(); ++i) {
-                lanes[i] = static_cast<std::size_t>(active[i]->id);
+                lanes[i] = active[i]->lane;
             }
-            workers->run(
-                active.size(),
-                [&](std::size_t i) {
-                    if (quotas[i] > 0) {
-                        gather(*active[i], quotas[i]);
+            try {
+                workers->run(
+                    active.size(),
+                    [&](std::size_t i) {
+                        if (quotas[i] > 0) {
+                            gather(*active[i], quotas[i]);
+                        }
+                    },
+                    &lanes);
+            } catch (...) {
+                // Searches stay usable: issued leaves go back as if never chosen.
+                for (Search* search : active) {
+                    for (auto leaf = search->issued.rbegin(); leaf != search->issued.rend(); ++leaf) {
+                        withdraw(*search, *leaf);
                     }
-                },
-                &lanes);
+                    search->issued.clear();
+                }
+                throw;
+            }
             for (Search* search : active) {
                 for (const Leaf& leaf : search->issued) {
                     batch.push_back({search, leaf});
@@ -1124,13 +1215,26 @@ struct SearchPool::Impl {
             }
             // Every issued simulation ended in a terminal position: go again.
         }
-        workers->run(batch.size(), [&](std::size_t row) {
-            const Row& entry = batch[row];
-            const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
-            encoder->encode(game, game.current_player_index(), observations.subspan(row * width, width));
-            ids[row] = entry.search->id;
-        });
+        try {
+            workers->run(batch.size(), [&](std::size_t row) {
+                const Row& entry = batch[row];
+                const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
+                encoder->encode(game, game.current_player_index(), observations.subspan(row * width, width));
+                ids[row] = entry.search->id;
+            });
+        } catch (...) {
+            cancel();
+            throw;
+        }
         return batch.size();
+    }
+
+    /** Withdraw every pending row, latest first (restoring Gumbel's queue order). */
+    void cancel() {
+        for (auto row = batch.rbegin(); row != batch.rend(); ++row) {
+            withdraw(*row->search, row->leaf);
+        }
+        batch.clear();
     }
 
     void apply(std::span<const float> logits, std::span<const float> values) {
@@ -1140,6 +1244,15 @@ struct SearchPool::Impl {
         if (logits.size() != rows * width || values.size() != rows * players) {
             throw std::invalid_argument(
                 "apply needs action_size() logits and max_players() values per collected row");
+        }
+        // Reject bad rows before anything changes, so the caller can retry.
+        for (std::size_t row = 0; row < rows; ++row) {
+            const auto seats = static_cast<std::size_t>(batch[row].search->players);
+            for (std::size_t slot = 0; slot < seats; ++slot) {
+                if (!std::isfinite(values[row * players + slot])) {
+                    throw std::invalid_argument("leaf values must be finite (row " + std::to_string(row) + ")");
+                }
+            }
         }
         // Rows of one search are contiguous; each search is one task.
         std::vector<std::pair<std::size_t, std::size_t>> ranges;
@@ -1153,19 +1266,31 @@ struct SearchPool::Impl {
         rows_in_flight.swap(batch);
         std::vector<std::size_t> lanes(ranges.size());
         for (std::size_t task = 0; task < ranges.size(); ++task) {
-            lanes[task] = static_cast<std::size_t>(rows_in_flight[ranges[task].first].search->id);
+            lanes[task] = rows_in_flight[ranges[task].first].search->lane;
         }
-        workers->run(
-            ranges.size(),
-            [&](std::size_t task) {
-                for (std::size_t row = ranges[task].first; row < ranges[task].second; ++row) {
-                    const Row& entry = rows_in_flight[row];
-                    evaluate(
-                        *entry.search, entry.leaf, logits.subspan(row * width, width),
-                        values.subspan(row * players, players));
+        std::vector<std::uint8_t> applied(rows, 0);
+        try {
+            workers->run(
+                ranges.size(),
+                [&](std::size_t task) {
+                    for (std::size_t row = ranges[task].first; row < ranges[task].second; ++row) {
+                        const Row& entry = rows_in_flight[row];
+                        evaluate(
+                            *entry.search, entry.leaf, logits.subspan(row * width, width),
+                            values.subspan(row * players, players));
+                        applied[row] = 1;
+                    }
+                },
+                &lanes);
+        } catch (...) {
+            // Rows that were not applied go back to their searches unevaluated.
+            for (std::size_t row = rows; row-- > 0;) {
+                if (applied[row] == 0) {
+                    withdraw(*rows_in_flight[row].search, rows_in_flight[row].leaf);
                 }
-            },
-            &lanes);
+            }
+            throw;
+        }
     }
 
     // ------------------------------------------------------------ re-rooting
@@ -1213,6 +1338,14 @@ struct SearchPool::Impl {
         if (search.worlds.empty() || !search.roots_ready) {
             return false;
         }
+        if (search.determinized) {
+            // A monopoly reveals how many cards each seat held: worlds dealt
+            // without that knowledge contradict the real game.
+            const Game& root = game_of(search.worlds.front(), 0);
+            if (codec->decode(root, action).type == ActionType::play_monopoly) {
+                return false;
+            }
+        }
         std::vector<std::uint32_t> children;
         for (const Tree& tree : search.worlds) {
             const Node& root = tree.nodes.front();
@@ -1226,17 +1359,47 @@ struct SearchPool::Impl {
                 return false;
             }
             const Node& next = tree.nodes[child];
-            if (next.kind != NodeKind::decision || !next.expanded || next.visits == 0 ||
-                (search.determinized && next.to_play != search.root_player)) {
+            if (next.kind != NodeKind::decision || !next.expanded || next.visits == 0) {
+                return false;
+            }
+            // In a determinized world a drawn outcome (even the only possible
+            // one, such as a steal from a one-card hand) follows the world's
+            // hidden cards, not the real ones.
+            if (search.determinized && (next.to_play != search.root_player || next.outcome != kNone)) {
                 return false;
             }
             children.push_back(child);
+        }
+        if (search.determinized) {
+            const Tree& first = search.worlds.front();
+            const Game& reference = game_of(search.worlds.front(), children.front());
+            // Robber options under the friendly robber depend on hidden cards.
+            if (reference.friendly_robber() && reference.current_prompt() == ActionPrompt::move_robber) {
+                return false;
+            }
+            const Node& expected = first.nodes[children.front()];
+            for (std::size_t w = 1; w < search.worlds.size(); ++w) {
+                Tree& tree = search.worlds[w];
+                if (!same_public_state(reference, game_of(tree, children[w]), search.root_player)) {
+                    return false;
+                }
+                const Node& next = tree.nodes[children[w]];
+                if (next.num_edges != expected.num_edges) {
+                    return false;
+                }
+                for (std::uint32_t i = 0; i < next.num_edges; ++i) {
+                    if (tree.edges[next.first_edge + i].action != first.edges[expected.first_edge + i].action) {
+                        return false;
+                    }
+                }
+            }
         }
         for (std::size_t w = 0; w < search.worlds.size(); ++w) {
             (void)game_of(search.worlds[w], children[w]);
             search.worlds[w] = extract(search.worlds[w], children[w]);
         }
         search.root_player = search.worlds.front().nodes.front().to_play;
+        search.root_mask.clear();
         search.started = 0;
         search.completed = 0;
         search.done = false;
@@ -1394,6 +1557,7 @@ struct SearchPool::Impl {
         result.simulations = search.simulations;
         result.evaluations = search.evaluations;
         result.worlds = static_cast<std::uint32_t>(search.worlds.size());
+        result.lane = static_cast<std::uint32_t>(search.lane);
         result.max_depth = search.max_depth;
         result.mean_depth = search.simulations == 0
             ? 0.0
@@ -1429,13 +1593,31 @@ std::size_t SearchPool::observation_size() const noexcept { return impl_->encode
 std::size_t SearchPool::action_size() const noexcept { return impl_->codec->size(); }
 int SearchPool::max_players() const noexcept { return impl_->config.max_players; }
 
-std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTracker* tracker) {
+std::int64_t SearchPool::add(
+    const Game& game, std::uint64_t seed, const HandTracker* tracker, bool ignore_tracker) {
     const int players = static_cast<int>(game.colors().size());
     if (players > impl_->config.max_players) {
         throw std::invalid_argument("the game has more seats than max_players");
     }
+    if (impl_->config.determinizations == 0 && tracker != nullptr && !ignore_tracker) {
+        throw std::invalid_argument(
+            "determinizations=0 searches the game as given, hidden cards included, and "
+            "ignores the tracker; set determinizations or pass ignore_tracker");
+    }
+    if (impl_->config.determinizations > 0 && tracker == nullptr) {
+        throw std::invalid_argument("determinized search needs the root player's HandTracker");
+    }
     auto search = std::make_unique<Search>();
     search->id = impl_->next_id;
+    // The least loaded thread takes the new search (ids alone would leave
+    // threads idle once some of their searches finish).
+    std::vector<std::size_t> load(impl_->workers->threads());
+    for (const auto& [id, other] : impl_->searches) {
+        if (!other->done) {
+            ++load[other->lane];
+        }
+    }
+    search->lane = static_cast<std::size_t>(std::min_element(load.begin(), load.end()) - load.begin());
     search->rng.seed(seed);
     search->players = players;
     search->root_player = game.current_player_index();
@@ -1445,15 +1627,38 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
     } else {
         std::vector<Game> worlds;
         if (impl_->config.determinizations > 0) {
-            if (tracker == nullptr) {
-                throw std::invalid_argument("determinized search needs the root player's HandTracker");
-            }
             if (tracker->observer() != search->root_player) {
                 throw std::invalid_argument("the tracker must follow the player to move");
             }
             search->determinized = true;
+            // The root player knows its own options; they can depend on hidden
+            // cards (the friendly robber spares seats under 3 actual points).
+            // Prefer worlds that offer every real option, and search only those.
+            const auto mask_of = [&](const Game& world) {
+                std::vector<std::uint8_t> mask(impl_->codec->size());
+                impl_->codec->mask(world, mask);
+                return mask;
+            };
+            search->root_mask = mask_of(game);
+            const auto covers = [&](const std::vector<std::uint8_t>& mask) {
+                for (std::size_t i = 0; i < mask.size(); ++i) {
+                    if (search->root_mask[i] != 0 && mask[i] == 0) {
+                        return false;
+                    }
+                }
+                return true;
+            };
+            std::vector<std::uint8_t> common = search->root_mask;
             for (int k = 0; k < impl_->config.determinizations; ++k) {
                 Game world = sample_world(game, *tracker, search->rng);
+                auto mask = mask_of(world);
+                for (int attempt = 1; attempt < kWorldAttempts && !covers(mask); ++attempt) {
+                    world = sample_world(game, *tracker, search->rng);
+                    mask = mask_of(world);
+                }
+                for (std::size_t i = 0; i < common.size(); ++i) {
+                    common[i] &= mask[i];
+                }
                 const auto same = std::find_if(worlds.begin(), worlds.end(), [&](const Game& other) {
                     return same_hidden_state(other, world);
                 });
@@ -1464,6 +1669,10 @@ std::int64_t SearchPool::add(const Game& game, std::uint64_t seed, const HandTra
                     worlds.push_back(std::move(world));
                 }
             }
+            if (std::none_of(common.begin(), common.end(), [](std::uint8_t legal) { return legal != 0; })) {
+                throw std::invalid_argument("no sampled world allows any of the real legal actions");
+            }
+            search->root_mask = std::move(common);
         } else {
             worlds.push_back(game);
             search->schedule.push_back(0);
@@ -1486,6 +1695,8 @@ std::size_t SearchPool::collect(std::span<float> observations, std::span<std::in
 void SearchPool::apply(std::span<const float> logits, std::span<const float> values) {
     impl_->apply(logits, values);
 }
+
+void SearchPool::cancel() { impl_->cancel(); }
 
 std::size_t SearchPool::pending() const noexcept { return impl_->batch.size(); }
 
@@ -1532,7 +1743,7 @@ bool SearchPool::advance(std::int64_t id, std::size_t action_index) {
 void SearchPool::remove(std::int64_t id) {
     Search& search = impl_->find(id);
     if (search.pending > 0) {
-        throw std::logic_error("cannot remove a search with leaves awaiting apply");
+        throw std::logic_error("cannot remove a search with leaves awaiting apply (apply or cancel first)");
     }
     impl_->searches.erase(id);
 }

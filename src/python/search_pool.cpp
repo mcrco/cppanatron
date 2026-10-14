@@ -170,7 +170,8 @@ void bind_search_pool(nb::module_& module) {
         .def_ro("worlds", &SearchStats::worlds)
         .def_ro("max_depth", &SearchStats::max_depth)
         .def_ro("mean_depth", &SearchStats::mean_depth)
-        .def_ro("tree_bytes", &SearchStats::tree_bytes, "Tree storage excluding the games' heap.");
+        .def_ro("tree_bytes", &SearchStats::tree_bytes, "Tree storage excluding the games' heap.")
+        .def_ro("lane", &SearchStats::lane, "The worker thread the search runs on.");
 
     nb::class_<SearchPool>(
         module, "SearchPool",
@@ -201,13 +202,18 @@ void bind_search_pool(nb::module_& module) {
         .def_prop_ro("pending", &SearchPool::pending, "Rows of the last collect awaiting apply.")
         .def(
             "add",
-            [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker) {
-                return pool.add(game, seed, tracker);
-            },
-            nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(),
+            [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker,
+               bool ignore_tracker) { return pool.add(game, seed, tracker, ignore_tracker); },
+            nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(), nb::kw_only(),
+            nb::arg("ignore_tracker") = false,
             "Start a search for ``game``'s player to move; returns its id. With\n"
             "determinizations the root worlds are sampled from ``tracker``, which\n"
-            "must follow that player. A finished game's search is done at once.")
+            "must follow that player, and the root offers exactly ``game``'s legal\n"
+            "actions (the player's own knowledge): worlds that do not offer them all\n"
+            "are resampled, and every root is restricted to them. Without\n"
+            "determinizations the search reads ``game`` as is, hidden cards included\n"
+            "(an oracle), so a ``tracker`` raises ValueError unless\n"
+            "``ignore_tracker=True``. A finished game's search is done at once.")
         .def(
             "collect",
             [](SearchPool& pool, OutputMatrix<float> observations, OutputVector<std::int64_t> ids) {
@@ -247,6 +253,12 @@ void bind_search_pool(nb::module_& module) {
             "[n, action_size], ``values`` float32 [n, max_players] (seat-relative win\n"
             "probabilities).")
         .def(
+            "cancel", &SearchPool::cancel,
+            "Withdraw the last collect's rows unevaluated (e.g. after a failed\n"
+            "network call); the next collect chooses leaves afresh. apply rejects bad\n"
+            "rows (wrong shape, non-finite values) without changing anything, so it can\n"
+            "also simply be retried.")
+        .def(
             "pending_game", [](const SearchPool& pool, std::size_t row) { return Game(pool.pending_game(row)); },
             nb::arg("row"), "A copy of a pending row's position.")
         .def("done", &SearchPool::done, nb::arg("id"))
@@ -273,8 +285,11 @@ void bind_search_pool(nb::module_& module) {
         .def(
             "advance", &SearchPool::advance, nb::arg("id"), nb::arg("action_index"),
             "Re-root at a deterministic root action's child, keep the subtree and start\n"
-            "a fresh budget. False (nothing changed) for chance actions, finished or\n"
-            "unvisited children, or with determinizations another player's decision.")
+            "a fresh budget. False for chance actions, finished or unvisited children\n"
+            "and, with determinizations, another player's decision, a child reached\n"
+            "through a drawn outcome, an action revealing hidden cards (a monopoly), or\n"
+            "worlds disagreeing on the new root's public state or options. On False,\n"
+            "add() a new search from the real position with the updated tracker.")
         .def("remove", &SearchPool::remove, nb::arg("id"))
         .def("stats", &SearchPool::stats, nb::arg("id"));
 }

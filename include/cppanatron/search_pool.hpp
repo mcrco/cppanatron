@@ -86,6 +86,8 @@ struct SearchStats {
     double mean_depth{};
     /** Tree storage without the games' own heap memory. */
     std::uint64_t tree_bytes{};
+    /** The worker thread this search runs on. */
+    std::uint32_t lane{};
 };
 
 /**
@@ -135,10 +137,21 @@ public:
     /**
      * Start a search of `game` for its player to move. With determinizations
      * the root worlds are sampled from `tracker`, which must follow the
-     * player to move; without them the tracker is ignored. A finished game
-     * gives a search that is done at once, with no visits.
+     * player to move. Without determinizations the search reads `game` as
+     * is, hidden cards included (an oracle unless `game` is itself a
+     * sample), so passing a tracker then throws std::invalid_argument
+     * unless `ignore_tracker` says that is intended. A finished game gives
+     * a search that is done at once, with no visits.
+     *
+     * Determinized roots offer exactly the legal actions `game` gives its
+     * player to move, which that player knows even where they depend on
+     * hidden cards (the friendly robber): worlds that do not offer them all
+     * are resampled (a bounded number of times), and every root is
+     * restricted to the real options the worlds share.
      */
-    std::int64_t add(const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr);
+    std::int64_t add(
+        const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
+        bool ignore_tracker = false);
 
     /**
      * Advance every unfinished search to its next leaves (roots first) and
@@ -151,8 +164,17 @@ public:
     /**
      * Expand and back up the rows of the last collect: `logits` holds
      * action_size() floats per row, `values` max_players() floats per row.
+     * Wrong sizes or non-finite values throw std::invalid_argument before
+     * anything changes, so apply can be retried. If an expansion fails
+     * anyway, the rows not yet applied are withdrawn (see cancel).
      */
     void apply(std::span<const float> logits, std::span<const float> values);
+    /**
+     * Withdraw the rows of the last collect: their leaves go back to their
+     * searches unevaluated, as if never chosen. collect does this itself
+     * when it throws.
+     */
+    void cancel();
 
     /** Rows of the last collect awaiting apply. */
     [[nodiscard]] std::size_t pending() const noexcept;
@@ -183,9 +205,16 @@ public:
     /**
      * Re-root every world at the child of a deterministic root action and
      * start a fresh simulation budget, keeping the subtree. Returns false
-     * (and changes nothing) when the action leads to a chance node, a
-     * finished game, an unvisited child or, with determinizations, another
-     * player's decision: then start a new search from the real position.
+     * (and changes the search no further) when the action leads to a chance
+     * node, a finished game or an unvisited child, and, with
+     * determinizations, when the child is another player's decision, was
+     * reached through a drawn outcome (even the only possible one), or the
+     * worlds disagree on the new root's public state or options, the action
+     * reveals hidden cards (a monopoly's per-seat amounts), or (friendly
+     * robber) the new root's robber moves depend on hidden cards. Then
+     * start a new search from the real position with the tracker updated
+     * by the real transition: reused worlds are only valid while nothing
+     * the root player learns could contradict them.
      */
     bool advance(std::int64_t id, std::size_t action_index);
     void remove(std::int64_t id);

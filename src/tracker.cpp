@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 #include <utility>
 
@@ -101,6 +102,21 @@ TrackerEvent TrackerEvent::end_turn(int player) {
     return event;
 }
 
+TrackerEvent TrackerEvent::victory_point_cards(int player, int at_least, int at_most) {
+    TrackerEvent event;
+    event.type = TrackerEventType::victory_point_cards;
+    event.player = player;
+    event.amounts = {at_least, at_most};
+    return event;
+}
+
+TrackerEvent TrackerEvent::public_victory_points(std::vector<int> points) {
+    TrackerEvent event;
+    event.type = TrackerEventType::public_victory_points;
+    event.amounts = std::move(points);
+    return event;
+}
+
 HandTracker::HandTracker(const Game& game, int observer)
     : observer_(observer),
       rules_(game.rules()),
@@ -109,13 +125,19 @@ HandTracker::HandTracker(const Game& game, int observer)
       development_counts_(game.colors().size()),
       played_(game.colors().size()),
       deck_size_(static_cast<int>(game.development_cards_remaining())),
-      bought_this_turn_(game.colors().size()) {
+      bought_this_turn_(game.colors().size()),
+      victory_point_caps_(game.colors().size()),
+      victory_point_floors_(game.colors().size()) {
     check_seat(observer);
+    const bool over = game.winning_color().has_value();
     for (std::size_t seat = 0; seat < sizes_.size(); ++seat) {
         const PlayerState& state = game.players()[seat];
         sizes_[seat] = sum(state.resources);
         development_counts_[seat] = sum(state.development_cards);
         played_[seat] = state.played_development_cards;
+        victory_point_caps_[seat] = over ? development_counts_[seat]
+                                         : std::min(development_counts_[seat],
+                                                    rules_.victory_points_to_win - 1 - state.victory_points);
     }
     const PlayerState& own = game.players()[static_cast<std::size_t>(observer)];
     known_[static_cast<std::size_t>(observer)] = own.resources;
@@ -130,6 +152,9 @@ HandTracker::HandTracker(const Game& game, int observer)
         bought_this_turn_[static_cast<std::size_t>(turn)] = 1;
     }
     validate();
+    if (game.current_player_index() == observer) {
+        observe_options(game, game.playable_actions());
+    }
 }
 
 void HandTracker::check_seat(int seat) const {
@@ -189,6 +214,17 @@ int HandTracker::bought_this_turn(int seat) const {
     return bought_this_turn_[static_cast<std::size_t>(seat)];
 }
 
+int HandTracker::victory_point_card_floor(int seat) const {
+    check_seat(seat);
+    return victory_point_floors_[static_cast<std::size_t>(seat)];
+}
+
+int HandTracker::victory_point_card_cap(int seat) const {
+    check_seat(seat);
+    const auto index = static_cast<std::size_t>(seat);
+    return std::min(victory_point_caps_[index], development_counts_[index]);
+}
+
 void HandTracker::validate() const {
     const auto pool = unknown_pool();
     for (std::size_t r = 0; r < 5; ++r) {
@@ -207,6 +243,12 @@ void HandTracker::validate() const {
         if (development_counts_[index] < 0 || any_negative(played_[index])) {
             inconsistent("negative development-card count");
         }
+        if (victory_point_caps_[index] < 0) {
+            inconsistent("a seat would already have won");
+        }
+        if (seat != observer_ && victory_point_floors_[index] > victory_point_card_cap(seat)) {
+            inconsistent("a seat must hold more victory point cards than it can");
+        }
     }
     if (unknown_count(observer_) != 0) {
         inconsistent("the observer's own hand must be fully known");
@@ -224,6 +266,13 @@ void HandTracker::validate() const {
     }
     if (deck_size_ < 0 || any_negative(unseen) || sum(unseen) != hidden) {
         inconsistent("unseen development cards disagree with the deck and hands");
+    }
+    int floors = 0;
+    for (int seat = 0; seat < num_players(); ++seat) {
+        floors += seat == observer_ ? 0 : victory_point_floors_[static_cast<std::size_t>(seat)];
+    }
+    if (floors > unseen[kVictoryPoint]) {
+        inconsistent("more victory point cards are held than remain unseen");
     }
 }
 
@@ -272,6 +321,9 @@ void HandTracker::apply(const TrackerEvent& event) {
         case TrackerEventType::transfer: {
             next.check_seat(event.player);
             next.check_seat(event.other);
+            if (event.player == event.other) {
+                throw std::invalid_argument("a seat cannot trade with itself");
+            }
             next.take(event.other, event.cards);
             const auto index = static_cast<std::size_t>(event.player);
             for (std::size_t r = 0; r < 5; ++r) {
@@ -361,6 +413,7 @@ void HandTracker::apply(const TrackerEvent& event) {
             }
             ++next.development_counts_[index];
             ++next.bought_this_turn_[index];
+            ++next.victory_point_caps_[index];
             --next.deck_size_;
             break;
         }
@@ -382,6 +435,26 @@ void HandTracker::apply(const TrackerEvent& event) {
         case TrackerEventType::end_turn:
             next.check_seat(event.player);
             next.bought_this_turn_[static_cast<std::size_t>(event.player)] = 0;
+            break;
+        case TrackerEventType::victory_point_cards: {
+            next.check_seat(event.player);
+            if (event.amounts.size() != 2 || event.amounts[0] > event.amounts[1]) {
+                throw std::invalid_argument("victory point card bounds are [at least, at most]");
+            }
+            const auto index = static_cast<std::size_t>(event.player);
+            next.victory_point_floors_[index] = std::max(next.victory_point_floors_[index], event.amounts[0]);
+            next.victory_point_caps_[index] = std::min(next.victory_point_caps_[index], event.amounts[1]);
+            break;
+        }
+        case TrackerEventType::public_victory_points:
+            if (static_cast<int>(event.amounts.size()) != num_players()) {
+                throw std::invalid_argument("public victory points list every seat");
+            }
+            for (std::size_t seat = 0; seat < event.amounts.size(); ++seat) {
+                next.victory_point_caps_[seat] = std::min(
+                    next.victory_point_caps_[seat],
+                    rules_.victory_points_to_win - 1 - event.amounts[seat]);
+            }
             break;
     }
     next.validate();
@@ -420,7 +493,126 @@ void HandTracker::end_turn(int player) {
     apply(TrackerEvent::end_turn(player));
 }
 
+void HandTracker::public_victory_points(const std::vector<int>& points) {
+    apply(TrackerEvent::public_victory_points(points));
+}
+
+void HandTracker::observe_options(const Game& game, const std::vector<Action>& legal) {
+    for (const TrackerEvent& event : option_events(game, legal, observer_)) {
+        apply(event);
+    }
+}
+
+std::vector<TrackerEvent> HandTracker::option_events(
+    const Game& game, const std::vector<Action>& legal, int observer) {
+    std::vector<TrackerEvent> events;
+    if (!game.friendly_robber() || game.current_prompt() != ActionPrompt::move_robber ||
+        game.current_player_index() != observer) {
+        return events;
+    }
+    // The engine (like Catanatron) drops tiles with a building of another
+    // seat under 3 actual points, unless that would drop every tile.
+    const Color own = game.colors()[static_cast<std::size_t>(observer)];
+    std::set<Coordinate> allowed;
+    for (const Action& action : legal) {
+        if (action.type == ActionType::move_robber) {
+            allowed.insert(std::get<RobberMove>(action.value).coordinate);
+        }
+    }
+    std::vector<std::vector<int>> tiles;  // other seats' buildings per candidate tile
+    std::vector<bool> tile_allowed;
+    for (const auto& [coordinate, tile_index] : game.board().map().coordinate_to_tile()) {
+        const Tile& tile = game.board().map().tiles().at(static_cast<std::size_t>(tile_index));
+        if (tile.kind != TileKind::land || coordinate == game.board().robber_coordinate()) {
+            continue;
+        }
+        std::vector<int> owners;
+        for (int node : tile.nodes) {
+            const auto building = game.board().buildings().find(node);
+            if (building != game.board().buildings().end() && building->second.color != own) {
+                const int seat = seat_of(game, building->second.color);
+                if (std::find(owners.begin(), owners.end(), seat) == owners.end()) {
+                    owners.push_back(seat);
+                }
+            }
+        }
+        tiles.push_back(std::move(owners));
+        tile_allowed.push_back(allowed.contains(coordinate));
+    }
+    const bool all_allowed = std::all_of(tile_allowed.begin(), tile_allowed.end(), [](bool a) { return a; });
+    const bool some_unowned = std::any_of(
+        tiles.begin(), tiles.end(), [](const std::vector<int>& owners) { return owners.empty(); });
+    if (all_allowed && !some_unowned) {
+        return events;  // nothing dropped, or everything dropped and restored
+    }
+    const int n = static_cast<int>(game.colors().size());
+    std::vector<bool> at_least_three(static_cast<std::size_t>(n));
+    for (std::size_t t = 0; t < tiles.size(); ++t) {
+        if (tile_allowed[t]) {
+            for (int seat : tiles[t]) {
+                at_least_three[static_cast<std::size_t>(seat)] = true;
+            }
+        }
+    }
+    std::vector<bool> under_three(static_cast<std::size_t>(n));
+    for (std::size_t t = 0; t < tiles.size(); ++t) {
+        if (tile_allowed[t]) {
+            continue;
+        }
+        std::vector<int> candidates;
+        for (int seat : tiles[t]) {
+            if (!at_least_three[static_cast<std::size_t>(seat)]) {
+                candidates.push_back(seat);
+            }
+        }
+        if (candidates.size() == 1) {
+            under_three[static_cast<std::size_t>(candidates.front())] = true;
+        }
+    }
+    for (int seat = 0; seat < n; ++seat) {
+        const int points = game.players()[static_cast<std::size_t>(seat)].victory_points;
+        if (seat == observer || points >= 3) {
+            continue;
+        }
+        if (at_least_three[static_cast<std::size_t>(seat)]) {
+            events.push_back(
+                TrackerEvent::victory_point_cards(seat, 3 - points, std::numeric_limits<int>::max()));
+        } else if (under_three[static_cast<std::size_t>(seat)]) {
+            events.push_back(TrackerEvent::victory_point_cards(seat, 0, 2 - points));
+        }
+    }
+    return events;
+}
+
+namespace {
+
+std::vector<TrackerEvent> transition_events(
+    const Game& before, const Action& action, const Game& after, int observer);
+
+}  // namespace
+
 std::vector<TrackerEvent> HandTracker::events(
+    const Game& before, const Action& action, const Game& after, int observer) {
+    auto events = transition_events(before, action, after, observer);
+    if (!after.winning_color().has_value()) {
+        std::vector<int> points;
+        for (const PlayerState& state : after.players()) {
+            points.push_back(state.victory_points);
+        }
+        events.push_back(TrackerEvent::public_victory_points(std::move(points)));
+        // The observer sees its own options when it is to move.
+        if (after.current_player_index() == observer) {
+            for (TrackerEvent& event : option_events(after, after.playable_actions(), observer)) {
+                events.push_back(std::move(event));
+            }
+        }
+    }
+    return events;
+}
+
+namespace {
+
+std::vector<TrackerEvent> transition_events(
     const Game& before, const Action& action, const Game& after, int observer) {
     const int n = static_cast<int>(before.colors().size());
     if (before.colors() != after.colors()) {
@@ -475,6 +667,11 @@ std::vector<TrackerEvent> HandTracker::events(
         case ActionType::confirm_trade: {
             const auto& confirmed = std::get<ConfirmedTrade>(action.value);
             const int partner = seat_of(before, confirmed.partner);
+            // Like Catanatron, the engine lets the offerer accept and confirm
+            // its own offer; nothing moves.
+            if (partner == player) {
+                return events;
+            }
             if (sum(confirmed.trade.offering) > 0) {
                 events.push_back(TrackerEvent::transfer(player, partner, confirmed.trade.offering));
             }
@@ -533,6 +730,8 @@ std::vector<TrackerEvent> HandTracker::events(
     }
     return events;
 }
+
+}  // namespace
 
 void HandTracker::observe(const Game& before, const Action& action, const Game& after) {
     for (const TrackerEvent& event : events(before, action, after, observer_)) {
@@ -629,6 +828,10 @@ bool HandTracker::consistent_with(const Game& truth) const {
                          truth.victory_points_to_win()) {
             return false;
         }
+        if (state.development_cards[kVictoryPoint] > victory_point_card_cap(seat) ||
+            state.development_cards[kVictoryPoint] < victory_point_floors_[index]) {
+            return false;
+        }
     }
     return hidden == unseen_development_cards();
 }
@@ -662,7 +865,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
     }
 
     // Development cards: a uniform deal of the unseen cards, conditioned on
-    // nobody holding enough victory points to have won already.
+    // nobody holding enough victory points to have won, now or earlier.
     std::vector<int> unseen;
     const auto unseen_counts = tracker.unseen_development_cards();
     for (std::size_t d = 0; d < 5; ++d) {
@@ -671,10 +874,17 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
     const bool over = game.winning_color().has_value();
     std::vector<int> caps;
     for (int seat : others) {
-        caps.push_back(
-            over ? std::numeric_limits<int>::max()
-                 : game.victory_points_to_win() - 1 -
-                       game.players()[static_cast<std::size_t>(seat)].victory_points);
+        int cap = tracker.victory_point_card_cap(seat);
+        if (!over) {
+            cap = std::min(
+                cap, game.victory_points_to_win() - 1 -
+                         game.players()[static_cast<std::size_t>(seat)].victory_points);
+        }
+        caps.push_back(cap);
+    }
+    std::vector<int> floors;
+    for (int seat : others) {
+        floors.push_back(tracker.victory_point_card_floor(seat));
     }
     const auto deal_fits = [&] {
         std::size_t position = 0;
@@ -683,7 +893,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
             for (int k = tracker.development_card_count(others[i]); k > 0; --k) {
                 victory_points += unseen[position++] == static_cast<int>(kVictoryPoint);
             }
-            if (victory_points > caps[i]) {
+            if (victory_points > caps[i] || victory_points < floors[i]) {
                 return false;
             }
         }
@@ -695,7 +905,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
         fits = deal_fits();
     }
     if (!fits) {
-        // Victory points to the deck first, then to seats under their caps.
+        // Every seat's floor first, then the deck, then seats under their caps.
         std::vector<int> rest;
         int victory_points = 0;
         for (int card : unseen) {
@@ -706,14 +916,16 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
             }
         }
         std::shuffle(rest.begin(), rest.end(), rng);
-        const int in_deck = std::min(victory_points, tracker.development_deck_size());
+        victory_points -= std::accumulate(floors.begin(), floors.end(), 0);
+        const int in_deck = std::clamp(victory_points, 0, tracker.development_deck_size());
         victory_points -= in_deck;
         std::vector<int> dealt;
         for (std::size_t i = 0; i < others.size(); ++i) {
             const int count = tracker.development_card_count(others[i]);
-            const int given = std::min({victory_points, std::max(0, caps[i]), count});
+            const int extra = std::min({victory_points, std::max(0, caps[i] - floors[i]), count - floors[i]});
+            const int given = floors[i] + std::max(0, extra);
             std::vector<int> hand(static_cast<std::size_t>(given), static_cast<int>(kVictoryPoint));
-            victory_points -= given;
+            victory_points -= std::max(0, extra);
             while (static_cast<int>(hand.size()) < count) {
                 if (rest.empty()) {
                     inconsistent("no deal of development cards fits the victory point caps");
@@ -724,7 +936,7 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
             std::shuffle(hand.begin(), hand.end(), rng);
             dealt.insert(dealt.end(), hand.begin(), hand.end());
         }
-        if (victory_points > 0) {
+        if (victory_points != 0) {
             inconsistent("no deal of development cards fits the victory point caps");
         }
         dealt.insert(dealt.end(), rest.begin(), rest.end());

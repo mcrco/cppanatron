@@ -238,3 +238,28 @@ def test_search_pool_buffers_and_reuse():
         assert pool.stats(search).simulations == 40
         break
     assert advanced
+
+
+def test_search_pool_rejected_apply_can_be_retried_or_cancelled():
+    game, _ = random_game(3, 4, 120)
+    codec = cpp.FlatActionCodec(3, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(3, observation_layout())
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=30, max_players=3, max_pending=4))
+    ids = [pool.add(game, seed) for seed in range(3)]
+    observations = np.zeros((8, pool.observation_size), dtype=np.float32)
+    rows = np.zeros(8, dtype=np.int64)
+    for _ in range(3):
+        n = pool.collect(observations, rows)
+        logits, values = evaluate(pool, n, 3)
+        values[0, 0] = np.nan
+        with pytest.raises(ValueError):
+            pool.apply(logits, values)
+        assert pool.pending == n
+        values[0, 0] = 0.3
+        pool.apply(logits, values)
+    assert pool.collect(observations, rows) > 0
+    pool.cancel()
+    assert pool.pending == 0
+    run(pool, 3, batch=8)
+    for search in ids:
+        assert pool.done(search) and pool.visits(search).sum() == 30

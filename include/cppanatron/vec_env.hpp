@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "cppanatron/game.hpp"
@@ -234,6 +235,14 @@ public:
      * fit, or seats that do not match the scenario's player count.
      */
     void start_games(const std::vector<GameStart>& games);
+    /**
+     * The expert's labels for imitation: for every acting row, the action
+     * index Catanatron's value function player (value_action) would choose
+     * in that game; -1 for every other row. Computed on the env threads.
+     */
+    void expert_actions(
+        std::span<std::int32_t> out, ValueEnemies enemies = ValueEnemies::next,
+        const ValueWeights& weights = {}) const;
     /** Schedule mode: the games finished since the last call, by env. */
     [[nodiscard]] std::vector<FinishedGame> pop_finished();
     /** Whether an env holds a game (always, unless in schedule mode). */

@@ -713,6 +713,29 @@ void VecEnv::start_games(const std::vector<GameStart>& games) {
     }
 }
 
+void VecEnv::expert_actions(
+    std::span<std::int32_t> out, ValueEnemies enemies, const ValueWeights& weights) const {
+    if (out.size() != num_rows()) {
+        throw std::invalid_argument("expert_actions needs one entry per row");
+    }
+    std::fill(out.begin(), out.end(), -1);
+    const GraphActionSpace& space = encoder_.action_space();
+    const std::function<void(int)> task = [&](int env_index) {
+        const Env& env = envs_[static_cast<std::size_t>(env_index)];
+        if (env.game == nullptr) {
+            return;
+        }
+        const Game& game = *env.game;
+        const int seat = game.current_player_index();
+        if (env.seats[static_cast<std::size_t>(seat)] != SeatKind::learner) {
+            return;
+        }
+        out[row(env_index, seat)] =
+            static_cast<std::int32_t>(space.index(game, value_action(game, weights, enemies)));
+    };
+    pool_->run(config_.num_envs, task);
+}
+
 std::vector<FinishedGame> VecEnv::pop_finished() {
     std::vector<FinishedGame> result;
     for (Env& env : envs_) {

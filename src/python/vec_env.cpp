@@ -14,6 +14,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include "cppanatron/value_player.hpp"
 #include "cppanatron/vec_env.hpp"
 
 namespace cppanatron::python {
@@ -458,6 +459,27 @@ void bind_vec_env(nb::module_& module) {
             nb::arg("seats"), nb::arg("bot_seed") = 0, nb::arg("scenario") = 0,
             nb::arg("lineup_slots") = nb::none(),
             "Schedule mode: start one exact game (see start_games).")
+        .def(
+            "expert_actions",
+            [](const PyVecEnv& self, nb::handle out, ValueEnemies enemies) -> nb::object {
+                nb::object result = nb::borrow(out);
+                if (out.is_none()) {
+                    result = nb::module_::import_("numpy").attr("empty")(
+                        self.env.num_rows(), nb::arg("dtype") = "int32");
+                }
+                std::int32_t* data = checked<std::int32_t, 1>(
+                    result, "out (int32)", self.env.num_rows());
+                {
+                    nb::gil_scoped_release release;
+                    self.env.expert_actions(std::span<std::int32_t>(data, self.env.num_rows()),
+                                            enemies);
+                }
+                return result;
+            },
+            nb::arg("out") = nb::none(), nb::kw_only(), nb::arg("enemies") = ValueEnemies::next,
+            "Imitation labels: the action index Catanatron's value function player\n"
+            "(F, value_action) chooses for every acting row, -1 elsewhere, computed\n"
+            "on the env threads into ``out`` (int32 [rows], allocated if None).")
         .def(
             "pop_finished",
             [](PyVecEnv& self) {

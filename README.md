@@ -108,6 +108,10 @@ decisions per seat, so the games played do not depend on `num_envs`, threads
 or finishing order. Random bots draw from a stream seeded per game, and the
 optional `lineup_slot` buffer says who plays each row's seat.
 
+`env.expert_actions(out)` labels every acting row with the index of the action
+Catanatron's value function player (F) would choose there (-1 elsewhere),
+computed on the env threads, for imitation learning.
+
 `critic_level=cpp.InfoLevel.FULL` (with, say, `level=PRIVATE`) appends a
 critic block to every encoded row: the players block at the critic's level,
 the only block the levels differ in. `env.layout()` gives its offset as

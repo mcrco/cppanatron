@@ -535,3 +535,29 @@ def test_critic_rows_carry_the_players_block_at_the_critic_level():
         sample_actions(env, buffers, rng)
         env.step()
     assert differ > 0  # the full-information critic sees what the private actor does not
+
+
+def test_expert_actions_label_acting_rows_with_fs_choice():
+    env = cpp.VecEnv(
+        [cpp.Scenario(num_players=2, seats=["learner", "R"]), cpp.Scenario(num_players=3)],
+        num_envs=6, seed=8, num_threads=3)
+    buffers = env.allocate()
+    env.reset()
+    space = env.encoder.action_space
+    rng = np.random.default_rng(1)
+    for step in range(120):
+        enemies = cpp.ValueEnemies.ALL if step % 2 else cpp.ValueEnemies.NEXT
+        labels = env.expert_actions(enemies=enemies)
+        assert labels.dtype == np.int32 and labels.shape == (env.num_rows,)
+        assert ((labels >= 0) == buffers["acting"].astype(bool)).all()
+        for row in np.flatnonzero(buffers["acting"]):
+            game = env.game(row // env.max_players)
+            assert labels[row] == space.index(game, cpp.value_action(game, enemies=enemies))
+        out = np.full(env.num_rows, 99, dtype=np.int32)
+        assert env.expert_actions(out) is out and np.array_equal(
+            out, env.expert_actions(enemies=cpp.ValueEnemies.NEXT))
+        # Follow F's labels half the time, so play goes on.
+        sample_actions(env, buffers, rng)
+        if step % 2:
+            buffers["actions"][labels >= 0] = labels[labels >= 0]
+        env.step()

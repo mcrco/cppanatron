@@ -619,6 +619,25 @@ void test_determinized_advance_refuses_drawn_outcomes() {
     }
 }
 
+/** A monopoly reveals every seat's count; determinized worlds would contradict it. */
+void test_determinized_advance_refuses_monopoly() {
+    const Game game = knight_and_monopoly_position();
+    const HandTracker tracker(game, 0);
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const std::size_t index = codec->index(game, {Color::red, ActionType::play_monopoly, Resource::wheat});
+    for (const int determinizations : {0, 3}) {
+        SearchConfig config;
+        config.simulations = 120;
+        config.max_players = 4;
+        config.determinizations = determinizations;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = search_favouring(pool, game, index, determinizations > 0 ? &tracker : nullptr);
+        require(pool.visits(id)[index] > 0, "the monopoly was searched");
+        require(pool.advance(id, index) == (determinizations == 0),
+                "only the oracle re-roots through a monopoly");
+    }
+}
+
 int main() {
     try {
         test_two_player_matches_mcts_search();
@@ -629,6 +648,7 @@ int main() {
         test_edge_cases();
         test_determinized_roots_offer_the_real_options();
         test_determinized_advance_refuses_drawn_outcomes();
+        test_determinized_advance_refuses_monopoly();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

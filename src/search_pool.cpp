@@ -380,6 +380,35 @@ std::vector<double> softmax(const std::vector<double>& logits) {
     return result;
 }
 
+/** What every seat sees of two positions of one game, plus `observer`'s own cards. */
+bool same_public_state(const Game& lhs, const Game& rhs, int observer) {
+    const auto total = [](const std::array<int, 5>& counts) {
+        return std::accumulate(counts.begin(), counts.end(), 0);
+    };
+    if (lhs.resource_bank() != rhs.resource_bank() ||
+        lhs.development_cards_remaining() != rhs.development_cards_remaining() ||
+        lhs.current_player_index() != rhs.current_player_index() ||
+        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns()) {
+        return false;
+    }
+    for (std::size_t seat = 0; seat < lhs.players().size(); ++seat) {
+        const PlayerState& a = lhs.players()[seat];
+        const PlayerState& b = rhs.players()[seat];
+        if (total(a.resources) != total(b.resources) ||
+            total(a.development_cards) != total(b.development_cards) ||
+            a.played_development_cards != b.played_development_cards ||
+            a.victory_points != b.victory_points || a.has_rolled != b.has_rolled ||
+            lhs.remaining_discards(lhs.colors()[seat]) != rhs.remaining_discards(rhs.colors()[seat])) {
+            return false;
+        }
+        if (static_cast<int>(seat) == observer &&
+            (a.resources != b.resources || a.development_cards != b.development_cards)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool same_hidden_state(const Game& lhs, const Game& rhs) {
     for (std::size_t seat = 0; seat < lhs.players().size(); ++seat) {
         const PlayerState& a = lhs.players()[seat];
@@ -1227,6 +1256,14 @@ struct SearchPool::Impl {
         if (search.worlds.empty() || !search.roots_ready) {
             return false;
         }
+        if (search.determinized) {
+            // A monopoly reveals how many cards each seat held: worlds dealt
+            // without that knowledge contradict the real game.
+            const Game& root = game_of(search.worlds.front(), 0);
+            if (codec->decode(root, action).type == ActionType::play_monopoly) {
+                return false;
+            }
+        }
         std::vector<std::uint32_t> children;
         for (const Tree& tree : search.worlds) {
             const Node& root = tree.nodes.front();
@@ -1261,6 +1298,9 @@ struct SearchPool::Impl {
             const Node& expected = first.nodes[children.front()];
             for (std::size_t w = 1; w < search.worlds.size(); ++w) {
                 Tree& tree = search.worlds[w];
+                if (!same_public_state(reference, game_of(tree, children[w]), search.root_player)) {
+                    return false;
+                }
                 const Node& next = tree.nodes[children[w]];
                 if (next.num_edges != expected.num_edges) {
                     return false;

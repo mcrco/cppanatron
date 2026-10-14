@@ -193,9 +193,12 @@ public:
      * node, a finished game or an unvisited child, and, with
      * determinizations, when the child is another player's decision, was
      * reached through a drawn outcome (even the only possible one), or the
-     * worlds disagree on the new root's options or (friendly robber) its
-     * robber moves depend on hidden cards. Then start a new search from the
-     * real position.
+     * worlds disagree on the new root's public state or options, the action
+     * reveals hidden cards (a monopoly's per-seat amounts), or (friendly
+     * robber) the new root's robber moves depend on hidden cards. Then
+     * start a new search from the real position with the tracker updated
+     * by the real transition: reused worlds are only valid while nothing
+     * the root player learns could contradict them.
      */
     bool advance(std::int64_t id, std::size_t action_index);
     void remove(std::int64_t id);

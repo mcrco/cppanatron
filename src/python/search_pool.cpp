@@ -278,8 +278,9 @@ void bind_search_pool(nb::module_& module) {
             "Re-root at a deterministic root action's child, keep the subtree and start\n"
             "a fresh budget. False for chance actions, finished or unvisited children\n"
             "and, with determinizations, another player's decision, a child reached\n"
-            "through a drawn outcome, or worlds disagreeing on the new root's options.\n"
-            "On False, add() a new search from the real position.")
+            "through a drawn outcome, an action revealing hidden cards (a monopoly), or\n"
+            "worlds disagreeing on the new root's public state or options. On False,\n"
+            "add() a new search from the real position with the updated tracker.")
         .def("remove", &SearchPool::remove, nb::arg("id"))
         .def("stats", &SearchPool::stats, nb::arg("id"));
 }

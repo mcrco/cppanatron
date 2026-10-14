@@ -4,6 +4,7 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -969,8 +970,69 @@ void test_six_player_games_and_rules() {
         "a player needs two settlements for the initial build phase");
 }
 
+void test_explicit_maps_and_shared_boards() {
+    for (MapType map_type : {MapType::mini, MapType::base, MapType::tournament}) {
+        const CatanMap built = CatanMap::build(map_type, 13);
+        const CatanMap rebuilt = CatanMap::from_spec(built.spec());
+        require(rebuilt.spec() == built.spec(), "a map's spec rebuilds the same spec");
+        require(rebuilt.land_edges() == built.land_edges(), "a spec rebuilds the same edges");
+        for (std::size_t i = 0; i < built.tiles().size(); ++i) {
+            require(
+                rebuilt.tiles()[i].nodes == built.tiles()[i].nodes &&
+                    rebuilt.tiles()[i].id == built.tiles()[i].id &&
+                    rebuilt.tiles()[i].resource == built.tiles()[i].resource,
+                "a spec rebuilds the same tiles");
+        }
+        for (int node : built.land_node_list()) {
+            require(
+                built.land_node_list()[static_cast<std::size_t>(built.node_slot(node))] == node,
+                "node slots invert the land node list");
+            for (int neighbor : built.neighbors(node)) {
+                require(
+                    built.edge_slot({neighbor, node}) >= 0,
+                    "neighbors are joined by a land edge");
+            }
+        }
+    }
+
+    cppanatron::MapSpec spec;
+    spec.tiles.push_back({.coordinate = {0, 0, 0}, .kind = cppanatron::TileKind::land,
+                          .resource = std::nullopt, .number = std::nullopt,
+                          .direction = std::nullopt, .port_resource = std::nullopt});
+    spec.tiles.push_back({.coordinate = {1, -1, 0}, .kind = cppanatron::TileKind::land,
+                          .resource = Resource::ore, .number = 8,
+                          .direction = std::nullopt, .port_resource = std::nullopt});
+    spec.tiles.push_back({.coordinate = {2, -2, 0}, .kind = cppanatron::TileKind::port,
+                          .resource = std::nullopt, .number = std::nullopt,
+                          .direction = cppanatron::Direction::west,
+                          .port_resource = Resource::wheat});
+    const auto shared = std::make_shared<const CatanMap>(CatanMap::from_spec(spec));
+    require(shared->num_nodes() == 10 && shared->land_edges().size() == 11,
+            "two land tiles share an edge");
+    const auto [first, second] = cppanatron::port_nodes(shared->tiles()[2]);
+    require(
+        shared->node_ports(first) == (1U << static_cast<unsigned>(Resource::wheat)) &&
+            shared->node_ports(second) == shared->node_ports(first),
+        "port nodes carry their port");
+
+    Game game({Color::red, Color::blue}, shared, 3);
+    const Game copy = game;
+    require(
+        &game.board().map() == shared.get() && &copy.board().map() == shared.get(),
+        "games and their copies share the map");
+    require(game.playable_actions().size() == 10, "every land node is open at the start");
+
+    spec.tiles[1].number = 7;
+    require_throws([&] { (void)CatanMap::from_spec(spec); }, "seven is not a tile number");
+    spec.tiles[1].number = 8;
+    spec.tiles[0].resource = Resource::wood;
+    spec.tiles[0].number = 4;
+    require_throws([&] { (void)CatanMap::from_spec(spec); }, "a map needs a desert");
+}
+
 int main() {
     try {
+        test_explicit_maps_and_shared_boards();
         test_topology_contract();
         test_number_and_tournament_contract();
         test_settlement_distance_rule();

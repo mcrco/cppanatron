@@ -11,8 +11,8 @@ The project is split into:
 - a parity harness and test suite that run the same scenarios on Catanatron and
   on this engine.
 
-Status: the rules engine implements MINI, BASE, and TOURNAMENT maps for 2–6
-players, complete setup and turn transitions, seven/discard/robber handling,
+Status: the rules engine implements MINI, BASE, and TOURNAMENT maps and
+explicit maps of any shape for 2–6 players, complete setup and turn transitions, seven/discard/robber handling,
 builds, development cards, maritime and domestic trades, Longest Road, Largest
 Army, terminal scoring, the CatanRL flat action table, and the pinned
 `ValueFunctionPlayer` heuristic. `GameRules` sets the
@@ -56,8 +56,20 @@ the game's RNG unless passed to `execute` (`dice`, `development_card`,
 `stolen_resource`), which replays recorded games exactly. Unplayable actions
 raise `ValueError`, as in Catanatron.
 
+Maps are immutable and shared: `cpp.CatanMap.build(cpp.MapType.BASE, seed)` or
+`cpp.CatanMap.from_spec(spec)` builds one, and `cpp.Game(4, map=m, rules=...,
+seed=...)` plays on it without copying. A `cpp.MapSpec` lists every tile in
+order (`MapSpec.from_dict` / `.to_dict` use the JSON shape `{"tiles":
+[{"coordinate": [x, y, z], "type": "land" | "water" | "port", "resource",
+"number", "direction", "port_resource"}]}`, None for the desert and 3:1 ports);
+node and edge ids follow Catanatron's `from_tiles` numbering, so a spec builds
+the same board in both engines. Roads run along land-tile edges.
+
 `cppanatron.catanatron` converts actions, colors and boards to and from
-Catanatron and builds the observation layout of Catanatron's board tensor.
+Catanatron (`map_spec_from_catanatron`, `catanatron_map_from_spec`) and builds
+the observation layout of Catanatron's board tensor. Stock Catanatron takes
+node adjacency from the BASE map, so run it on other shapes inside
+`map_graph(catan_map)`.
 Batched environments (`GameBatch`), search leaves (`MCTSSearch`) and
 observations write straight into caller-owned NumPy buffers.
 
@@ -70,7 +82,9 @@ in `tests/python` uses it three ways:
 
 - `test_rules.py` asserts Catan rules once and runs them on both engines;
 - `test_differential.py` replays random games in lockstep and requires identical
-  snapshots, including the exact playable-action set, before every transition
+  snapshots, including the exact playable-action set, before every transition,
+  on template maps and explicit ones (templates as specs, a 37-tile hexagon, a
+  strip, a lake, islands, a board without water) for 2–6 players
   (`CPPANATRON_PARITY_GAMES=50` fuzzes more seeds);
 - `test_bindings.py` covers the Python API itself.
 

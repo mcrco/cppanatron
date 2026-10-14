@@ -7,8 +7,10 @@ through ``execute(action, outcome=...)``, and :meth:`ParityGame.snapshot`
 captures every piece of state both engines track, playable actions included,
 so differential tests can compare them after each transition.
 
-Both engines share a board: it is generated natively and rebuilt tile for tile
-in Catanatron. Requires ``catanatron``.
+Both engines share a board: it is generated natively (or given as an explicit
+``MapSpec``) and rebuilt tile for tile in Catanatron, whose rules then run on
+that map's own node graph (see ``cppanatron.catanatron.map_graph``). Requires
+``catanatron``.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from .catanatron import (
     from_catanatron_card,
     from_catanatron_color,
     from_catanatron_resource,
+    map_graph,
     reference_game,
     to_catanatron_action,
     to_catanatron_color,
@@ -174,8 +177,11 @@ def _sorted(actions) -> list[Action]:
 class CatanatronParityGame(ParityGame):
     engine: Engine = "catanatron"
 
-    def __init__(self, native: _core.Game, map_type: _core.MapType, seed: int):
-        self.game = reference_game(native, map_type, seed=seed)
+    def __init__(self, native: _core.Game, seed: int):
+        self.game = reference_game(native, seed=seed)
+
+    def _graph(self):
+        return map_graph(self.game.state.board.map)
 
     @property
     def colors(self) -> tuple[Color, ...]:
@@ -189,12 +195,14 @@ class CatanatronParityGame(ParityGame):
         record = None
         if outcome is not None:
             record = ActionRecord(action=action, result=outcome)
-        result = self.game.execute(action, action_record=record).result
+        with self._graph():
+            result = self.game.execute(action, action_record=record).result
         # Catanatron also records results of deterministic actions, like discards.
         return result if action.action_type in CHANCE_ACTIONS else None
 
     def _refresh(self) -> None:
-        self.game.playable_actions = generate_playable_actions(self.game.state)
+        with self._graph():
+            self.game.playable_actions = generate_playable_actions(self.game.state)
 
     def set_resources(self, color: Color, resources: Sequence[int]) -> None:
         key = player_key(self.game.state, color)
@@ -353,6 +361,7 @@ def new_game(
     players: int | Sequence[Color] = 2,
     *,
     map_type: str = "BASE",
+    map_spec: _core.MapSpec | dict | None = None,
     seed: int = 0,
     map_seed: int | None = None,
     number_placement: str = "official_spiral",
@@ -364,6 +373,7 @@ def new_game(
 ) -> ParityGame:
     """A game on ``engine``; equal arguments give both engines the same board.
 
+    ``map_spec`` plays on an explicit map instead of a ``map_type`` board.
     ``seed`` feeds each engine's own RNG, so unforced dice, cards and steals
     differ across engines. Force them wherever results are compared.
     ``resource_bank`` and ``development_deck`` default to the base game's
@@ -382,19 +392,23 @@ def new_game(
         if isinstance(players, int)
         else [from_catanatron_color(color) for color in players]
     )
-    native_map_type = _core.MapType[map_type]
-    native = _core.Game(
-        native_players,
-        map_type=native_map_type,
-        seed=seed,
-        map_seed=map_seed,
-        number_placement=_core.NumberPlacement[number_placement.upper()],
-        rules=rules,
-    )
+    if map_spec is not None:
+        native = _core.Game(
+            native_players, map=_core.CatanMap.from_spec(map_spec), seed=seed, rules=rules
+        )
+    else:
+        native = _core.Game(
+            native_players,
+            map_type=_core.MapType[map_type],
+            seed=seed,
+            map_seed=map_seed,
+            number_placement=_core.NumberPlacement[number_placement.upper()],
+            rules=rules,
+        )
     if engine == "cppanatron":
         return CppanatronParityGame(native)
     if engine == "catanatron":
-        return CatanatronParityGame(native, native_map_type, seed)
+        return CatanatronParityGame(native, seed)
     raise ValueError(f"unknown engine {engine!r}; expected one of {ENGINES}")
 
 

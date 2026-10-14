@@ -19,6 +19,7 @@ from catanatron.players.value import ValueFunctionPlayer, base_fn  # noqa: E402
 import cppanatron as cpp  # noqa: E402
 from cppanatron.catanatron import from_catanatron_color, to_catanatron_action  # noqa: E402
 from cppanatron.parity import CHANCE_ACTIONS, Snapshot, new_game  # noqa: E402
+from map_shapes import SHAPES  # noqa: E402
 
 GAMES_PER_CONFIGURATION = int(os.environ.get("CPPANATRON_PARITY_GAMES", "2"))
 MAX_STEPS = 3_000
@@ -78,6 +79,36 @@ def test_extension_supply_games_stay_in_lockstep(num_players, game_index):
     """A bigger bank and deck change scarcity, draws and when the deck runs out."""
     seed = 3_000 * num_players + 97 * game_index
     play_in_lockstep(num_players, seed, map_type="BASE", vps_to_win=8, **EXTENSION_SUPPLY)
+
+
+#: Explicit maps: the templates as specs, and shapes no template produces.
+EXPLICIT_MAPS = {
+    "BASE": lambda seed: cpp.MapSpec.build(cpp.MapType.BASE, seed).to_dict(),
+    "MINI": lambda seed: cpp.MapSpec.build(cpp.MapType.MINI, seed).to_dict(),
+    "TOURNAMENT": lambda seed: cpp.MapSpec.build(cpp.MapType.TOURNAMENT).to_dict(),
+    **{name: builder for name, (builder, _) in SHAPES.items()},
+}
+EXPLICIT_MAP_SEATS = {"MINI": 4, **{name: seats for name, (_, seats) in SHAPES.items()}}
+
+
+@pytest.mark.parametrize(
+    ("num_players", "map_name"),
+    [
+        (num_players, name)
+        for name in EXPLICIT_MAPS
+        for num_players in range(2, EXPLICIT_MAP_SEATS.get(name, 6) + 1)
+    ],
+)
+@pytest.mark.parametrize("game_index", range(GAMES_PER_CONFIGURATION))
+def test_explicit_map_games_stay_in_lockstep(num_players, map_name, game_index):
+    seed = 5_000 + 1_000 * num_players + 97 * game_index + len(map_name)
+    play_in_lockstep(
+        num_players,
+        seed,
+        map_spec=EXPLICIT_MAPS[map_name](seed),
+        vps_to_win=8,
+        resource_bank=(24,) * 5 if num_players > 4 else None,
+    )
 
 
 @pytest.mark.parametrize("enemies", ["next", "all"])

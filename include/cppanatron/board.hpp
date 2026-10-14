@@ -2,6 +2,7 @@
 
 #include <array>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <utility>
@@ -20,9 +21,15 @@ struct BuildingState {
 
 class Board {
 public:
+    /** A board on a shared, immutable map. */
+    explicit Board(std::shared_ptr<const CatanMap> map);
+    /** A board owning its own copy of `map`. */
     explicit Board(CatanMap map);
 
-    [[nodiscard]] const CatanMap& map() const noexcept { return map_; }
+    [[nodiscard]] const CatanMap& map() const noexcept { return *map_; }
+    [[nodiscard]] const std::shared_ptr<const CatanMap>& shared_map() const noexcept {
+        return map_;
+    }
     [[nodiscard]] const std::map<int, BuildingState>& buildings() const noexcept {
         return buildings_;
     }
@@ -68,7 +75,9 @@ public:
     }
 
 private:
-    [[nodiscard]] std::vector<int> neighbors(int node_id) const;
+    [[nodiscard]] const std::vector<int>& neighbors(int node_id) const {
+        return map_->neighbors(node_id);
+    }
     [[nodiscard]] bool player_network_contains(Color color, int node_id) const;
     [[nodiscard]] std::optional<std::size_t> connected_component_index(
         int node_id,
@@ -78,7 +87,7 @@ private:
         const std::set<int>& component,
         Color color) const;
 
-    CatanMap map_;
+    std::shared_ptr<const CatanMap> map_;
     std::map<int, BuildingState> buildings_;
     std::map<Edge, Color> roads_;
     std::map<Color, std::vector<std::set<int>>> connected_components_;

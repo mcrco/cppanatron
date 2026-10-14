@@ -58,6 +58,7 @@ if(CPPANATRON_BUILD_PYTHON)
         NB_STATIC
         src/python/module.cpp
         src/python/types.cpp
+        src/python/maps.cpp
         src/python/game.cpp
         src/python/observation.cpp
         src/python/search.cpp

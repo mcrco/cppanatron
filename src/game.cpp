@@ -50,12 +50,21 @@ Game::Game(
     const GameRules& rules,
     NumberPlacement number_placement,
     std::optional<std::uint64_t> map_seed)
+    : Game(
+          std::move(colors),
+          std::make_shared<const CatanMap>(
+              CatanMap::build(map_type, map_seed.value_or(seed), number_placement)),
+          seed,
+          rules) {}
+
+Game::Game(
+    std::vector<Color> colors,
+    std::shared_ptr<const CatanMap> map,
+    std::uint64_t seed,
+    const GameRules& rules)
     : colors_(std::move(colors)),
       players_(colors_.size()),
-      board_(CatanMap::build(
-          map_type,
-          map_seed.value_or(seed),
-          number_placement)),
+      board_(std::move(map)),
       random_(seed),
       rules_(rules),
       discard_limit_(rules.discard_limit),

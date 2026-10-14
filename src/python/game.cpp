@@ -8,6 +8,7 @@
 
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
@@ -88,17 +89,6 @@ nb::dict roads_to_python(const Board& board) {
     nb::dict result;
     for (const auto& [edge, color] : board.roads()) {
         result[edge_to_python(edge)] = nb::cast(color);
-    }
-    return result;
-}
-
-nb::dict tiles_to_python(const CatanMap& map, bool land_only) {
-    nb::dict result;
-    for (const auto& [coordinate, index] : map.coordinate_to_tile()) {
-        const Tile& tile = map.tiles()[static_cast<std::size_t>(index)];
-        if (!land_only || tile.kind == TileKind::land) {
-            result[coordinate_to_python(coordinate)] = nb::cast(tile, nb::rv_policy::copy);
-        }
     }
     return result;
 }
@@ -239,64 +229,8 @@ void bind_game(nb::module_& module) {
             "played_development_cards",
             [](const PlayerSetup& setup) { return to_tuple(setup.played_development_cards); });
 
-    nb::class_<Tile>(module, "Tile", "A board hexagon: land, water or port.")
-        .def_ro("kind", &Tile::kind)
-        .def_ro("id", &Tile::id)
-        .def_ro("resource", &Tile::resource)
-        .def_ro("number", &Tile::number)
-        .def_ro("port_direction", &Tile::port_direction)
-        .def_prop_ro(
-            "nodes", [](const Tile& tile) { return to_tuple(tile.nodes); },
-            "Node ids ordered NORTH, NORTHEAST, SOUTHEAST, SOUTH, SOUTHWEST, NORTHWEST.")
-        .def_prop_ro(
-            "edges",
-            [](const Tile& tile) {
-                nb::list edges;
-                for (Edge edge : tile.edges) {
-                    edges.append(edge_to_python(edge));
-                }
-                return nb::tuple(edges);
-            },
-            "Edges ordered EAST, SOUTHEAST, SOUTHWEST, WEST, NORTHWEST, NORTHEAST.")
-        .def("__repr__", [](const Tile& tile) {
-            return nb::str("Tile({!r}, id={}, resource={!r}, number={!r})")
-                .format(tile.kind, tile.id, nb::cast(tile.resource), nb::cast(tile.number));
-        });
-
-    nb::class_<CatanMap>(module, "CatanMap")
-        .def_static(
-            "build", &CatanMap::build, nb::arg("map_type"), nb::arg("seed") = 0,
-            nb::arg("number_placement") = NumberPlacement::official_spiral)
-        .def_prop_ro(
-            "tiles", [](const CatanMap& map) { return tiles_to_python(map, false); },
-            "Every tile keyed by cube coordinate, like Catanatron's CatanMap.tiles.")
-        .def_prop_ro(
-            "land_tiles", [](const CatanMap& map) { return tiles_to_python(map, true); })
-        .def_prop_ro(
-            "land_nodes",
-            [](const CatanMap& map) {
-                return nb::frozenset(nb::cast(std::vector<int>(
-                    map.land_nodes().begin(), map.land_nodes().end())));
-            })
-        .def_prop_ro(
-            "land_edges",
-            [](const CatanMap& map) {
-                nb::list edges;
-                for (Edge edge : map.land_edges()) {
-                    edges.append(edge_to_python(edge));
-                }
-                return edges;
-            })
-        .def(
-            "tile_at",
-            [](const CatanMap& map, nb::handle coordinate) {
-                return map.tile_at(coordinate_from_python(coordinate));
-            },
-            nb::arg("coordinate"))
-        .def_prop_ro("num_nodes", &CatanMap::num_nodes);
-
     nb::class_<Board>(module, "Board", "Live, read-only view of a game's board.")
-        .def_prop_ro("map", &Board::map, nb::rv_policy::reference_internal)
+        .def_prop_ro("map", &Board::shared_map, "The board's shared, immutable map.")
         .def_prop_ro(
             "buildings", &buildings_to_python, "``{node: (Color, Building)}`` snapshot.")
         .def_prop_ro("roads", &roads_to_python, "``{(a, b): Color}`` snapshot with ``a < b``.")
@@ -394,24 +328,38 @@ void bind_game(nb::module_& module) {
         "identically; pass explicit chance outcomes to execute() to diverge.")
         .def(
             "__init__",
-            [](Game* self, const std::variant<int, std::vector<Color>>& players, MapType map_type,
+            [](Game* self, const std::variant<int, std::vector<Color>>& players,
+               std::optional<MapType> map_type, std::shared_ptr<const CatanMap> map,
                std::uint64_t seed, std::optional<std::uint64_t> map_seed,
-               NumberPlacement number_placement, std::optional<int> discard_limit,
-               std::optional<bool> friendly_robber, std::optional<int> vps_to_win,
-               std::optional<GameRules> rules) {
+               std::optional<NumberPlacement> number_placement,
+               std::optional<int> discard_limit, std::optional<bool> friendly_robber,
+               std::optional<int> vps_to_win, std::optional<GameRules> rules) {
+                const GameRules resolved =
+                    resolve_rules(rules, discard_limit, friendly_robber, vps_to_win);
+                if (map != nullptr) {
+                    if (map_type.has_value() || map_seed.has_value() ||
+                        number_placement.has_value()) {
+                        throw std::invalid_argument(
+                            "pass either map or map_type/map_seed/number_placement");
+                    }
+                    new (self) Game(game_colors(players), std::move(map), seed, resolved);
+                    return;
+                }
                 new (self) Game(
-                    game_colors(players), map_type, seed,
-                    resolve_rules(rules, discard_limit, friendly_robber, vps_to_win),
-                    number_placement, map_seed);
+                    game_colors(players), map_type.value_or(MapType::base), seed, resolved,
+                    number_placement.value_or(NumberPlacement::official_spiral), map_seed);
             },
-            nb::arg("players") = 2, nb::kw_only(), nb::arg("map_type") = MapType::base,
-            nb::arg("seed") = 0, nb::arg("map_seed") = nb::none(),
-            nb::arg("number_placement") = NumberPlacement::official_spiral,
+            nb::arg("players") = 2, nb::kw_only(), nb::arg("map_type") = nb::none(),
+            nb::arg("map").none() = nb::none(), nb::arg("seed") = 0,
+            nb::arg("map_seed") = nb::none(),
+            nb::arg("number_placement") = nb::none(),
             nb::arg("discard_limit") = nb::none(), nb::arg("friendly_robber") = nb::none(),
             nb::arg("vps_to_win") = nb::none(), nb::arg("rules") = nb::none(),
             "Create a game for ``players`` (a count up to six, or explicit seating).\n\n"
-            "``seed`` drives dice, cards and steals; ``map_seed`` (default ``seed``)\n"
-            "drives the board. ``rules`` sets every rule at once; otherwise the base\n"
+            "The board is ``map`` (a shared CatanMap) or a fresh ``map_type`` board\n"
+            "(default BASE) drawn from ``map_seed`` (default ``seed``) with\n"
+            "``number_placement`` (default OFFICIAL_SPIRAL). ``seed`` drives dice,\n"
+            "cards and steals. ``rules`` sets every rule at once; otherwise the base\n"
             "game's apply, with ``discard_limit`` (7), ``friendly_robber`` (False) and\n"
             "``vps_to_win`` (10) as overrides.")
         .def("__repr__", [](const Game& game) {

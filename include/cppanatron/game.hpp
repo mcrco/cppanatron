@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <random>
 #include <vector>
@@ -58,6 +59,16 @@ public:
         const GameRules& rules,
         NumberPlacement number_placement = NumberPlacement::official_spiral,
         std::optional<std::uint64_t> map_seed = std::nullopt);
+
+    /**
+     * A game on a shared, immutable map. Many games (and their copies) can
+     * share one map; `seed` drives dice, cards and steals.
+     */
+    Game(
+        std::vector<Color> colors,
+        std::shared_ptr<const CatanMap> map,
+        std::uint64_t seed,
+        const GameRules& rules = {});
 
     [[nodiscard]] const Board& board() const noexcept { return board_; }
     [[nodiscard]] const std::vector<Color>& colors() const noexcept { return colors_; }

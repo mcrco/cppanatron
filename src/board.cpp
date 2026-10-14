@@ -19,23 +19,26 @@ bool contains(const std::vector<Edge>& values, Edge value) {
 
 }  // namespace
 
-Board::Board(CatanMap map) : map_(std::move(map)), board_buildable_ids_(map_.land_nodes()) {
-    bool found_desert = false;
-    for (const auto& [coordinate, tile_index] : map_.coordinate_to_tile()) {
-        const Tile& tile = map_.tiles().at(static_cast<std::size_t>(tile_index));
-        if (tile.kind == TileKind::land && !tile.resource.has_value()) {
-            robber_coordinate_ = coordinate;
-            found_desert = true;
-            break;
+Board::Board(std::shared_ptr<const CatanMap> map) : map_(std::move(map)) {
+    if (map_ == nullptr) {
+        throw std::invalid_argument("board needs a map");
+    }
+    board_buildable_ids_ = map_->land_nodes();
+    // Like Catanatron, the robber starts on the first desert in tile order.
+    for (int tile_index : map_->land_tile_indices()) {
+        const auto index = static_cast<std::size_t>(tile_index);
+        if (!map_->tiles().at(index).resource.has_value()) {
+            robber_coordinate_ = map_->spec().tiles.at(index).coordinate;
+            return;
         }
     }
-    if (!found_desert) {
-        throw std::invalid_argument("map must contain a desert tile");
-    }
+    throw std::invalid_argument("map must contain a desert tile");
 }
 
+Board::Board(CatanMap map) : Board(std::make_shared<const CatanMap>(std::move(map))) {}
+
 void Board::move_robber(Coordinate coordinate) {
-    const Tile& tile = map_.tile_at(coordinate);
+    const Tile& tile = map_->tile_at(coordinate);
     if (tile.kind != TileKind::land) {
         throw std::invalid_argument("robber must move to a land tile");
     }
@@ -43,19 +46,6 @@ void Board::move_robber(Coordinate coordinate) {
         throw std::invalid_argument("robber must move to a different tile");
     }
     robber_coordinate_ = coordinate;
-}
-
-std::vector<int> Board::neighbors(int node_id) const {
-    std::vector<int> result;
-    for (Edge edge : map_.land_edges()) {
-        if (edge.a == node_id) {
-            result.push_back(edge.b);
-        } else if (edge.b == node_id) {
-            result.push_back(edge.a);
-        }
-    }
-    std::sort(result.begin(), result.end());
-    return result;
 }
 
 std::optional<Color> Board::node_color(int node_id) const {
@@ -111,7 +101,7 @@ std::vector<int> Board::buildable_node_ids(Color color, bool initial_build_phase
 
 std::vector<Edge> Board::buildable_edges(Color color) const {
     std::vector<Edge> result;
-    for (Edge edge : map_.land_edges()) {
+    for (Edge edge : map_->land_edges()) {
         if (roads_.contains(edge)) {
             continue;
         }
@@ -130,33 +120,12 @@ std::vector<Edge> Board::buildable_edges(Color color) const {
 
 std::set<std::optional<Resource>> Board::player_port_resources(Color color) const {
     std::set<std::optional<Resource>> result;
-    for (const Tile& tile : map_.tiles()) {
+    for (const Tile& tile : map_->tiles()) {
         if (tile.kind != TileKind::port || !tile.port_direction.has_value()) {
             continue;
         }
-        std::pair<int, int> port_nodes;
-        switch (*tile.port_direction) {
-            case Direction::west:
-                port_nodes = {tile.nodes[5], tile.nodes[4]};
-                break;
-            case Direction::northwest:
-                port_nodes = {tile.nodes[0], tile.nodes[5]};
-                break;
-            case Direction::northeast:
-                port_nodes = {tile.nodes[1], tile.nodes[0]};
-                break;
-            case Direction::east:
-                port_nodes = {tile.nodes[2], tile.nodes[1]};
-                break;
-            case Direction::southeast:
-                port_nodes = {tile.nodes[3], tile.nodes[2]};
-                break;
-            case Direction::southwest:
-                port_nodes = {tile.nodes[4], tile.nodes[3]};
-                break;
-        }
-        if (is_friendly_node(port_nodes.first, color) ||
-            is_friendly_node(port_nodes.second, color)) {
+        const auto [first, second] = port_nodes(tile);
+        if (is_friendly_node(first, color) || is_friendly_node(second, color)) {
             result.insert(tile.resource);
         }
     }
@@ -378,16 +347,16 @@ void Board::restore(
     const std::map<int, BuildingState>& buildings,
     const std::map<Edge, Color>& roads,
     Coordinate robber) {
-    if (map_.tile_at(robber).kind != TileKind::land) {
+    if (map_->tile_at(robber).kind != TileKind::land) {
         throw std::invalid_argument("robber must be on a land tile");
     }
     const auto edge_name = [](Edge edge) {
         return "(" + std::to_string(edge.a) + ", " + std::to_string(edge.b) + ")";
     };
-    const std::set<Edge> land_edges(map_.land_edges().begin(), map_.land_edges().end());
+    const std::set<Edge> land_edges(map_->land_edges().begin(), map_->land_edges().end());
     for (const auto& [node_id, building] : buildings) {
         (void)building;
-        if (!map_.land_nodes().contains(node_id)) {
+        if (!map_->land_nodes().contains(node_id)) {
             throw std::invalid_argument("node " + std::to_string(node_id) + " is not on land");
         }
         for (int neighbor : neighbors(node_id)) {
@@ -439,7 +408,7 @@ void Board::restore(
     buildings_ = buildings;
     roads_ = roads;
     robber_coordinate_ = robber;
-    board_buildable_ids_ = map_.land_nodes();
+    board_buildable_ids_ = map_->land_nodes();
     for (const auto& [node_id, building] : buildings_) {
         (void)building;
         board_buildable_ids_.erase(node_id);

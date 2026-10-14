@@ -63,8 +63,33 @@ public:
         const std::map<Edge, Color>& roads,
         Coordinate robber,
         const std::vector<Color>& road_order = {});
-    /** Scenario setup: who holds Longest Road after restore. */
-    void set_longest_road_holder(std::optional<Color> color);
+    /**
+     * Scenario setup: who holds Longest Road after restore, and the length
+     * the award was won with (by default the holder's cached length).
+     */
+    void set_longest_road_holder(
+        std::optional<Color> color, std::optional<int> length = std::nullopt);
+    /**
+     * Scenario setup: a color's cached road length (Catanatron's
+     * board.road_lengths entry), which play only ever raises until a cut. The
+     * color must have roads.
+     */
+    void set_road_length(Color color, int length);
+    /**
+     * Scenario setup: a color's road networks as play keeps them (Catanatron's
+     * board.connected_components), replacing the ones restore rebuilt, and
+     * its cached road length recomputed from them. They differ from rebuilt
+     * ones only at a road built into an opponent's existing building: play
+     * leaves that building out of the network, so no road walk starts there.
+     * Every node must be on land, and every building of the color in one.
+     */
+    void set_road_components(Color color, std::vector<std::set<int>> components);
+    /** A color's road networks (node sets), in order. */
+    [[nodiscard]] const std::vector<std::set<int>>& road_components(Color color) const;
+    /** Cached road lengths in the order colors built their first road. */
+    [[nodiscard]] std::vector<std::pair<Color, int>> road_lengths() const;
+    /** The length Longest Road was last won with (0 without a holder). */
+    [[nodiscard]] int longest_road_holder_length() const noexcept { return road_length_; }
 
     [[nodiscard]] std::optional<Color> node_color(int node_id) const;
     [[nodiscard]] std::optional<Color> edge_color(Edge edge) const;

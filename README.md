@@ -51,9 +51,14 @@ development_deck=(20, 3, 3, 3, 5)))`; `value_action(game, enemies=cpp.ValueEnemi
 scores every opponent's production rather than only the next seat's.
 `game.apply_setup([cpp.PlayerSetup(settlements=[...], roads=[...], resources=...), ...],
 current_player=1, has_rolled=True)` puts a fresh game into an exact position;
-the bank, deck, victory points and awards are derived. Chance outcomes come from
-the game's RNG unless passed to `execute` (`dice`, `development_card`,
-`stolen_resource`), which replays recorded games exactly. Unplayable actions
+the bank, deck, victory points and awards are derived. Any prompt but a trade
+negotiation can be declared (`prompt=`, `acting_player=` for a discarding
+seat, `free_roads=` mid road building, the initial placement read from the
+pieces), along with per-seat cards still to discard, kinds held since the
+turn began, road networks and cached road lengths, so a single Catanatron
+view becomes the same position without replaying the game. Chance outcomes
+come from the game's RNG unless passed to `execute` (`dice`,
+`development_card`, `stolen_resource`), which replays recorded games exactly. Unplayable actions
 raise `ValueError`, as in Catanatron.
 
 Maps are immutable and shared: `cpp.CatanMap.build(cpp.MapType.BASE, seed)` or

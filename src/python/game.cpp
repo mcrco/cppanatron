@@ -214,7 +214,11 @@ void bind_game(nb::module_& module) {
             [](PlayerSetup* self, std::vector<int> settlements, std::vector<int> cities,
                const std::vector<std::array<int, 2>>& roads, const std::array<int, 5>& resources,
                const std::array<int, 5>& development_cards,
-               const std::array<int, 5>& played_development_cards) {
+               const std::array<int, 5>& played_development_cards,
+               std::optional<std::array<bool, 4>> development_card_owned_at_start, int discards,
+               std::optional<int> longest_road_length, std::optional<int> cached_road_length,
+               int last_knight_completed_turn, int last_development_card_bought_completed_turn,
+               std::optional<std::vector<std::vector<int>>> road_components) {
                 PlayerSetup setup;
                 setup.settlements = std::move(settlements);
                 setup.cities = std::move(cities);
@@ -224,6 +228,14 @@ void bind_game(nb::module_& module) {
                 setup.resources = resources;
                 setup.development_cards = development_cards;
                 setup.played_development_cards = played_development_cards;
+                setup.development_card_owned_at_start = development_card_owned_at_start;
+                setup.discards = discards;
+                setup.longest_road_length = longest_road_length;
+                setup.cached_road_length = cached_road_length;
+                setup.last_knight_completed_turn = last_knight_completed_turn;
+                setup.last_development_card_bought_completed_turn =
+                    last_development_card_bought_completed_turn;
+                setup.road_components = std::move(road_components);
                 new (self) PlayerSetup(std::move(setup));
             },
             nb::kw_only(), nb::arg("settlements") = std::vector<int>{},
@@ -231,7 +243,24 @@ void bind_game(nb::module_& module) {
             nb::arg("roads") = std::vector<std::array<int, 2>>{},
             nb::arg("resources") = std::array<int, 5>{},
             nb::arg("development_cards") = std::array<int, 5>{},
-            nb::arg("played_development_cards") = std::array<int, 5>{})
+            nb::arg("played_development_cards") = std::array<int, 5>{},
+            nb::arg("development_card_owned_at_start") = nb::none(), nb::arg("discards") = 0,
+            nb::arg("longest_road_length") = nb::none(),
+            nb::arg("cached_road_length") = nb::none(),
+            nb::arg("last_knight_completed_turn") = -1,
+            nb::arg("last_development_card_bought_completed_turn") = -1,
+            nb::arg("road_components") = nb::none(),
+            "``development_card_owned_at_start``: which playable kinds (knight, year of\n"
+            "plenty, monopoly, road building) the seat held when its turn began (default:\n"
+            "the kinds it holds). ``discards``: cards still to discard at the discard\n"
+            "prompt. ``longest_road_length``: Catanatron's LONGEST_ROAD_LENGTH as last\n"
+            "published; ``cached_road_length``: its board.road_lengths entry (both\n"
+            "default to what the roads give). ``last_*_completed_turn``: completed turns\n"
+            "when the seat last played a knight / bought a card (-1 never).\n"
+            "``road_components``: the seat's road networks as node lists, as play keeps\n"
+            "them (Catanatron's board.connected_components; default rebuilt from the\n"
+            "pieces, which differs only where a road was built into an opponent's\n"
+            "existing building).")
         .def_ro("settlements", &PlayerSetup::settlements)
         .def_ro("cities", &PlayerSetup::cities)
         .def_prop_ro(
@@ -249,7 +278,16 @@ void bind_game(nb::module_& module) {
             [](const PlayerSetup& setup) { return to_tuple(setup.development_cards); })
         .def_prop_ro(
             "played_development_cards",
-            [](const PlayerSetup& setup) { return to_tuple(setup.played_development_cards); });
+            [](const PlayerSetup& setup) { return to_tuple(setup.played_development_cards); })
+        .def_ro("development_card_owned_at_start", &PlayerSetup::development_card_owned_at_start)
+        .def_ro("discards", &PlayerSetup::discards)
+        .def_ro("longest_road_length", &PlayerSetup::longest_road_length)
+        .def_ro("cached_road_length", &PlayerSetup::cached_road_length)
+        .def_ro("road_components", &PlayerSetup::road_components)
+        .def_ro("last_knight_completed_turn", &PlayerSetup::last_knight_completed_turn)
+        .def_ro(
+            "last_development_card_bought_completed_turn",
+            &PlayerSetup::last_development_card_bought_completed_turn);
 
     nb::class_<Board>(module, "Board", "Live, read-only view of a game's board.")
         .def_prop_ro("map", &Board::shared_map, "The board's shared, immutable map.")
@@ -290,6 +328,32 @@ void bind_game(nb::module_& module) {
             },
             nb::arg("edge"))
         .def("longest_road", &Board::longest_road, nb::arg("color"))
+        .def_prop_ro(
+            "road_lengths",
+            [](const Board& board) {
+                nb::dict result;
+                for (const auto& [color, length] : board.road_lengths()) {
+                    result[nb::cast(color)] = length;
+                }
+                return result;
+            },
+            "Cached road lengths ``{Color: length}`` in the order colors built their\n"
+            "first road (Catanatron's board.road_lengths).")
+        .def(
+            "road_components",
+            [](const Board& board, Color color) {
+                std::vector<std::vector<int>> result;
+                for (const auto& component : board.road_components(color)) {
+                    result.emplace_back(component.begin(), component.end());
+                }
+                return result;
+            },
+            nb::arg("color"),
+            "A color's road networks as sorted node lists, in order (Catanatron's\n"
+            "board.connected_components).")
+        .def_prop_ro(
+            "longest_road_length", &Board::longest_road_holder_length,
+            "The length Longest Road was won with (Catanatron's board.road_length).")
         .def_prop_ro("longest_road_color", &Board::longest_road_color);
 
     nb::class_<PlayerSnapshot>(module, "PlayerState", "Snapshot of one player's state.")
@@ -339,6 +403,16 @@ void bind_game(nb::module_& module) {
                 }
                 return roads;
             })
+        .def_prop_ro(
+            "last_knight_completed_turn",
+            [](const PlayerSnapshot& p) { return p.state.last_knight_completed_turn; },
+            "Completed turns when the player last played a knight; -1 never.")
+        .def_prop_ro(
+            "last_development_card_bought_completed_turn",
+            [](const PlayerSnapshot& p) {
+                return p.state.last_development_card_bought_completed_turn;
+            },
+            "Completed turns when the player last bought a development card; -1 never.")
         .def_ro("turns_since_last_knight", &PlayerSnapshot::turns_since_last_knight)
         .def_ro(
             "turns_since_last_development_card_bought",
@@ -403,6 +477,9 @@ void bind_game(nb::module_& module) {
         .def_prop_ro("is_discarding", &Game::is_discarding)
         .def_prop_ro("is_moving_robber", &Game::is_moving_robber)
         .def_prop_ro("is_road_building", &Game::is_road_building)
+        .def_prop_ro(
+            "free_roads_available", &Game::free_roads_available,
+            "Free roads left of a road building card being played.")
         .def_prop_ro("vps_to_win", &Game::victory_points_to_win)
         .def_prop_ro("discard_limit", &Game::discard_limit)
         .def_prop_ro("friendly_robber", &Game::friendly_robber)
@@ -482,7 +559,9 @@ void bind_game(nb::module_& module) {
             [](Game& game, const std::vector<PlayerSetup>& players,
                std::optional<std::array<int, 3>> robber, int current_player, bool has_rolled,
                bool has_played_development_card, int completed_turns,
-               std::optional<int> longest_road, std::optional<int> largest_army) {
+               std::optional<int> longest_road, std::optional<int> largest_army,
+               ActionPrompt prompt, std::optional<int> acting_player, int free_roads,
+               std::optional<int> longest_road_length) {
                 GameSetup setup;
                 setup.players = players;
                 if (robber.has_value()) {
@@ -494,20 +573,33 @@ void bind_game(nb::module_& module) {
                 setup.completed_turns = completed_turns;
                 setup.longest_road = longest_road;
                 setup.largest_army = largest_army;
+                setup.prompt = prompt;
+                setup.acting_player = acting_player;
+                setup.free_roads = free_roads;
+                setup.longest_road_length = longest_road_length;
                 game.apply_setup(setup);
             },
             nb::arg("players"), nb::kw_only(), nb::arg("robber") = nb::none(),
             nb::arg("current_player") = 0, nb::arg("has_rolled") = false,
             nb::arg("has_played_development_card") = false, nb::arg("completed_turns") = 0,
             nb::arg("longest_road") = nb::none(), nb::arg("largest_army") = nb::none(),
+            nb::arg("prompt") = ActionPrompt::play_turn, nb::arg("acting_player") = nb::none(),
+            nb::arg("free_roads") = 0, nb::arg("longest_road_length") = nb::none(),
             "Scenario setup: put a freshly created game into an exact position.\n\n"
             "``players`` holds one PlayerSetup per seat. The bank and deck are the\n"
             "rules' starting counts minus every hand and played card, and the deck\n"
             "is reshuffled. Victory points and awards follow from the pieces and\n"
             "cards; ``longest_road``/``largest_army`` name the holder's seat (-1 for\n"
             "nobody) when the leader is tied or must be explicit. The position is at\n"
-            "``current_player``'s turn, before or after the roll, with every held\n"
-            "card playable. Raises ValueError for positions the rules cannot produce.")
+            "``current_player``'s turn, before or after the roll, at ``prompt``:\n"
+            "PLAY_TURN (``free_roads`` 1 or 2 while a road building card is played),\n"
+            "DISCARD (``acting_player`` is the first seat, in seat order, with\n"
+            "``discards`` left), MOVE_ROBBER (after a 7 or a knight), or the initial\n"
+            "placement (BUILD_INITIAL_SETTLEMENT/ROAD, its progress read from the\n"
+            "pieces in snake order, each seat's newest settlement last).\n"
+            "``longest_road_length`` is the length Longest Road was won with\n"
+            "(Catanatron's board.road_length; default the holder's). Raises ValueError\n"
+            "for positions the rules cannot produce.")
         .def(
             "determinize_development_cards",
             [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,

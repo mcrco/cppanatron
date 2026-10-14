@@ -460,9 +460,75 @@ void Board::restore(
     road_length_ = 0;
 }
 
-void Board::set_longest_road_holder(std::optional<Color> color) {
+void Board::set_longest_road_holder(std::optional<Color> color, std::optional<int> length) {
+    if (length.has_value() && (!color.has_value() || *length < 0)) {
+        throw std::invalid_argument("a Longest Road length needs a holder and must be >= 0");
+    }
     road_color_ = color;
-    road_length_ = color.has_value() ? longest_road(*color) : 0;
+    road_length_ = color.has_value() ? length.value_or(longest_road(*color)) : 0;
+}
+
+void Board::set_road_length(Color color, int length) {
+    const auto entry = road_lengths_.find(color);
+    if (entry == road_lengths_.end()) {
+        throw std::invalid_argument("only a color with roads has a road length");
+    }
+    if (length < 0) {
+        throw std::invalid_argument("road lengths must be >= 0");
+    }
+    entry->second = length;
+}
+
+void Board::set_road_components(Color color, std::vector<std::set<int>> components) {
+    for (const auto& component : components) {
+        if (component.empty()) {
+            throw std::invalid_argument("a road network has nodes");
+        }
+        for (int node_id : component) {
+            if (!map_->land_nodes().contains(node_id)) {
+                throw std::invalid_argument(
+                    "network node " + std::to_string(node_id) + " is not on land");
+            }
+        }
+    }
+    const auto in_network = [&](int node_id) {
+        return std::any_of(components.begin(), components.end(), [node_id](const auto& component) {
+            return component.contains(node_id);
+        });
+    };
+    for (const auto& [node_id, building] : buildings_) {
+        if (building.color == color && !in_network(node_id)) {
+            throw std::invalid_argument(
+                "building at node " + std::to_string(node_id) + " is in no road network");
+        }
+    }
+    for (const auto& [edge, owner] : roads_) {
+        if (owner == color && !in_network(edge.a) && !in_network(edge.b)) {
+            throw std::invalid_argument("a road is in no road network");
+        }
+    }
+    connected_components_[color] = std::move(components);
+    if (const auto length = road_lengths_.find(color); length != road_lengths_.end()) {
+        int best = 0;
+        for (const auto& component : connected_components_[color]) {
+            best = std::max(best, longest_acyclic_path(component, color));
+        }
+        length->second = best;
+    }
+}
+
+const std::vector<std::set<int>>& Board::road_components(Color color) const {
+    static const std::vector<std::set<int>> kNone;
+    const auto components = connected_components_.find(color);
+    return components == connected_components_.end() ? kNone : components->second;
+}
+
+std::vector<std::pair<Color, int>> Board::road_lengths() const {
+    std::vector<std::pair<Color, int>> result;
+    for (Color color : road_order_) {
+        result.emplace_back(color, road_lengths_.at(color));
+    }
+    return result;
 }
 
 }  // namespace cppanatron

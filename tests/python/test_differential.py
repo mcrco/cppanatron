@@ -112,15 +112,25 @@ def test_explicit_map_games_stay_in_lockstep(num_players, map_name, game_index):
     )
 
 
+#: Value-expert parity on templates, and on a few shapes no template has.
+VALUE_EXPERT_GAMES = [(n, m, None) for n, m in PLAYER_COUNTS_AND_MAPS] + [
+    (num_players, "BASE", shape)
+    for shape in ("lake", "extension", "blob")
+    for num_players in (2, 4, 6)
+]
+
+
 @pytest.mark.parametrize("enemies", ["next", "all"])
-@pytest.mark.parametrize(("num_players", "map_type"), PLAYER_COUNTS_AND_MAPS)
+@pytest.mark.parametrize(("num_players", "map_type", "shape"), VALUE_EXPERT_GAMES)
 def test_the_value_expert_matches_catanatrons_value_function_player(
-    num_players, map_type, enemies
+    num_players, map_type, shape, enemies
 ):
     """The ported heuristic scores every position like Catanatron's base_fn, and
     the native expert picks an action Catanatron values as highly."""
-    seed = 7_000 + num_players + len(map_type)
+    seed = 7_000 + num_players + len(map_type) + len(shape or "")
     options = dict(map_type=map_type, seed=seed, vps_to_win=6)
+    if shape is not None:
+        options["map_spec"] = SHAPES[shape][0](seed)
     reference = new_game("catanatron", num_players, **options)
     native = new_game("cppanatron", num_players, **options)
     rng = random.Random(seed)

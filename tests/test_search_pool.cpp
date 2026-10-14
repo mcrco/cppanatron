@@ -559,6 +559,66 @@ void test_determinized_roots_offer_the_real_options() {
     }
 }
 
+/** Red holds a knight and a monopoly; Blue holds one wheat, White two cards. */
+Game knight_and_monopoly_position() {
+    auto players = random_placements(4, 12);
+    players[0].development_cards = {1, 0, 1, 0, 0};
+    players[1].resources = {0, 0, 0, 1, 0};
+    players[2].resources = {1, 0, 0, 1, 0};
+    players[3].development_cards = {0, 1, 0, 0, 0};
+    Game game(seats(4), MapType::base, 12);
+    GameSetup setup;
+    setup.players = players;
+    game.apply_setup(setup);
+    return game;
+}
+
+/** Search `game` with logits favouring `favoured` at the root; returns the pool's id. */
+std::int64_t search_favouring(SearchPool& pool, const Game& game, std::size_t favoured, const HandTracker* tracker) {
+    const auto id = pool.add(game, 4, tracker);
+    const int turn = game.num_turns();
+    run(pool, [&](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        uniform_logits(logits);
+        if (leaf.num_turns() == turn && leaf.current_prompt() == game.current_prompt()) {
+            logits[favoured] = 4.0F;
+        }
+        std::fill(values.begin(), values.end(), 0.25F);
+    });
+    return id;
+}
+
+/**
+ * Determinized searches must not re-root through a drawn outcome: stealing
+ * Blue's only card yields the world's card, not the real one.
+ */
+void test_determinized_advance_refuses_drawn_outcomes() {
+    Game game = knight_and_monopoly_position();
+    HandTracker tracker(game, 0);
+    const Game before = game;
+    const Action knight{Color::red, ActionType::play_knight_card, std::monostate{}};
+    game.execute(knight);
+    tracker.observe(before, knight, game);
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const auto steal = std::find_if(game.playable_actions().begin(), game.playable_actions().end(), [](const Action& a) {
+        const auto& move = std::get<RobberMove>(a.value);
+        return move.victim == Color::blue;
+    });
+    require(steal != game.playable_actions().end(), "Red can rob Blue");
+    const std::size_t index = codec->index(game, *steal);
+    for (const int determinizations : {0, 3}) {
+        SearchConfig config;
+        config.simulations = 120;
+        config.max_players = 4;
+        config.determinizations = determinizations;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = search_favouring(pool, game, index, determinizations > 0 ? &tracker : nullptr);
+        require(pool.visits(id)[index] > 0, "the steal was searched");
+        // Blue's one card is exactly known in the real game, so the oracle may re-root.
+        require(pool.advance(id, index) == (determinizations == 0),
+                "only the oracle re-roots through a steal");
+    }
+}
+
 int main() {
     try {
         test_two_player_matches_mcts_search();
@@ -568,6 +628,7 @@ int main() {
         test_parallel_and_batched_runs_agree();
         test_edge_cases();
         test_determinized_roots_offer_the_real_options();
+        test_determinized_advance_refuses_drawn_outcomes();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

@@ -276,8 +276,10 @@ void bind_search_pool(nb::module_& module) {
         .def(
             "advance", &SearchPool::advance, nb::arg("id"), nb::arg("action_index"),
             "Re-root at a deterministic root action's child, keep the subtree and start\n"
-            "a fresh budget. False (nothing changed) for chance actions, finished or\n"
-            "unvisited children, or with determinizations another player's decision.")
+            "a fresh budget. False for chance actions, finished or unvisited children\n"
+            "and, with determinizations, another player's decision, a child reached\n"
+            "through a drawn outcome, or worlds disagreeing on the new root's options.\n"
+            "On False, add() a new search from the real position.")
         .def("remove", &SearchPool::remove, nb::arg("id"))
         .def("stats", &SearchPool::stats, nb::arg("id"));
 }

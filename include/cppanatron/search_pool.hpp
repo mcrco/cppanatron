@@ -189,9 +189,13 @@ public:
     /**
      * Re-root every world at the child of a deterministic root action and
      * start a fresh simulation budget, keeping the subtree. Returns false
-     * (and changes nothing) when the action leads to a chance node, a
-     * finished game, an unvisited child or, with determinizations, another
-     * player's decision: then start a new search from the real position.
+     * (and changes the search no further) when the action leads to a chance
+     * node, a finished game or an unvisited child, and, with
+     * determinizations, when the child is another player's decision, was
+     * reached through a drawn outcome (even the only possible one), or the
+     * worlds disagree on the new root's options or (friendly robber) its
+     * robber moves depend on hidden cards. Then start a new search from the
+     * real position.
      */
     bool advance(std::int64_t id, std::size_t action_index);
     void remove(std::int64_t id);

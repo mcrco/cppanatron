@@ -1240,11 +1240,37 @@ struct SearchPool::Impl {
                 return false;
             }
             const Node& next = tree.nodes[child];
-            if (next.kind != NodeKind::decision || !next.expanded || next.visits == 0 ||
-                (search.determinized && next.to_play != search.root_player)) {
+            if (next.kind != NodeKind::decision || !next.expanded || next.visits == 0) {
+                return false;
+            }
+            // In a determinized world a drawn outcome (even the only possible
+            // one, such as a steal from a one-card hand) follows the world's
+            // hidden cards, not the real ones.
+            if (search.determinized && (next.to_play != search.root_player || next.outcome != kNone)) {
                 return false;
             }
             children.push_back(child);
+        }
+        if (search.determinized) {
+            const Tree& first = search.worlds.front();
+            const Game& reference = game_of(search.worlds.front(), children.front());
+            // Robber options under the friendly robber depend on hidden cards.
+            if (reference.friendly_robber() && reference.current_prompt() == ActionPrompt::move_robber) {
+                return false;
+            }
+            const Node& expected = first.nodes[children.front()];
+            for (std::size_t w = 1; w < search.worlds.size(); ++w) {
+                Tree& tree = search.worlds[w];
+                const Node& next = tree.nodes[children[w]];
+                if (next.num_edges != expected.num_edges) {
+                    return false;
+                }
+                for (std::uint32_t i = 0; i < next.num_edges; ++i) {
+                    if (tree.edges[next.first_edge + i].action != first.edges[expected.first_edge + i].action) {
+                        return false;
+                    }
+                }
+            }
         }
         for (std::size_t w = 0; w < search.worlds.size(); ++w) {
             (void)game_of(search.worlds[w], children[w]);

@@ -157,6 +157,18 @@ tracker, seed)` deals a full game consistent with that knowledge, never
 reading the hidden cards of `game`; `expected_resources(seat)` gives the mean
 hand.
 
+`HandTracker(game, seat, cpp.TrackerMode.EXACT)` also keeps the exact
+posterior over every seat's hand: weighted hypotheses branched at hidden
+steals (each kind by its count in the victim's hand, as the robber draws
+uniformly), weighted by seen steals and pruned by every later payment, trade
+and monopoly, merged when identical. `sample_world` then draws a hypothesis by
+its probability (`deal=cpp.TrackerMode.POOL` still deals the pool from it, as
+`SearchPool.add(..., deal=...)` does). Above `max_hypotheses` (4096) the
+belief is dropped (`belief_overflows`) and the pool is dealt until every hand
+is known again; `tracker.exact` says which, `tracker.hypotheses` lists the
+worlds. `VecEnv(trackers=True, tracker_mode=...)` keeps its trackers in that
+mode.
+
 `SearchPool` runs many N-player searches in lockstep. It takes an
 `ActionCodec` and an `ObservationEncoder` (implemented in C++; `FlatActionCodec`
 and `FlatObservationEncoder` wrap the v1 flat table and observation) and a

@@ -203,17 +203,20 @@ void bind_search_pool(nb::module_& module) {
         .def(
             "add",
             [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker,
-               bool ignore_tracker) { return pool.add(game, seed, tracker, ignore_tracker); },
+               bool ignore_tracker, std::optional<TrackerMode> deal) {
+                return pool.add(game, seed, tracker, ignore_tracker, deal);
+            },
             nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(), nb::kw_only(),
-            nb::arg("ignore_tracker") = false,
+            nb::arg("ignore_tracker") = false, nb::arg("deal") = nb::none(),
             "Start a search for ``game``'s player to move; returns its id. With\n"
             "determinizations the root worlds are sampled from ``tracker``, which\n"
             "must follow that player, and the root offers exactly ``game``'s legal\n"
             "actions (the player's own knowledge): worlds that do not offer them all\n"
-            "are resampled, and every root is restricted to them. Without\n"
-            "determinizations the search reads ``game`` as is, hidden cards included\n"
-            "(an oracle), so a ``tracker`` raises ValueError unless\n"
-            "``ignore_tracker=True``. A finished game's search is done at once.")
+            "are resampled, and every root is restricted to them. ``deal`` draws the\n"
+            "worlds' resource hands as ``sample_world`` does (the tracker's own mode\n"
+            "by default). Without determinizations the search reads ``game`` as is,\n"
+            "hidden cards included (an oracle), so a ``tracker`` raises ValueError\n"
+            "unless ``ignore_tracker=True``. A finished game's search is done at once.")
         .def(
             "collect",
             [](SearchPool& pool, OutputMatrix<float> observations, OutputVector<std::int64_t> ids) {

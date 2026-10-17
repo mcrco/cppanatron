@@ -8,6 +8,7 @@
 #include <nanobind/operators.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/vector.h>
 
 #include "cppanatron/tracker.hpp"
@@ -15,6 +16,18 @@
 namespace cppanatron::python {
 
 void bind_tracker(nb::module_& module) {
+    nb::enum_<TrackerMode>(
+        module, "TrackerMode",
+        "How a HandTracker represents the resource cards its observer cannot see.")
+        .value(
+            "POOL", TrackerMode::pool,
+            "Known lower bounds per seat and one pool of unknown cards, dealt uniformly.")
+        .value(
+            "EXACT", TrackerMode::exact,
+            "Plus the exact posterior over every seat's hand: weighted hypotheses\n"
+            "branched at hidden steals and pruned by every later event, up to\n"
+            "``max_hypotheses``, above which it falls back to the pool.");
+
     nb::enum_<TrackerEventType>(module, "TrackerEventType", "What a TrackerEvent records.")
         .value("GAIN", TrackerEventType::gain, "``player`` takes ``cards`` from the bank.")
         .value("LOSE", TrackerEventType::lose, "``player`` returns ``cards`` to the bank.")
@@ -96,12 +109,22 @@ void bind_tracker(nb::module_& module) {
         "when the robber moves a card between two other seats.\n\n"
         "Drive it with ``observe(before, action, after)`` when you have true states,\n"
         "or with the event methods when you only see views. It is sound: the true\n"
-        "hands always satisfy its constraints (``consistent_with``).")
+        "hands always satisfy its constraints (``consistent_with``).\n\n"
+        "``TrackerMode.POOL`` (the default) forgets which card a hidden steal took.\n"
+        "``TrackerMode.EXACT`` also keeps the exact posterior over the hands: a\n"
+        "weighted set of hypotheses (every seat's exact hand), branched at hidden\n"
+        "steals by the victim's counts of each kind and pruned by every later\n"
+        "event, merged when identical. Above ``max_hypotheses`` the belief is\n"
+        "dropped (``belief_overflows``) and ``sample_world`` deals the pool until\n"
+        "every hand is known again.")
         .def(
-            nb::init<const Game&, int>(), nb::arg("game"), nb::arg("observer"),
+            nb::init<const Game&, int, TrackerMode, int>(), nb::arg("game"), nb::arg("observer"),
+            nb::arg("mode") = TrackerMode::pool, nb::kw_only(),
+            nb::arg("max_hypotheses") = kDefaultMaxHypotheses,
             "Start tracking for seat ``observer``. Reads public state and the\n"
             "observer's own hand only; other seats' cards start unknown, which is\n"
-            "exact for a fresh game.")
+            "exact for a fresh game (an exact tracker started mid-game enumerates\n"
+            "the pool's deals when at most ``max_hypotheses`` fit).")
         .def("copy", [](const HandTracker& tracker) { return HandTracker(tracker); })
         .def(
             "__eq__", [](const HandTracker& lhs, const HandTracker& rhs) { return lhs == rhs; },
@@ -113,6 +136,28 @@ void bind_tracker(nb::module_& module) {
         .def(nb::self == nb::self)
         .def_prop_ro("observer", &HandTracker::observer)
         .def_prop_ro("num_players", &HandTracker::num_players)
+        .def_prop_ro("mode", &HandTracker::mode)
+        .def_prop_ro("max_hypotheses", &HandTracker::max_hypotheses)
+        .def_prop_ro(
+            "exact", &HandTracker::exact,
+            "Whether the exact belief currently enumerates every possible world\n"
+            "(false in POOL mode and while the belief has fallen back to the pool).")
+        .def_prop_ro("num_hypotheses", &HandTracker::hypothesis_count)
+        .def_prop_ro(
+            "belief_overflows", &HandTracker::belief_overflows,
+            "How often the exact belief outgrew ``max_hypotheses`` and fell back to the pool.")
+        .def_prop_ro(
+            "hypotheses",
+            [](const HandTracker& tracker) {
+                std::vector<std::pair<double, std::vector<std::array<int, 5>>>> out;
+                for (std::size_t h = 0; h < tracker.hypothesis_count(); ++h) {
+                    const auto hands = tracker.hypothesis_hands(h);
+                    out.emplace_back(tracker.hypothesis_weight(h),
+                                     std::vector<std::array<int, 5>>(hands.begin(), hands.end()));
+                }
+                return out;
+            },
+            "The exact belief's ``(probability, hands per seat)`` pairs; empty unless ``exact``.")
         .def(
             "observe", &HandTracker::observe, nb::arg("before"), nb::arg("action"), nb::arg("after"),
             "Apply the events the observer sees when ``action`` takes ``before`` to\n"
@@ -226,22 +271,26 @@ void bind_tracker(nb::module_& module) {
 
     module.def(
         "sample_world",
-        [](const Game& game, const HandTracker& tracker, std::uint64_t seed) {
+        [](const Game& game, const HandTracker& tracker, std::uint64_t seed,
+           std::optional<TrackerMode> deal) {
             std::mt19937_64 rng(seed);
-            return sample_world(game, tracker, rng);
+            return sample_world(game, tracker, rng, deal);
         },
-        nb::arg("game"), nb::arg("tracker"), nb::arg("seed") = 0,
+        nb::arg("game"), nb::arg("tracker"), nb::arg("seed") = 0, nb::arg("deal") = nb::none(),
         nb::call_guard<nb::gil_scoped_release>(),
         "A full game consistent with everything the tracker's observer knows.\n\n"
         "``game`` is the true game or any game with the same public state; its\n"
-        "hidden cards are never read. Other seats' resource hands are their known\n"
-        "cards plus a uniformly random deal of the unknown pool; their development\n"
-        "cards are a uniform deal of the unseen cards, conditioned on nobody holding\n"
-        "enough victory points to have already won; the rest is the deck, shuffled,\n"
-        "and the game's random stream is reseeded. This is the exact posterior if\n"
-        "unknown cards were equally likely to be anywhere; it ignores evidence the\n"
-        "tracker drops (which card a hidden steal likely took, what seats chose not\n"
-        "to do). Raises ValueError for a finished game.");
+        "hidden cards are never read. Other seats' resource hands are drawn as\n"
+        "``deal`` says (the tracker's own mode by default): ``TrackerMode.POOL``\n"
+        "deals the unknown pool uniformly on top of the known cards, which is the\n"
+        "exact posterior if unknown cards were equally likely to be anywhere and\n"
+        "ignores which card a hidden steal likely took; ``TrackerMode.EXACT`` (an\n"
+        "exact tracker only) draws one hypothesis of the exact belief by its\n"
+        "posterior, dealing the pool only while the belief has fallen back. Their\n"
+        "development cards are a uniform deal of the unseen cards, conditioned on\n"
+        "nobody holding enough victory points to have already won; the rest is the\n"
+        "deck, shuffled, and the game's random stream is reseeded. Neither deal\n"
+        "uses what seats chose not to do. Raises ValueError for a finished game.");
 }
 
 }  // namespace cppanatron::python

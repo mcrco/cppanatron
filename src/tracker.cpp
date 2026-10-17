@@ -1,9 +1,14 @@
 #include "cppanatron/tracker.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
@@ -40,6 +45,184 @@ int seat_of(const Game& game, Color color) {
 
 [[noreturn]] void inconsistent(const char* what) {
     throw std::logic_error(std::string("hand tracker is inconsistent: ") + what);
+}
+
+}  // namespace
+
+/**
+ * The exact mode's hypotheses: `hands[h * seats + seat]` is hypothesis h's
+ * hand of `seat` (the observer's included, the same in every hypothesis),
+ * `weights[h]` its posterior probability. The weights sum to 1.
+ */
+struct HandBelief {
+    int seats{};
+    std::vector<std::array<int, 5>> hands;
+    std::vector<double> weights;
+
+    [[nodiscard]] std::size_t size() const noexcept { return weights.size(); }
+    [[nodiscard]] std::span<const std::array<int, 5>> hypothesis(std::size_t h) const {
+        const auto n = static_cast<std::size_t>(seats);
+        return {hands.data() + h * n, n};
+    }
+    bool operator==(const HandBelief&) const = default;
+};
+
+namespace {
+
+using Hands = std::span<std::array<int, 5>>;
+
+/** Scale the weights to sum to 1. No hypothesis left means the events contradict the belief. */
+void normalize(HandBelief& belief) {
+    if (belief.weights.empty()) {
+        inconsistent("no hypothesis of the exact belief explains the event");
+    }
+    const double total = std::accumulate(belief.weights.begin(), belief.weights.end(), 0.0);
+    if (!(total > 0.0) || !std::isfinite(total)) {
+        inconsistent("the exact belief's weights are not positive and finite");
+    }
+    for (double& weight : belief.weights) {
+        weight /= total;
+    }
+}
+
+/**
+ * The belief after `update(hands, weight)` on every hypothesis: it edits the
+ * hands and the weight in place and returns whether the hypothesis survives.
+ * Events other than hidden steals map distinct hands to distinct hands, so
+ * nothing needs merging.
+ */
+template <typename Update>
+std::shared_ptr<const HandBelief> transformed(const HandBelief& belief, Update update) {
+    const auto n = static_cast<std::size_t>(belief.seats);
+    auto next = std::make_shared<HandBelief>();
+    next->seats = belief.seats;
+    next->hands.reserve(belief.hands.size());
+    next->weights.reserve(belief.weights.size());
+    for (std::size_t h = 0; h < belief.size(); ++h) {
+        const std::size_t start = next->hands.size();
+        const auto hands = belief.hypothesis(h);
+        next->hands.insert(next->hands.end(), hands.begin(), hands.end());
+        double weight = belief.weights[h];
+        if (update(Hands(next->hands.data() + start, n), weight)) {
+            next->weights.push_back(weight);
+        } else {
+            next->hands.resize(start);
+        }
+    }
+    normalize(*next);
+    return next;
+}
+
+/** `candidates` with identical hands merged, their weights added. */
+std::shared_ptr<const HandBelief> merged(const HandBelief& candidates) {
+    const auto hands_of = [&](std::size_t h) { return candidates.hypothesis(h); };
+    const auto less = [&](std::size_t a, std::size_t b) {
+        const auto x = hands_of(a);
+        const auto y = hands_of(b);
+        return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
+    };
+    std::vector<std::size_t> order(candidates.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::sort(order.begin(), order.end(), less);
+    auto next = std::make_shared<HandBelief>();
+    next->seats = candidates.seats;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        if (i > 0 && !less(order[i - 1], order[i])) {  // sorted, so not less either way: equal
+            next->weights.back() += candidates.weights[order[i]];
+            continue;
+        }
+        const auto hands = hands_of(order[i]);
+        next->hands.insert(next->hands.end(), hands.begin(), hands.end());
+        next->weights.push_back(candidates.weights[order[i]]);
+    }
+    normalize(*next);
+    return next;
+}
+
+/**
+ * A hidden steal: every hypothesis branches over the kinds the victim holds
+ * under it, each weighted by its count, since the robber takes a uniformly
+ * random card (the victim's hand size is public, so it divides out).
+ */
+std::shared_ptr<const HandBelief> branched(const HandBelief& belief, int thief, int victim) {
+    const auto thief_index = static_cast<std::size_t>(thief);
+    const auto victim_index = static_cast<std::size_t>(victim);
+    HandBelief candidates;
+    candidates.seats = belief.seats;
+    for (std::size_t h = 0; h < belief.size(); ++h) {
+        const auto hands = belief.hypothesis(h);
+        const std::array<int, 5> hand = hands[victim_index];
+        for (std::size_t r = 0; r < 5; ++r) {
+            if (hand[r] <= 0) {
+                continue;
+            }
+            const std::size_t start = candidates.hands.size();
+            candidates.hands.insert(candidates.hands.end(), hands.begin(), hands.end());
+            --candidates.hands[start + victim_index][r];
+            ++candidates.hands[start + thief_index][r];
+            candidates.weights.push_back(belief.weights[h] * hand[r]);
+        }
+    }
+    return merged(candidates);
+}
+
+/**
+ * Every deal of the unknown pool to the seats' unknown slots, weighted as a
+ * uniform deal of the pool's cards (hand sizes fixed, a deal's probability is
+ * proportional to 1 / prod c! over the counts c it gives each seat of each
+ * kind), or null when there are more than `cap` deals. An empty pool gives the
+ * one known world.
+ */
+std::shared_ptr<const HandBelief> enumerated(
+    const std::vector<std::array<int, 5>>& known, const std::vector<int>& unknown,
+    std::array<int, 5> pool, int cap) {
+    // 1 / c! for every count a seat could get of one kind.
+    const auto most_of_a_kind = static_cast<std::size_t>(*std::max_element(pool.begin(), pool.end()));
+    std::vector<double> inverse_factorial(most_of_a_kind + 1, 1.0);
+    for (std::size_t k = 1; k < inverse_factorial.size(); ++k) {
+        inverse_factorial[k] = inverse_factorial[k - 1] / static_cast<double>(k);
+    }
+    const std::size_t n = known.size();
+    auto belief = std::make_shared<HandBelief>();
+    belief->seats = static_cast<int>(n);
+    std::vector<std::array<int, 5>> hands = known;
+    bool over = false;
+    // Seat by seat, kind by kind: how many unknown cards of kind r seat s got.
+    std::function<void(std::size_t, std::size_t, int, double)> deal =
+        [&](std::size_t s, std::size_t r, int left, double weight) {
+            if (over) {
+                return;
+            }
+            if (s == n) {
+                if (static_cast<int>(belief->size()) >= cap) {
+                    over = true;
+                    return;
+                }
+                belief->hands.insert(belief->hands.end(), hands.begin(), hands.end());
+                belief->weights.push_back(weight);
+                return;
+            }
+            if (r == 5) {
+                if (left == 0) {
+                    deal(s + 1, 0, s + 1 < n ? unknown[s + 1] : 0, weight);
+                }
+                return;
+            }
+            const int most = std::min(left, pool[r]);
+            for (int c = r == 4 ? left : 0; c <= most; ++c) {
+                hands[s][r] = known[s][r] + c;
+                pool[r] -= c;
+                deal(s, r + 1, left - c, weight * inverse_factorial[static_cast<std::size_t>(c)]);
+                pool[r] += c;
+            }
+            hands[s][r] = known[s][r];
+        };
+    deal(0, 0, n > 0 ? unknown[0] : 0, 1.0);
+    if (over) {
+        return nullptr;
+    }
+    normalize(*belief);
+    return belief;
 }
 
 }  // namespace
@@ -119,7 +302,7 @@ TrackerEvent TrackerEvent::public_victory_points(std::vector<int> points) {
     return event;
 }
 
-HandTracker::HandTracker(const Game& game, int observer)
+HandTracker::HandTracker(const Game& game, int observer, TrackerMode mode, int max_hypotheses)
     : observer_(observer),
       rules_(game.rules()),
       sizes_(game.colors().size()),
@@ -129,8 +312,13 @@ HandTracker::HandTracker(const Game& game, int observer)
       deck_size_(static_cast<int>(game.development_cards_remaining())),
       bought_this_turn_(game.colors().size()),
       victory_point_caps_(game.colors().size()),
-      victory_point_floors_(game.colors().size()) {
+      victory_point_floors_(game.colors().size()),
+      mode_(mode),
+      max_hypotheses_(max_hypotheses) {
     check_seat(observer);
+    if (max_hypotheses < 1) {
+        throw std::invalid_argument("max_hypotheses must be positive");
+    }
     const bool over = game.winning_color().has_value();
     for (std::size_t seat = 0; seat < sizes_.size(); ++seat) {
         const PlayerState& state = game.players()[seat];
@@ -154,9 +342,62 @@ HandTracker::HandTracker(const Game& game, int observer)
         bought_this_turn_[static_cast<std::size_t>(turn)] = 1;
     }
     validate();
+    if (mode_ == TrackerMode::exact) {
+        // A fresh game is the one known world; a game in progress every deal
+        // of its pool, when they fit (a tracker started mid-game by a view
+        // rarely does, and then deals the pool until every hand is known).
+        std::vector<int> unknown;
+        for (int seat = 0; seat < num_players(); ++seat) {
+            unknown.push_back(unknown_count(seat));
+        }
+        belief_ = enumerated(known_, unknown, unknown_pool(), max_hypotheses_);
+        if (belief_ == nullptr) {
+            ++overflows_;
+        }
+        validate();
+    }
     if (game.current_player_index() == observer) {
         observe_options(game, game.playable_actions());
     }
+}
+
+std::size_t HandTracker::hypothesis_count() const noexcept {
+    return belief_ == nullptr ? 0 : belief_->size();
+}
+
+std::span<const std::array<int, 5>> HandTracker::hypothesis_hands(std::size_t index) const {
+    if (index >= hypothesis_count()) {
+        throw std::out_of_range("no such hypothesis");
+    }
+    return belief_->hypothesis(index);
+}
+
+double HandTracker::hypothesis_weight(std::size_t index) const {
+    if (index >= hypothesis_count()) {
+        throw std::out_of_range("no such hypothesis");
+    }
+    return belief_->weights[index];
+}
+
+std::span<const double> HandTracker::hypothesis_weights() const noexcept {
+    if (belief_ == nullptr) {
+        return {};
+    }
+    return belief_->weights;
+}
+
+bool HandTracker::operator==(const HandTracker& other) const {
+    const bool same_belief =
+        (belief_ == nullptr) == (other.belief_ == nullptr) &&
+        (belief_ == nullptr || belief_ == other.belief_ || *belief_ == *other.belief_);
+    return observer_ == other.observer_ && rules_ == other.rules_ && sizes_ == other.sizes_ &&
+           known_ == other.known_ && totals_ == other.totals_ &&
+           development_counts_ == other.development_counts_ && played_ == other.played_ &&
+           own_development_cards_ == other.own_development_cards_ && deck_size_ == other.deck_size_ &&
+           bought_this_turn_ == other.bought_this_turn_ &&
+           victory_point_caps_ == other.victory_point_caps_ &&
+           victory_point_floors_ == other.victory_point_floors_ && mode_ == other.mode_ &&
+           max_hypotheses_ == other.max_hypotheses_ && overflows_ == other.overflows_ && same_belief;
 }
 
 void HandTracker::check_seat(int seat) const {
@@ -275,6 +516,42 @@ void HandTracker::validate() const {
     }
     if (floors > unseen[kVictoryPoint]) {
         inconsistent("more victory point cards are held than remain unseen");
+    }
+    if (belief_ != nullptr) {
+        // Every hypothesis is a world the pool bounds allow: the belief is
+        // exact and the bounds are sound, so a violation is a bug in one.
+        const HandBelief& belief = *belief_;
+        const auto n = static_cast<std::size_t>(num_players());
+        if (mode_ != TrackerMode::exact || belief.seats != num_players() || belief.size() == 0 ||
+            belief.hands.size() != belief.size() * n ||
+            static_cast<int>(belief.size()) > max_hypotheses_) {
+            inconsistent("the exact belief is malformed");
+        }
+        for (std::size_t h = 0; h < belief.size(); ++h) {
+            const auto hands = belief.hypothesis(h);
+            std::array<int, 5> total{};
+            for (std::size_t seat = 0; seat < n; ++seat) {
+                if (sum(hands[seat]) != sizes_[seat]) {
+                    inconsistent("a hypothesis disagrees with a hand size");
+                }
+                for (std::size_t r = 0; r < 5; ++r) {
+                    if (hands[seat][r] < known_[seat][r]) {
+                        inconsistent("a hypothesis holds fewer cards than are known");
+                    }
+                    total[r] += hands[seat][r];
+                }
+            }
+            const auto observer = static_cast<std::size_t>(observer_);
+            if (hands[observer] != known_[observer]) {
+                inconsistent("a hypothesis disagrees with the observer's own hand");
+            }
+            if (total != totals_) {
+                inconsistent("a hypothesis disagrees with the bank");
+            }
+            if (!(belief.weights[h] > 0.0) || !std::isfinite(belief.weights[h])) {
+                inconsistent("a hypothesis has no weight");
+            }
+        }
     }
 }
 
@@ -459,8 +736,113 @@ void HandTracker::apply(const TrackerEvent& event) {
             }
             break;
     }
+    next.update_belief(event);
     next.validate();
     *this = std::move(next);
+}
+
+void HandTracker::update_belief(const TrackerEvent& event) {
+    if (mode_ != TrackerMode::exact) {
+        return;
+    }
+    if (belief_ == nullptr) {
+        // Fallen back to the pool. Once the pool holds cards of one kind at
+        // most, every hand is known again and that one world is the exact
+        // posterior, whatever was forgotten.
+        const auto pool = unknown_pool();
+        if (std::count_if(pool.begin(), pool.end(), [](int count) { return count > 0; }) <= 1) {
+            std::vector<int> unknown;
+            for (int seat = 0; seat < num_players(); ++seat) {
+                unknown.push_back(unknown_count(seat));
+            }
+            belief_ = enumerated(known_, unknown, pool, max_hypotheses_);
+        }
+        return;
+    }
+    const HandBelief& belief = *belief_;
+    const auto player = static_cast<std::size_t>(std::max(event.player, 0));
+    const auto other = static_cast<std::size_t>(std::max(event.other, 0));
+    const auto add = [](std::array<int, 5>& hand, const std::array<int, 5>& cards) {
+        for (std::size_t r = 0; r < 5; ++r) {
+            hand[r] += cards[r];
+        }
+    };
+    const auto remove = [](std::array<int, 5>& hand, const std::array<int, 5>& cards) {
+        for (std::size_t r = 0; r < 5; ++r) {
+            hand[r] -= cards[r];
+        }
+        return !any_negative(hand);
+    };
+    switch (event.type) {
+        case TrackerEventType::gain:
+            belief_ = transformed(belief, [&](Hands hands, double&) {
+                add(hands[player], event.cards);
+                return true;
+            });
+            break;
+        case TrackerEventType::lose:
+            belief_ = transformed(belief, [&](Hands hands, double&) { return remove(hands[player], event.cards); });
+            break;
+        case TrackerEventType::transfer:
+            belief_ = transformed(belief, [&](Hands hands, double&) {
+                if (!remove(hands[other], event.cards)) {
+                    return false;
+                }
+                add(hands[player], event.cards);
+                return true;
+            });
+            break;
+        case TrackerEventType::steal:
+            if (event.resource.has_value()) {
+                // Seen by the observer: still evidence, since a hand with more
+                // of that kind was likelier to give it up.
+                const auto r = static_cast<std::size_t>(*event.resource);
+                belief_ = transformed(belief, [&](Hands hands, double& weight) {
+                    const int count = hands[other][r];
+                    if (count <= 0) {
+                        return false;
+                    }
+                    weight *= count;
+                    --hands[other][r];
+                    ++hands[player][r];
+                    return true;
+                });
+            } else {
+                belief_ = branched(belief, event.player, event.other);
+                if (static_cast<int>(belief_->size()) > max_hypotheses_) {
+                    belief_ = nullptr;
+                    ++overflows_;
+                }
+            }
+            break;
+        case TrackerEventType::monopoly: {
+            // The amounts are public and the monopoly takes every card of the
+            // kind, so each seat's count of it under a hypothesis must match.
+            const auto r = static_cast<std::size_t>(*event.resource);
+            belief_ = transformed(belief, [&](Hands hands, double&) {
+                int taken = 0;
+                for (std::size_t seat = 0; seat < hands.size(); ++seat) {
+                    if (seat == player) {
+                        continue;
+                    }
+                    if (hands[seat][r] != event.amounts[seat]) {
+                        return false;
+                    }
+                    taken += hands[seat][r];
+                    hands[seat][r] = 0;
+                }
+                hands[player][r] += taken;
+                return true;
+            });
+            break;
+        }
+        case TrackerEventType::buy_development_card:
+        case TrackerEventType::play_development_card:
+        case TrackerEventType::end_turn:
+        case TrackerEventType::victory_point_cards:
+        case TrackerEventType::public_victory_points:
+            break;  // nothing about resource hands
+    }
 }
 
 void HandTracker::gain(int player, const std::array<int, 5>& cards) {
@@ -745,6 +1127,15 @@ std::array<double, 5> HandTracker::expected_resources(int seat) const {
     check_seat(seat);
     const auto& known = known_[static_cast<std::size_t>(seat)];
     std::array<double, 5> expected{};
+    if (belief_ != nullptr) {
+        for (std::size_t h = 0; h < belief_->size(); ++h) {
+            const auto& hand = belief_->hypothesis(h)[static_cast<std::size_t>(seat)];
+            for (std::size_t r = 0; r < 5; ++r) {
+                expected[r] += belief_->weights[h] * hand[r];
+            }
+        }
+        return expected;
+    }
     const auto pool = unknown_pool();
     const int pool_size = sum(pool);
     const int unknown = unknown_count(seat);
@@ -809,6 +1200,19 @@ bool HandTracker::consistent_with(const Game& truth) const {
     } catch (const std::invalid_argument&) {
         return false;
     }
+    if (belief_ != nullptr) {
+        bool found = false;
+        for (std::size_t h = 0; h < belief_->size() && !found; ++h) {
+            const auto hands = belief_->hypothesis(h);
+            found = true;
+            for (std::size_t seat = 0; seat < hands.size(); ++seat) {
+                found = found && truth.players()[seat].resources == hands[seat];
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
     std::array<int, 5> hidden{};
     for (DevelopmentCard card : truth.development_deck()) {
         ++hidden[static_cast<std::size_t>(card)];
@@ -838,13 +1242,18 @@ bool HandTracker::consistent_with(const Game& truth) const {
     return hidden == unseen_development_cards();
 }
 
-Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64& rng) {
+Game sample_world(
+    const Game& game, const HandTracker& tracker, std::mt19937_64& rng, std::optional<TrackerMode> deal) {
     // In a game in progress everyone knows nobody has won, which caps every
     // seat's victory point cards. Whether a game is over is public too, but
     // a finished game's worlds would have to keep its winner, and the game
     // object only says so through actual (hidden) points: refuse it.
     if (game.winning_color().has_value()) {
         throw std::invalid_argument("sample_world needs a game in progress, not a finished one");
+    }
+    const TrackerMode dealing = deal.value_or(tracker.mode());
+    if (dealing == TrackerMode::exact && tracker.mode() != TrackerMode::exact) {
+        throw std::invalid_argument("an exact deal needs a tracker in exact mode");
     }
     tracker.check_public(game);
     const int n = tracker.num_players();
@@ -857,19 +1266,27 @@ Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64&
         }
     }
 
-    // Resources: known cards plus a uniform deal of the unknown pool.
-    std::vector<int> cards;
-    const auto pool = tracker.unknown_pool();
-    for (std::size_t r = 0; r < 5; ++r) {
-        cards.insert(cards.end(), static_cast<std::size_t>(pool[r]), static_cast<int>(r));
-    }
-    random::shuffle(cards.begin(), cards.end(), rng);
     std::size_t cursor = 0;
-    for (int seat : others) {
-        auto& resources = hands[static_cast<std::size_t>(seat)].resources;
-        resources = tracker.known_resources(seat);
-        for (int k = tracker.unknown_count(seat); k > 0; --k) {
-            ++resources[static_cast<std::size_t>(cards.at(cursor++))];
+    if (dealing == TrackerMode::exact && tracker.exact()) {
+        // Resources: one hypothesis of the exact belief, by its posterior.
+        const auto hypothesis = tracker.hypothesis_hands(random::discrete(rng, tracker.hypothesis_weights()));
+        for (int seat : others) {
+            hands[static_cast<std::size_t>(seat)].resources = hypothesis[static_cast<std::size_t>(seat)];
+        }
+    } else {
+        // Resources: known cards plus a uniform deal of the unknown pool.
+        std::vector<int> cards;
+        const auto pool = tracker.unknown_pool();
+        for (std::size_t r = 0; r < 5; ++r) {
+            cards.insert(cards.end(), static_cast<std::size_t>(pool[r]), static_cast<int>(r));
+        }
+        random::shuffle(cards.begin(), cards.end(), rng);
+        for (int seat : others) {
+            auto& resources = hands[static_cast<std::size_t>(seat)].resources;
+            resources = tracker.known_resources(seat);
+            for (int k = tracker.unknown_count(seat); k > 0; --k) {
+                ++resources[static_cast<std::size_t>(cards.at(cursor++))];
+            }
         }
     }
 

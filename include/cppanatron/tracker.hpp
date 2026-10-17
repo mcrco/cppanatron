@@ -1,9 +1,12 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <vector>
 
 #include "cppanatron/game.hpp"
@@ -73,6 +76,28 @@ struct TrackerEvent {
     auto operator<=>(const TrackerEvent&) const = default;
 };
 
+/** How a HandTracker represents the resource cards its observer cannot see. */
+enum class TrackerMode : std::uint8_t {
+    /**
+     * Per seat a known lower bound per resource and a count of unknown cards;
+     * one pool of unknown cards, dealt uniformly by sample_world.
+     */
+    pool,
+    /**
+     * The pool, plus the exact posterior over every seat's hand: a weighted
+     * set of hypotheses (one hypothesis = the exact hand of every seat),
+     * branched at hidden steals and pruned by every later event. Falls back
+     * to the pool when the hypotheses outgrow a cap (see HandTracker).
+     */
+    exact,
+};
+
+/** The exact mode's hypotheses; an implementation detail of tracker.cpp. */
+struct HandBelief;
+
+/** Hypotheses the exact mode keeps at most before it falls back to the pool. */
+inline constexpr int kDefaultMaxHypotheses = 4096;
+
 /**
  * Follows a game from one seat, using only what that seat sees.
  *
@@ -95,9 +120,27 @@ struct TrackerEvent {
  *
  * The tracker is sound: the true hands always satisfy its constraints
  * (consistent_with). It does not use the weaker evidence of what seats chose
- * not to do, and after a hidden steal it forgets which known card might have
- * moved (see steal), so it keeps a superset of the worlds a perfect counter
- * would keep.
+ * not to do. In TrackerMode::pool it also forgets, after a hidden steal, which
+ * known card might have moved (see steal) and which card a steal most likely
+ * took, so it keeps a superset of the worlds a perfect counter would keep,
+ * and sample_world's uniform deal of the pool is not the exact posterior.
+ *
+ * TrackerMode::exact keeps that posterior as well: a weighted set of
+ * hypotheses, each the exact hand of every seat. A fresh game starts from the
+ * one known world; a game in progress from every deal of the pool, weighted
+ * as a uniform deal, when there are at most max_hypotheses of them. A hidden
+ * steal branches every hypothesis over the kinds the victim holds under it,
+ * each weighted by its count (the robber takes a uniformly random card), and
+ * a steal the observer saw weights hypotheses the same way. Every later event
+ * prunes the hypotheses it contradicts (payments, discards, trades, the
+ * amounts a monopoly took) and identical hands merge. The posterior is exact
+ * under the rules' chance (uniform steals) with no model of what seats choose
+ * to do, which is what a perfect counter can know. When the hypotheses
+ * outgrow max_hypotheses the belief is dropped (belief_overflows counts it):
+ * sample_world deals the pool as in pool mode until every hand is known
+ * again (the pool holds one kind at most), when the belief restarts from
+ * that one world. The pool bounds are kept in both modes, so an exact
+ * tracker can always deal the pool too.
  */
 class HandTracker {
 public:
@@ -107,10 +150,14 @@ public:
      * observer's own hand only: other seats' cards start unknown, which is
      * exact for a fresh game.
      */
-    HandTracker(const Game& game, int observer);
+    HandTracker(
+        const Game& game, int observer, TrackerMode mode = TrackerMode::pool,
+        int max_hypotheses = kDefaultMaxHypotheses);
 
     [[nodiscard]] int observer() const noexcept { return observer_; }
     [[nodiscard]] int num_players() const noexcept { return static_cast<int>(sizes_.size()); }
+    [[nodiscard]] TrackerMode mode() const noexcept { return mode_; }
+    [[nodiscard]] int max_hypotheses() const noexcept { return max_hypotheses_; }
 
     void apply(const TrackerEvent& event);
     /** Derive the events of one transition and apply them. */
@@ -140,7 +187,8 @@ public:
      * two other seats) move an unknown card: the thief gains an unknown card
      * and every known lower bound of the victim drops by one, since any of
      * those kinds may have been taken. When only one kind is possible the
-     * steal is resolved as a known transfer instead.
+     * steal is resolved as a known transfer instead. In exact mode the
+     * hypotheses branch over the kinds instead (see the class).
      */
     void steal(int thief, int victim, std::optional<Resource> resource);
     void monopoly(int player, Resource resource, const std::vector<int>& amounts);
@@ -161,6 +209,23 @@ public:
     /** Cards per resource in the unknown parts of all hands. */
     [[nodiscard]] std::array<int, 5> unknown_pool() const;
 
+    /**
+     * Whether the exact belief currently enumerates every possible world:
+     * false in pool mode, and in exact mode while the belief has fallen back
+     * to the pool (it outgrew max_hypotheses, or started from a game in
+     * progress with too many deals).
+     */
+    [[nodiscard]] bool exact() const noexcept { return belief_ != nullptr; }
+    [[nodiscard]] std::size_t hypothesis_count() const noexcept;
+    /** Hypothesis `index`: every seat's resource hand, in seat order. */
+    [[nodiscard]] std::span<const std::array<int, 5>> hypothesis_hands(std::size_t index) const;
+    /** Hypothesis `index`'s posterior probability. */
+    [[nodiscard]] double hypothesis_weight(std::size_t index) const;
+    /** Every hypothesis's posterior probability; they sum to 1. */
+    [[nodiscard]] std::span<const double> hypothesis_weights() const noexcept;
+    /** How often the exact belief outgrew max_hypotheses and fell back to the pool. */
+    [[nodiscard]] int belief_overflows() const noexcept { return overflows_; }
+
     [[nodiscard]] int development_card_count(int seat) const;
     [[nodiscard]] const std::array<int, 5>& own_development_cards() const noexcept {
         return own_development_cards_;
@@ -177,8 +242,9 @@ public:
     [[nodiscard]] int victory_point_card_floor(int seat) const;
 
     /**
-     * Expected hand: known cards plus the unknown cards' share of the
-     * unknown pool (the mean of the deal sample_world draws from).
+     * Expected hand: the mean of the deal sample_world draws from. The known
+     * cards plus the unknown cards' share of the unknown pool, or, while the
+     * exact belief holds, the weighted mean of its hypotheses.
      */
     [[nodiscard]] std::array<double, 5> expected_resources(int seat) const;
     /**
@@ -188,7 +254,8 @@ public:
     [[nodiscard]] std::array<double, 5> expected_development_cards(int seat) const;
 
     /**
-     * Whether `truth` satisfies every constraint the tracker keeps. Reads the
+     * Whether `truth` satisfies every constraint the tracker keeps (while the
+     * exact belief holds, whether it is one of the hypotheses). Reads the
      * hidden state on purpose; for tests and debugging.
      */
     [[nodiscard]] bool consistent_with(const Game& truth) const;
@@ -199,11 +266,12 @@ public:
      */
     void check_public(const Game& game) const;
 
-    bool operator==(const HandTracker&) const = default;
+    bool operator==(const HandTracker& other) const;
 
 private:
     void check_seat(int seat) const;
     void take(int seat, const std::array<int, 5>& cards);
+    void update_belief(const TrackerEvent& event);
     void validate() const;
 
     int observer_{};
@@ -219,6 +287,15 @@ private:
     /** Victory point cards each seat can hold at most (before capping by its card count). */
     std::vector<int> victory_point_caps_;
     std::vector<int> victory_point_floors_;
+    TrackerMode mode_{TrackerMode::pool};
+    int max_hypotheses_{kDefaultMaxHypotheses};
+    /**
+     * The exact mode's hypotheses; null in pool mode and while the belief has
+     * fallen back to the pool. Never mutated: an event builds a new one, so
+     * copies of a tracker (apply works on a copy) share it for free.
+     */
+    std::shared_ptr<const HandBelief> belief_;
+    int overflows_{};
 };
 
 /**
@@ -226,17 +303,22 @@ private:
  *
  * `game` may be the true game or any game with the same public state (for
  * example one rebuilt from the observer's view); its hidden cards are never
- * read. Every other seat's resource hand is its known cards plus a uniformly
- * random deal of the unknown pool to the unknown slots; their development
- * cards are a uniformly random deal of the unseen cards, conditioned on no
- * seat holding more victory point cards than its cap (so nobody could have
- * won already, now or earlier) or fewer than its floor; the rest is
- * the deck, reshuffled, and the game's random stream is reseeded from `rng`.
+ * read. Every other seat's resource hand is drawn as `deal` says, by default
+ * the tracker's own mode: TrackerMode::pool deals the unknown pool uniformly
+ * to the unknown slots on top of the known cards; TrackerMode::exact (which
+ * needs a tracker in exact mode) draws one hypothesis of the exact belief
+ * with its posterior probability, and deals the pool only while the belief
+ * has fallen back (HandTracker::exact is false). Their development cards are
+ * a uniformly random deal of the unseen cards, conditioned on no seat holding
+ * more victory point cards than its cap (so nobody could have won already,
+ * now or earlier) or fewer than its floor; the rest is the deck, reshuffled,
+ * and the game's random stream is reseeded from `rng`.
  *
- * The deal is the exact posterior if every unknown card were equally likely
- * to be anywhere, which is what the tracker records. It ignores evidence the
- * tracker drops (which card a hidden steal likely took, what seats did not
- * do), so it is close to, not exactly, uniform over consistent worlds. When
+ * The pool deal is the exact posterior if every unknown card were equally
+ * likely to be anywhere, which is what the pool records. It ignores evidence
+ * the pool drops (which card a hidden steal likely took, what later payments
+ * proved about it), so it is close to, not exactly, the posterior over
+ * consistent worlds; the exact deal is that posterior (see HandTracker). When
  * the victory point condition rejects 1000 deals in a row, the victory point
  * cards go to the deck first instead (still consistent, no longer uniform).
  *
@@ -244,6 +326,8 @@ private:
  * decide, and its worlds would depend on whether the given game counts as
  * won, which it only records through hidden victory point cards.
  */
-[[nodiscard]] Game sample_world(const Game& game, const HandTracker& tracker, std::mt19937_64& rng);
+[[nodiscard]] Game sample_world(
+    const Game& game, const HandTracker& tracker, std::mt19937_64& rng,
+    std::optional<TrackerMode> deal = std::nullopt);
 
 }  // namespace cppanatron

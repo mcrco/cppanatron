@@ -80,6 +80,8 @@ struct VecEnvConfig {
      * search and belief agents; costs a game copy per transition.
      */
     bool trackers{false};
+    /** The trackers' mode (HandTracker); exact keeps the posterior over hidden steals. */
+    TrackerMode tracker_mode{TrackerMode::pool};
     /**
      * Start the next game as soon as one ends (training). When false
      * (schedule mode, for evaluation) a finished env stays idle until the

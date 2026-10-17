@@ -1600,7 +1600,8 @@ std::size_t SearchPool::action_size() const noexcept { return impl_->codec->size
 int SearchPool::max_players() const noexcept { return impl_->config.max_players; }
 
 std::int64_t SearchPool::add(
-    const Game& game, std::uint64_t seed, const HandTracker* tracker, bool ignore_tracker) {
+    const Game& game, std::uint64_t seed, const HandTracker* tracker, bool ignore_tracker,
+    std::optional<TrackerMode> deal) {
     const int players = static_cast<int>(game.colors().size());
     if (players > impl_->config.max_players) {
         throw std::invalid_argument("the game has more seats than max_players");
@@ -1656,10 +1657,10 @@ std::int64_t SearchPool::add(
             };
             std::vector<std::uint8_t> common = search->root_mask;
             for (int k = 0; k < impl_->config.determinizations; ++k) {
-                Game world = sample_world(game, *tracker, search->rng);
+                Game world = sample_world(game, *tracker, search->rng, deal);
                 auto mask = mask_of(world);
                 for (int attempt = 1; attempt < kWorldAttempts && !covers(mask); ++attempt) {
-                    world = sample_world(game, *tracker, search->rng);
+                    world = sample_world(game, *tracker, search->rng, deal);
                     mask = mask_of(world);
                 }
                 for (std::size_t i = 0; i < common.size(); ++i) {

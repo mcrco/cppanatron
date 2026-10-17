@@ -220,7 +220,7 @@ void bind_vec_env(nb::module_& module) {
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
                std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
                int num_threads, float vp_reward, bool encode_waiting, bool auto_reset,
-               std::optional<InfoLevel> critic_level, bool trackers) {
+               std::optional<InfoLevel> critic_level, bool trackers, TrackerMode tracker_mode) {
                 VecEnvConfig config;
                 if (!dims.has_value()) {
                     std::vector<std::shared_ptr<const CatanMap>> maps;
@@ -246,6 +246,7 @@ void bind_vec_env(nb::module_& module) {
                 config.auto_reset = auto_reset;
                 config.critic_level = critic_level;
                 config.trackers = trackers;
+                config.tracker_mode = tracker_mode;
                 new (self) PyVecEnv(std::move(config));
             },
             nb::arg("scenarios"), nb::kw_only(), nb::arg("num_envs") = 1,
@@ -253,6 +254,7 @@ void bind_vec_env(nb::module_& module) {
             nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
             nb::arg("encode_waiting") = false, nb::arg("auto_reset") = true,
             nb::arg("critic_level") = nb::none(), nb::arg("trackers") = false,
+            nb::arg("tracker_mode") = TrackerMode::pool,
             "``dims`` defaults to the smallest covering every scenario's maps and\n"
             "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
             "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
@@ -266,7 +268,9 @@ void bind_vec_env(nb::module_& module) {
             "between levels (see ``layout()``).\n\n"
             "``trackers=True`` keeps a HandTracker per learner seat, fed every\n"
             "transition in the env (learner, forced and bot moves) and the seat's own\n"
-            "options, for determinized search and belief agents (``tracker(e, seat)``).")
+            "options, for determinized search and belief agents (``tracker(e, seat)``);\n"
+            "``tracker_mode`` is theirs (``TrackerMode.EXACT`` keeps the posterior\n"
+            "over hidden steals; an exact tracker can still deal the pool).")
         .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
         .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
         .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })

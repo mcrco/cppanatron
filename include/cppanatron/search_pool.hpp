@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -147,11 +148,13 @@ public:
      * player to move, which that player knows even where they depend on
      * hidden cards (the friendly robber): worlds that do not offer them all
      * are resampled (a bounded number of times), and every root is
-     * restricted to the real options the worlds share.
+     * restricted to the real options the worlds share. `deal` picks how the
+     * worlds' resource hands are drawn (sample_world's `deal`): the
+     * tracker's own mode by default.
      */
     std::int64_t add(
         const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
-        bool ignore_tracker = false);
+        bool ignore_tracker = false, std::optional<TrackerMode> deal = std::nullopt);
 
     /**
      * Advance every unfinished search to its next leaves (roots first) and

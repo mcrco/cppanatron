@@ -449,7 +449,8 @@ void VecEnv::begin_game(
     if (config_.trackers) {
         for (std::size_t seat = 0; seat < env.seats.size(); ++seat) {
             if (env.seats[seat] == SeatKind::learner) {
-                env.trackers.emplace(seat, HandTracker(*env.game, static_cast<int>(seat)));
+                env.trackers.emplace(
+                    seat, HandTracker(*env.game, static_cast<int>(seat), config_.tracker_mode));
             }
         }
         observe_options(env);

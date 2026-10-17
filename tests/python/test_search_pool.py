@@ -263,3 +263,68 @@ def test_search_pool_rejected_apply_can_be_retried_or_cancelled():
     run(pool, 3, batch=8)
     for search in ids:
         assert pool.done(search) and pool.visits(search).sum() == 30
+
+
+def test_exact_tracker_bindings():
+    """The exact mode through the bindings: hypotheses, the deal override and
+    the VecEnv's tracker mode (the posterior itself is tested in C++)."""
+    game = cpp.Game(3, seed=2)
+    exact = cpp.HandTracker(game, 0, cpp.TrackerMode.EXACT)
+    pool = cpp.HandTracker(game, 0)
+    assert pool.mode == cpp.TrackerMode.POOL and not pool.exact and pool.hypotheses == []
+    assert exact.mode == cpp.TrackerMode.EXACT and exact.max_hypotheses == 4096
+    assert exact.exact and exact.num_hypotheses == 1
+    for tracker in (exact, pool):
+        tracker.gain(1, (0, 2, 0, 0, 1))  # seat 1: brick, brick, ore
+        tracker.steal(2, 1)  # unseen by seat 0
+    assert exact.num_hypotheses == 2 and exact.belief_overflows == 0
+    assert sorted(exact.hypotheses) == [
+        (pytest.approx(1 / 3), [[0, 0, 0, 0, 0], [0, 2, 0, 0, 0], [0, 0, 0, 0, 1]]),
+        (pytest.approx(2 / 3), [[0, 0, 0, 0, 0], [0, 1, 0, 0, 1], [0, 1, 0, 0, 0]]),
+    ]
+    assert exact.expected_resources(2) == pytest.approx((0, 2 / 3, 0, 0, 1 / 3))
+    assert pool.expected_resources(2) == pytest.approx((0, 0.5, 0, 0, 0.5))
+    assert exact != pool and exact == exact.copy()
+    # Sampling needs a game with the same public state: seat 1 holds two cards, seat 2 one.
+    truth = cpp.Game(3, seed=2)
+    truth.apply_setup([cpp.PlayerSetup(), cpp.PlayerSetup(resources=(0, 1, 0, 0, 1)),
+                       cpp.PlayerSetup(resources=(0, 1, 0, 0, 0))])
+    assert exact.consistent_with(truth) and pool.consistent_with(truth)
+    bricks = sum(cpp.sample_world(truth, exact, seed=s).player(2).resources[1] for s in range(600))
+    assert 340 < bricks < 460  # 2/3 of 600
+    for seed in range(10):
+        forced = cpp.sample_world(truth, exact, seed=seed, deal=cpp.TrackerMode.POOL)
+        assert forced.search_equivalent(cpp.sample_world(truth, pool, seed=seed))
+    with pytest.raises(ValueError):
+        cpp.sample_world(truth, pool, seed=1, deal=cpp.TrackerMode.EXACT)
+    capped = cpp.HandTracker(game, 0, cpp.TrackerMode.EXACT, max_hypotheses=1)
+    capped.gain(1, (0, 2, 0, 0, 1))
+    capped.steal(2, 1)
+    assert not capped.exact and capped.belief_overflows == 1 and capped.consistent_with(truth)
+
+    env = cpp.VecEnv([cpp.Scenario(num_players=3)], num_envs=2, seed=1, trackers=True,
+                     tracker_mode=cpp.TrackerMode.EXACT)
+    env.allocate()
+    env.reset()
+    assert env.tracker(0, 0).mode == cpp.TrackerMode.EXACT and env.tracker(1, 2).exact
+    plain = cpp.VecEnv([cpp.Scenario(num_players=3)], num_envs=1, seed=1, trackers=True)
+    plain.allocate()
+    plain.reset()
+    assert plain.tracker(0, 0).mode == cpp.TrackerMode.POOL
+
+
+def test_search_pool_deals_exact_worlds():
+    players = 3
+    game, _ = random_game(players, 31, 150)
+    exact = cpp.HandTracker(game, game.current_player_index, cpp.TrackerMode.EXACT)
+    codec = cpp.FlatActionCodec(players, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(players, observation_layout())
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=8, max_players=3, determinizations=2))
+    for deal in (None, cpp.TrackerMode.POOL, cpp.TrackerMode.EXACT):
+        search = pool.add(game, 3, exact, deal=deal)
+        run(pool, players)
+        assert pool.stats(search).worlds >= 1
+        pool.remove(search)
+    with pytest.raises(ValueError):
+        pool.add(game, 3, cpp.HandTracker(game, game.current_player_index), deal=cpp.TrackerMode.EXACT)
+    assert len(pool) == 0

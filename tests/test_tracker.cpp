@@ -1,5 +1,6 @@
 // HandTracker and sample_world: soundness, independence from hidden truth,
-// and legality of sampled worlds over random games of 2-6 players.
+// and legality of sampled worlds over random games of 2-6 players, in both
+// tracker modes; the exact mode's posterior on worked examples.
 
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cppanatron/game.hpp"
@@ -190,7 +192,7 @@ void test_sample_world_refuses_finished_games() {
     require(refused, "sample_world must refuse a finished game");
 }
 
-void test_tracker_ignores_hidden_differences() {
+void test_tracker_ignores_hidden_differences(TrackerMode mode) {
     int compared = 0;
     for (int n = 3; n <= 4; ++n) {
         for (std::uint64_t seed = 1; seed <= 12; ++seed) {
@@ -204,7 +206,7 @@ void test_tracker_ignores_hidden_differences() {
                 continue;
             }
             const int observer = static_cast<int>(seed % static_cast<std::uint64_t>(n));
-            HandTracker truth_tracker(truth, observer);
+            HandTracker truth_tracker(truth, observer, mode);
             std::mt19937_64 sample_rng(seed);
             Game other = sample_world(truth, truth_tracker, sample_rng);
             HandTracker other_tracker = truth_tracker;
@@ -248,7 +250,8 @@ void test_tracker_ignores_hidden_differences() {
         }
     }
     require(compared > 200, "the dual-trajectory test must compare many steps");
-    std::cout << "tracker: " << compared << " dual-trajectory steps compared\n";
+    std::cout << "tracker: " << compared << " dual-trajectory steps compared ("
+              << (mode == TrackerMode::exact ? "exact" : "pool") << ")\n";
 }
 
 /** An initial build phase played by random choices. */
@@ -312,10 +315,11 @@ void test_samples_match_expected_hands() {
     const int n = 4;
     Game game(seats(n), MapType::base, 77);
     std::mt19937_64 rng(77);
-    std::vector<HandTracker> trackers;
+    std::vector<HandTracker> trackers;  // every seat in pool mode, then seat 0 in exact mode
     for (int seat = 0; seat < n; ++seat) {
         trackers.emplace_back(game, seat);
     }
+    trackers.emplace_back(game, 0, TrackerMode::exact);
     for (int step = 0; step < 400 && !game.winning_color().has_value(); ++step) {
         const Game before = game;
         const Action action = random_action(game, rng);
@@ -326,7 +330,9 @@ void test_samples_match_expected_hands() {
     }
     require(!game.winning_color().has_value(), "the position must still be in play");
     const HandTracker late(game, 0);
-    for (const HandTracker* tracker : std::vector<const HandTracker*>{&trackers[0], &late}) {
+    const HandTracker late_exact(game, 0, TrackerMode::exact);
+    for (const HandTracker* tracker :
+         std::vector<const HandTracker*>{&trackers[0], &late, &trackers[n], &late_exact}) {
         const int samples = 4000;
         std::vector<std::array<double, 5>> resources(n);
         std::vector<std::array<double, 5>> cards(n);
@@ -567,10 +573,396 @@ void test_friendly_robber_options_bound_victory_point_cards() {
             "a new tracker reads its options too");
 }
 
+
+/** Seat 0 observes; seats 1 and 2 hold `b` and `c`; `edit` adjusts the rest. */
+Game three_hands(const std::array<int, 5>& b, const std::array<int, 5>& c,
+                 const std::function<void(std::vector<PlayerSetup>&, GameSetup&)>& edit = {}) {
+    return positioned(3, 9, GameRules{}, [&](std::vector<PlayerSetup>& players, GameSetup& setup) {
+        players[1].resources = b;
+        players[2].resources = c;
+        if (edit) {
+            edit(players, setup);
+        }
+    });
+}
+
+/**
+ * A tracker for seat 0 that watched seats 1 and 2 receive `b` and `c` (a
+ * tracker started on a dealt position would not know the hands).
+ */
+HandTracker knowing(TrackerMode mode, const std::array<int, 5>& b, const std::array<int, 5>& c,
+                    int max_hypotheses = kDefaultMaxHypotheses) {
+    HandTracker tracker(three_hands({}, {}), 0, mode, max_hypotheses);
+    tracker.gain(1, b);
+    tracker.gain(2, c);
+    return tracker;
+}
+
+/** Sampled hands of seats 1 and 2 over `count` worlds, as (hand, hand) frequencies. */
+std::map<std::pair<std::array<int, 5>, std::array<int, 5>>, int> sampled_hands(
+    const Game& game, const HandTracker& tracker, int count, std::uint64_t seed) {
+    std::map<std::pair<std::array<int, 5>, std::array<int, 5>>, int> counts;
+    std::mt19937_64 rng(seed);
+    for (int i = 0; i < count; ++i) {
+        const Game world = sample_world(game, tracker, rng);
+        ++counts[{world.players()[1].resources, world.players()[2].resources}];
+    }
+    return counts;
+}
+
+/**
+ * The report's examples (section 3). A observes B {wood, sheep} and C
+ * {brick, ore, wheat}. (a) B robs C unseen, then pays wood and brick for a
+ * road: B holds the sheep, C the ore and wheat. (b) C robs B unseen, then
+ * pays ore, wheat and sheep for a development card: C holds the brick, B the
+ * wood. Both modes resolve them; the exact mode down to one hypothesis.
+ */
+void test_report_robbery_examples() {
+    const std::array<int, 5> wood_sheep{1, 0, 1, 0, 0};
+    const std::array<int, 5> brick_ore_wheat{0, 1, 0, 1, 1};
+    const Game start = three_hands(wood_sheep, brick_ore_wheat);
+    for (TrackerMode mode : {TrackerMode::pool, TrackerMode::exact}) {
+        // (a)
+        HandTracker tracker = knowing(mode, wood_sheep, brick_ore_wheat);
+        require(tracker.consistent_with(start), "the start is consistent");
+        require(tracker.known_resources(1) == wood_sheep && tracker.known_resources(2) == brick_ore_wheat,
+                "A knows both hands");
+        tracker.steal(1, 2, std::nullopt);
+        tracker.lose(1, {1, 1, 0, 0, 0});
+        const std::array<int, 5> sheep{0, 0, 1, 0, 0};
+        const std::array<int, 5> ore_wheat{0, 0, 0, 1, 1};
+        const Game after_a = three_hands(sheep, ore_wheat);
+        require(tracker.consistent_with(after_a), "(a): the truth stays consistent");
+        require(tracker.known_resources(1) == sheep && tracker.unknown_count(1) == 0,
+                "(a): B is known to hold the sheep");
+        require(tracker.unknown_pool() == ore_wheat, "(a): the ore and wheat are the only unknown cards");
+        require(tracker.expected_resources(2) == std::array<double, 5>{0, 0, 0, 1, 1},
+                "(a): C is expected to hold the ore and wheat");
+        if (mode == TrackerMode::exact) {
+            require(tracker.exact() && tracker.hypothesis_count() == 1, "(a): one world is left");
+            require(tracker.hypothesis_hands(0)[2] == ore_wheat && tracker.hypothesis_weight(0) == 1.0,
+                    "(a): the one world gives C the ore and wheat");
+        }
+        const auto worlds_a = sampled_hands(after_a, tracker, 300, 1);
+        require(worlds_a.size() == 1 && worlds_a.begin()->first == std::make_pair(sheep, ore_wheat),
+                "(a): every sampled world gives B the sheep and C the ore and wheat");
+
+        // (b)
+        HandTracker other = knowing(mode, wood_sheep, brick_ore_wheat);
+        other.steal(2, 1, std::nullopt);
+        other.lose(2, {0, 0, 1, 1, 1});
+        other.buy_development_card(2, std::nullopt);
+        const std::array<int, 5> wood{1, 0, 0, 0, 0};
+        const std::array<int, 5> brick{0, 1, 0, 0, 0};
+        const Game after_b = three_hands(wood, brick, [](std::vector<PlayerSetup>& players, GameSetup&) {
+            players[2].development_cards = {1, 0, 0, 0, 0};
+        });
+        require(other.consistent_with(after_b), "(b): the truth stays consistent");
+        require(other.known_resources(2) == brick && other.unknown_count(2) == 0,
+                "(b): C is known to hold the brick");
+        require(other.unknown_pool() == wood && other.unknown_count(1) == 1,
+                "(b): the wood is the only unknown card, and B holds it");
+        if (mode == TrackerMode::exact) {
+            require(other.exact() && other.hypothesis_count() == 1 && other.hypothesis_hands(0)[1] == wood,
+                    "(b): the one world gives B the wood");
+        }
+        const auto worlds_b = sampled_hands(after_b, other, 300, 2);
+        require(worlds_b.size() == 1 && worlds_b.begin()->first == std::make_pair(wood, brick),
+                "(b): every sampled world gives B the wood and C the brick");
+    }
+}
+
+/**
+ * The report's knight example: A has played 6 knights, B 6 and C 1. When C
+ * plays another, the 14th, no knight is left anywhere: not in B's hand, not
+ * in the deck, and no sampled world holds one.
+ */
+void test_report_knight_example() {
+    Game game = positioned(3, 9, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup& setup) {
+        players[0].played_development_cards = {6, 0, 0, 0, 0};
+        players[1].played_development_cards = {6, 0, 0, 0, 0};
+        players[1].development_cards = {0, 1, 0, 0, 1};  // hidden from A: a progress and a VP card
+        players[2].played_development_cards = {1, 0, 0, 0, 0};
+        players[2].development_cards = {1, 0, 0, 0, 0};
+        setup.current_player = 2;
+        setup.largest_army = 0;
+    });
+    for (TrackerMode mode : {TrackerMode::pool, TrackerMode::exact}) {
+        HandTracker tracker(game, 0, mode);
+        require(tracker.unseen_development_cards()[0] == 1, "one knight is unseen before C plays it");
+        Game after = game;
+        const Action knight{Color::white, ActionType::play_knight_card, std::monostate{}};
+        after.execute(knight);
+        tracker.observe(game, knight, after);
+        require(tracker.consistent_with(after), "the truth stays consistent");
+        require(tracker.unseen_development_cards()[0] == 0, "the 14th knight was the last");
+        require(tracker.played_development_cards(2)[0] == 2, "C has played two knights");
+        std::mt19937_64 rng(3);
+        for (int i = 0; i < 200; ++i) {
+            const Game world = sample_world(after, tracker, rng);
+            for (const PlayerState& player : world.players()) {
+                require(player.development_cards[0] == 0, "no sampled hand holds a knight");
+            }
+            for (DevelopmentCard card : world.development_deck()) {
+                require(card != DevelopmentCard::knight, "no sampled deck holds a knight");
+            }
+            require(world.players()[1].development_cards == std::array<int, 5>{0, 1, 0, 0, 1} ||
+                        world.players()[1].development_cards[0] == 0,
+                    "B's two cards are dealt from the non-knights");
+        }
+    }
+}
+
+/** The exact belief's probabilities of (B's hand, C's hand), by hypothesis. */
+std::map<std::pair<std::array<int, 5>, std::array<int, 5>>, double> posterior(const HandTracker& tracker) {
+    std::map<std::pair<std::array<int, 5>, std::array<int, 5>>, double> out;
+    for (std::size_t h = 0; h < tracker.hypothesis_count(); ++h) {
+        const auto hands = tracker.hypothesis_hands(h);
+        out[{hands[1], hands[2]}] += tracker.hypothesis_weight(h);
+    }
+    return out;
+}
+
+/**
+ * Where the modes differ. A steal from {brick, brick, ore} took a brick with
+ * probability 2/3: the exact mode weights the kinds by their counts, the
+ * pool deals them evenly. A seen steal is evidence too, and a payment from
+ * cards the pool calls unknown is weighed against which steals could have
+ * provided them, which the pool cannot do.
+ */
+void test_exact_belief_weights_steals_by_count() {
+    const std::array<int, 5> none{};
+    const std::array<int, 5> brick{0, 1, 0, 0, 0};
+    const std::array<int, 5> ore{0, 0, 0, 0, 1};
+    const std::array<int, 5> brick_ore{0, 1, 0, 0, 1};
+    const std::array<int, 5> two_bricks{0, 2, 0, 0, 0};
+    HandTracker exact = knowing(TrackerMode::exact, {0, 2, 0, 0, 1}, none);
+    HandTracker pool = knowing(TrackerMode::pool, {0, 2, 0, 0, 1}, none);
+    for (HandTracker* tracker : {&exact, &pool}) {
+        tracker->steal(2, 1, std::nullopt);
+    }
+    const auto after = posterior(exact);
+    require(after.size() == 2 && std::abs(after.at({brick_ore, brick}) - 2.0 / 3.0) < 1e-12 &&
+                std::abs(after.at({two_bricks, ore}) - 1.0 / 3.0) < 1e-12,
+            "the stolen card is a brick with probability 2/3");
+    require(exact.expected_resources(2)[1] > 0.66 && exact.expected_resources(2)[1] < 0.67,
+            "the expected hand follows the posterior");
+    const Game truth = three_hands(brick_ore, brick);
+    const int samples = 3000;
+    const auto exact_worlds = sampled_hands(truth, exact, samples, 4);
+    const auto pool_worlds = sampled_hands(truth, pool, samples, 4);
+    const double exact_brick = static_cast<double>(exact_worlds.at({brick_ore, brick})) / samples;
+    const double pool_brick = static_cast<double>(pool_worlds.at({brick_ore, brick})) / samples;
+    require(std::abs(exact_brick - 2.0 / 3.0) < 0.03, "exact samples take the brick 2/3 of the time");
+    require(std::abs(pool_brick - 0.5) < 0.03, "the pool deals the two kinds evenly");
+    // An exact tracker can still deal the pool, with the same draws as a pool tracker.
+    std::mt19937_64 first(11);
+    std::mt19937_64 second(11);
+    for (int i = 0; i < 20; ++i) {
+        require(sample_world(truth, exact, first, TrackerMode::pool)
+                    .search_equivalent(sample_world(truth, pool, second)),
+                "deal=pool on an exact tracker is the pool tracker's deal");
+    }
+    bool refused = false;
+    try {
+        (void)sample_world(truth, pool, first, TrackerMode::exact);
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    require(refused, "a pool tracker cannot deal exactly");
+
+    // A sees its own steal: a brick from B. Under "C took a brick" B held one
+    // brick of two cards, under "C took the ore" two of two: even odds now.
+    exact.steal(0, 1, Resource::brick);
+    const auto seen = posterior(exact);
+    require(seen.size() == 2 && std::abs(seen.at({ore, brick}) - 0.5) < 1e-12 &&
+                std::abs(seen.at({brick, ore}) - 0.5) < 1e-12,
+            "a seen steal weights the hypotheses by the victim's count of the kind");
+
+    // B {brick, brick, wood}; C robs B twice unseen, then pays a brick. C's
+    // steals were {brick, brick} with probability 1/3 and {brick, wood} with
+    // 2/3, both allow the payment, so C's other card is wood with probability
+    // 2/3. The pool, left with one unknown card each from {brick, wood}, says 1/2.
+    HandTracker exact_twice = knowing(TrackerMode::exact, {1, 2, 0, 0, 0}, none);
+    HandTracker pool_twice = knowing(TrackerMode::pool, {1, 2, 0, 0, 0}, none);
+    for (HandTracker* tracker : {&exact_twice, &pool_twice}) {
+        tracker->steal(2, 1, std::nullopt);
+        tracker->steal(2, 1, std::nullopt);
+        tracker->lose(2, brick);
+    }
+    const std::array<int, 5> wood{1, 0, 0, 0, 0};
+    const auto paid = posterior(exact_twice);
+    require(paid.size() == 2 && std::abs(paid.at({brick, wood}) - 2.0 / 3.0) < 1e-12 &&
+                std::abs(paid.at({wood, brick}) - 1.0 / 3.0) < 1e-12,
+            "a payment from unknown cards is weighed against the steals that provided them");
+    require(pool_twice.expected_resources(2)[0] == 0.5, "the pool splits the last unknown card evenly");
+    require(pool_twice.consistent_with(three_hands(brick, wood)) && exact_twice.consistent_with(three_hands(brick, wood)) &&
+                exact_twice.consistent_with(three_hands(wood, brick)),
+            "both possible truths stay consistent");
+}
+
+/**
+ * Above max_hypotheses the exact belief falls back to the pool, and restarts
+ * from the one known world once every card is known again.
+ */
+void test_exact_belief_overflow_falls_back() {
+    HandTracker tracker = knowing(TrackerMode::exact, {0, 1, 0, 1, 1}, {}, 2);
+    require(tracker.max_hypotheses() == 2 && tracker.exact() && tracker.hypothesis_count() == 1,
+            "a fresh game is one world");
+    tracker.steal(2, 1, std::nullopt);  // three kinds, two hypotheses allowed
+    require(!tracker.exact() && tracker.hypothesis_count() == 0 && tracker.belief_overflows() == 1,
+            "three hypotheses overflow a cap of two");
+    const Game truth = three_hands({0, 1, 0, 1, 0}, {0, 0, 0, 0, 1});
+    require(tracker.consistent_with(truth), "the fallback is sound");
+    require(sampled_hands(truth, tracker, 200, 5).size() == 3, "the fallback deals the pool");
+    require(tracker.unknown_count(2) == 1 && tracker.unknown_count(1) == 2 &&
+                tracker.unknown_pool() == std::array<int, 5>{0, 1, 0, 1, 1},
+            "the fallback keeps the pool bounds");
+    tracker.lose(1, {0, 1, 0, 1, 0});  // B pays the brick and wheat: C took the ore
+    require(tracker.exact() && tracker.hypothesis_count() == 1 && tracker.belief_overflows() == 1,
+            "once every card is known the belief restarts");
+    require(tracker.hypothesis_hands(0)[2] == std::array<int, 5>{0, 0, 0, 0, 1},
+            "the restarted world gives C the ore");
+    bool threw = false;
+    try {
+        (void)HandTracker(truth, 0, TrackerMode::exact, 0);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "the cap must be positive");
+
+    // Impossible events still throw and change nothing, in exact mode too.
+    HandTracker unchanged = tracker;
+    threw = false;
+    try {
+        tracker.lose(2, {0, 0, 0, 0, 2});
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw && tracker == unchanged, "impossible events leave an exact tracker unchanged");
+}
+
+/**
+ * An exact tracker started mid-game enumerates every deal of the pool,
+ * weighted as a uniform deal: B holds 3 and C 2 of {wood, wood, brick,
+ * sheep, wheat}, so B's hands are the 7 compositions and P(B = {wood, wood,
+ * brick}) = 1 / C(5, 3). Its expected hands are the pool's.
+ */
+void test_exact_tracker_started_mid_game_enumerates_deals() {
+    const Game game = three_hands({2, 1, 0, 0, 0}, {0, 0, 1, 1, 0});
+    const HandTracker exact(game, 0, TrackerMode::exact);
+    const HandTracker pool(game, 0);
+    require(exact.exact() && exact.hypothesis_count() == 7, "7 deals of the pool");
+    require(exact.consistent_with(game), "the truth is one of them");
+    const auto deals = posterior(exact);
+    require(std::abs(deals.at({{2, 1, 0, 0, 0}, {0, 0, 1, 1, 0}}) - 0.1) < 1e-12 &&
+                std::abs(deals.at({{1, 1, 1, 0, 0}, {1, 0, 0, 1, 0}}) - 0.2) < 1e-12,
+            "deals are weighted as a uniform deal of the pool");
+    for (int seat = 1; seat < 3; ++seat) {
+        const auto expected = exact.expected_resources(seat);
+        const auto from_pool = pool.expected_resources(seat);
+        for (std::size_t r = 0; r < 5; ++r) {
+            require(std::abs(expected[r] - from_pool[r]) < 1e-9, "the deals average to the pool's expectation");
+        }
+    }
+    const HandTracker capped(game, 0, TrackerMode::exact, 6);
+    require(!capped.exact() && capped.belief_overflows() == 1, "too many deals: the pool until hands are known");
+    require(capped.consistent_with(game), "a capped late tracker is sound");
+}
+
+/**
+ * Exact trackers over random games of 2-6 players: never exclude the truth,
+ * keep the pool's public bounds, sample consistent worlds, and reproduce the
+ * pool tracker's deals when asked for them.
+ */
+void test_exact_tracker_follows_random_games() {
+    int games = 0;
+    int steps = 0;
+    int overflows = 0;
+    int restarts = 0;
+    int exact_steps = 0;
+    std::size_t most_hypotheses = 0;
+    double hypotheses_sum = 0.0;
+    int samples = 0;
+    for (int n = 2; n <= 6; ++n) {
+        const std::uint64_t seeds = (n == 3 || n == 4) ? 200 : 8;
+        for (std::uint64_t seed = 1; seed <= seeds; ++seed) {
+            Game game(seats(n), MapType::base, seed * 7 + static_cast<std::uint64_t>(n), rules_for(n));
+            std::vector<HandTracker> exact;
+            std::vector<HandTracker> pool;
+            for (int seat = 0; seat < n; ++seat) {
+                exact.emplace_back(game, seat, TrackerMode::exact);
+                pool.emplace_back(game, seat);
+                require(exact.back().exact() && exact.back().hypothesis_count() == 1,
+                        "a fresh game is the one known world");
+            }
+            std::mt19937_64 rng(seed);
+            ++games;
+            for (int step = 0; step < 1500 && !game.winning_color().has_value(); ++step) {
+                const Game before = game;
+                const Action action = random_action(game, rng);
+                game.execute(action);
+                ++steps;
+                for (int seat = 0; seat < n; ++seat) {
+                    const auto index = static_cast<std::size_t>(seat);
+                    const bool was_exact = exact[index].exact();
+                    const int was_overflows = exact[index].belief_overflows();
+                    exact[index].observe(before, action, game);
+                    pool[index].observe(before, action, game);
+                    const HandTracker& tracker = exact[index];
+                    require(
+                        tracker.consistent_with(game),
+                        "the exact tracker excluded the true state (n=" + std::to_string(n) +
+                            ", seed=" + std::to_string(seed) + ", step=" + std::to_string(step) + ")");
+                    overflows += tracker.belief_overflows() - was_overflows;
+                    restarts += !was_exact && tracker.exact() && tracker.belief_overflows() == was_overflows;
+                    if (tracker.exact()) {
+                        ++exact_steps;
+                        most_hypotheses = std::max(most_hypotheses, tracker.hypothesis_count());
+                        hypotheses_sum += static_cast<double>(tracker.hypothesis_count());
+                        double total = 0.0;
+                        for (double weight : tracker.hypothesis_weights()) {
+                            total += weight;
+                        }
+                        require(std::abs(total - 1.0) < 1e-9, "the weights sum to one");
+                    }
+                    for (int s = 0; s < n; ++s) {
+                        require(tracker.hand_size(s) == pool[index].hand_size(s) &&
+                                    tracker.known_resources(s) == pool[index].known_resources(s) &&
+                                    tracker.unknown_count(s) == pool[index].unknown_count(s),
+                                "the exact tracker keeps the pool's bounds");
+                    }
+                }
+                if (step % 23 == 0 && !game.winning_color().has_value()) {
+                    const auto observer = static_cast<std::size_t>(rng() % static_cast<std::uint64_t>(n));
+                    const std::uint64_t sample_seed = seed * 1000003 + static_cast<std::uint64_t>(step);
+                    std::mt19937_64 sample_rng(sample_seed);
+                    const Game world = sample_world(game, exact[observer], sample_rng);
+                    require(exact[observer].consistent_with(world) && pool[observer].consistent_with(world),
+                            "an exact sample satisfies both trackers");
+                    require_conserved(world);
+                    std::mt19937_64 first(sample_seed);
+                    std::mt19937_64 second(sample_seed);
+                    require(sample_world(game, exact[observer], first, TrackerMode::pool)
+                                .search_equivalent(sample_world(game, pool[observer], second)),
+                            "deal=pool on an exact tracker is the pool tracker's deal");
+                    ++samples;
+                }
+            }
+        }
+    }
+    require(overflows > 0 || most_hypotheses > 100, "random games must stress the belief");
+    std::cout << "tracker: exact mode over " << games << " games, " << steps << " steps: " << overflows
+              << " overflows, " << restarts << " restarts, " << most_hypotheses
+              << " hypotheses at most, " << hypotheses_sum / std::max(1, exact_steps)
+              << " on average over " << exact_steps << " exact seat-steps, " << samples << " samples\n";
+}
+
 int main() {
     try {
         test_tracker_follows_random_games();
-        test_tracker_ignores_hidden_differences();
+        test_tracker_ignores_hidden_differences(TrackerMode::pool);
+        test_tracker_ignores_hidden_differences(TrackerMode::exact);
         test_sample_world_refuses_finished_games();
         test_victory_point_cards_respect_the_target();
         test_samples_match_expected_hands();
@@ -578,6 +970,12 @@ int main() {
         test_self_confirmed_trade();
         test_victory_point_cap_history();
         test_friendly_robber_options_bound_victory_point_cards();
+        test_report_robbery_examples();
+        test_report_knight_example();
+        test_exact_belief_weights_steals_by_count();
+        test_exact_belief_overflow_falls_back();
+        test_exact_tracker_started_mid_game_enumerates_deals();
+        test_exact_tracker_follows_random_games();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

@@ -70,6 +70,17 @@ struct SearchConfig {
     bool release_games{true};
     /** Threads for collect/apply across searches; 0 = hardware concurrency. */
     int threads{1};
+    /**
+     * Share one node between every order of actions that reaches the same
+     * position (two roads built either way round, one discarder's kinds in
+     * any order, a bank trade before or after a build): each world keeps a
+     * table of its positions below the root's children, a new child that
+     * another path already created links to the existing node (verified
+     * exactly), and that subtree is searched once, its statistics serving
+     * every parent. Values back up along the path a simulation took. Off,
+     * every path has its own nodes.
+     */
+    bool transpositions{false};
 };
 
 struct SearchStats {
@@ -82,6 +93,8 @@ struct SearchStats {
     std::uint64_t coalesced_outcomes{};
     /** Released games rebuilt from their parents. */
     std::uint64_t rebuilt_games{};
+    /** Edges linked to a node another path had already created. */
+    std::uint64_t transpositions{};
     std::uint32_t worlds{};
     std::uint32_t max_depth{};
     double mean_depth{};

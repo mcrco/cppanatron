@@ -97,19 +97,23 @@ void bind_search_pool(nb::module_& module) {
         "  the node's mean value minus fpu_reduction. skip_forced: single-action\n"
         "  positions below the root need no network call. release_games: keep games\n"
         "  only where children are still created (rebuilt on demand).\n"
-        "threads: for collect/apply across searches (0 = all cores).")
+        "threads: for collect/apply across searches (0 = all cores).\n"
+        "transpositions: share one node between every order of actions reaching\n"
+        "  the same position below the root's children (builds, discards and bank\n"
+        "  trades in any order); off, every path has its own nodes.")
         .def(
             "__init__",
             [](SearchConfig* self, double c_puct, int simulations, int max_pending, RootSelection root,
                double dirichlet_alpha, double dirichlet_fraction, int gumbel_considered,
                double gumbel_scale, double gumbel_c_visit, double gumbel_c_scale,
                bool gumbel_rescale_values, int determinizations, int max_players, double fpu_value,
-               double fpu_reduction, bool skip_forced, bool release_games, int threads) {
+               double fpu_reduction, bool skip_forced, bool release_games, int threads,
+               bool transpositions) {
                 new (self) SearchConfig{
                     c_puct, simulations, max_pending, root, dirichlet_alpha, dirichlet_fraction,
                     gumbel_considered, gumbel_scale, gumbel_c_visit, gumbel_c_scale,
                     gumbel_rescale_values, determinizations, max_players, fpu_value, fpu_reduction,
-                    skip_forced, release_games, threads};
+                    skip_forced, release_games, threads, transpositions};
             },
             nb::kw_only(), nb::arg("c_puct") = defaults.c_puct,
             nb::arg("simulations") = defaults.simulations,
@@ -125,7 +129,8 @@ void bind_search_pool(nb::module_& module) {
             nb::arg("max_players") = defaults.max_players, nb::arg("fpu_value") = defaults.fpu_value,
             nb::arg("fpu_reduction") = defaults.fpu_reduction,
             nb::arg("skip_forced") = defaults.skip_forced,
-            nb::arg("release_games") = defaults.release_games, nb::arg("threads") = defaults.threads)
+            nb::arg("release_games") = defaults.release_games, nb::arg("threads") = defaults.threads,
+            nb::arg("transpositions") = defaults.transpositions)
         .def_rw("c_puct", &SearchConfig::c_puct)
         .def_rw("simulations", &SearchConfig::simulations)
         .def_rw("max_pending", &SearchConfig::max_pending)
@@ -144,18 +149,21 @@ void bind_search_pool(nb::module_& module) {
         .def_rw("skip_forced", &SearchConfig::skip_forced)
         .def_rw("release_games", &SearchConfig::release_games)
         .def_rw("threads", &SearchConfig::threads)
+        .def_rw("transpositions", &SearchConfig::transpositions)
         .def("__repr__", [](const SearchConfig& c) {
             return nb::str(
                        "SearchConfig(c_puct={}, simulations={}, max_pending={}, root={!r}, "
                        "dirichlet_alpha={}, dirichlet_fraction={}, gumbel_considered={}, "
                        "gumbel_scale={}, gumbel_c_visit={}, gumbel_c_scale={}, "
                        "gumbel_rescale_values={}, determinizations={}, max_players={}, "
-                       "fpu_value={}, fpu_reduction={}, skip_forced={}, release_games={}, threads={})")
+                       "fpu_value={}, fpu_reduction={}, skip_forced={}, release_games={}, threads={}, "
+                       "transpositions={})")
                 .format(
                     c.c_puct, c.simulations, c.max_pending, c.root, c.dirichlet_alpha,
                     c.dirichlet_fraction, c.gumbel_considered, c.gumbel_scale, c.gumbel_c_visit,
                     c.gumbel_c_scale, c.gumbel_rescale_values, c.determinizations, c.max_players,
-                    c.fpu_value, c.fpu_reduction, c.skip_forced, c.release_games, c.threads);
+                    c.fpu_value, c.fpu_reduction, c.skip_forced, c.release_games, c.threads,
+                    c.transpositions);
         });
 
     nb::class_<SearchStats>(module, "SearchStats", "Counters of one search.")
@@ -167,6 +175,8 @@ void bind_search_pool(nb::module_& module) {
         .def_ro("edges", &SearchStats::edges)
         .def_ro("coalesced_outcomes", &SearchStats::coalesced_outcomes)
         .def_ro("rebuilt_games", &SearchStats::rebuilt_games)
+        .def_ro("transpositions", &SearchStats::transpositions,
+                "Edges linked to a node another path had already created.")
         .def_ro("worlds", &SearchStats::worlds)
         .def_ro("max_depth", &SearchStats::max_depth)
         .def_ro("mean_depth", &SearchStats::mean_depth)

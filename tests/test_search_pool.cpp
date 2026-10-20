@@ -877,8 +877,271 @@ void test_gumbel_plays_the_best_scoring_finalist() {
     require(ids.size() > 40 && uneven > 20, "the test must cover uneven last phases");
 }
 
+/** A play-turn position some way in: Red holds `hand` after a random placement. */
+Game hand_position(const std::array<int, 5>& hand) {
+    auto players = random_placements(4, 12);
+    players[0].resources = hand;
+    Game game(seats(4), MapType::base, 12);
+    GameSetup setup;
+    setup.players = players;
+    setup.has_rolled = true;
+    game.apply_setup(setup);
+    return game;
+}
+
+Evaluator hashed_evaluator(int n) {
+    return [n](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_logits(leaf, logits);
+        const double v = hashed_value(leaf);
+        for (int slot = 0; slot < n; ++slot) {
+            values[static_cast<std::size_t>(slot)] = static_cast<float>(slot == 0 ? v : (1.0 - v) / (n - 1));
+        }
+    };
+}
+
+/**
+ * Two roads (or two bank trades) in either order reach one position: with
+ * transpositions the second order links to the first's node. The search
+ * stays a complete, legal search either way.
+ */
+void test_transpositions_merge_reordered_actions() {
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    for (const auto& hand : {std::array<int, 5>{4, 4, 0, 0, 0}, std::array<int, 5>{0, 0, 4, 4, 0}}) {
+        const Game game = hand_position(hand);
+        require(game.playable_actions().size() >= 3, "several builds or trades are affordable");
+        std::vector<std::uint8_t> legal(codec->size());
+        codec->mask(game, legal);
+        for (const bool transpositions : {false, true}) {
+            SearchConfig config;
+            config.simulations = 256;
+            config.max_players = 4;
+            config.transpositions = transpositions;
+            SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+            const auto id = pool.add(game, 1);
+            run(pool, hashed_evaluator(4));
+            const auto stats = pool.stats(id);
+            require((stats.transpositions > 0) == transpositions, "reordered actions link only with the option");
+            const auto visits = pool.visits(id);
+            require(std::accumulate(visits.begin(), visits.end(), 0U) == 256, "root visits sum to the budget");
+            require(stats.simulations == 256 && pool.done(id), "every simulation ran");
+            require(legal[pool.select(id)] != 0, "the chosen move is legal");
+            const auto value = pool.value(id);
+            for (int seat = 0; seat < 4; ++seat) {
+                const float v = value[static_cast<std::size_t>(seat)];
+                require(v >= 0.0F && v <= 1.0F, "root values are win probabilities");
+            }
+        }
+    }
+}
+
+/** Threads, batch sizes and pool sizes do not change a search over a DAG either. */
+void test_transpositions_are_deterministic() {
+    struct Setting {
+        int threads;
+        std::size_t batch;
+        int copies;
+    };
+    for (const auto [n, seed] : std::vector<std::pair<int, std::uint64_t>>{{4, 21}, {2, 5}}) {
+        const Played played = play_random(n, seed, 180);
+        const HandTracker& tracker =
+            played.trackers[static_cast<std::size_t>(played.game.current_player_index())];
+        const auto codec = std::make_shared<FlatActionCodec>(n, MapType::base);
+        for (const int determinizations : {0, 3}) {
+            std::vector<std::vector<std::uint32_t>> results;
+            for (const Setting& setting :
+                 {Setting{1, 64, 1}, Setting{4, 8, 1}, Setting{3, 5, 4}, Setting{4, 64, 4}}) {
+                SearchConfig config;
+                config.simulations = 96;
+                config.max_players = n;
+                config.transpositions = true;
+                config.threads = setting.threads;
+                config.determinizations = determinizations;
+                SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+                std::vector<std::int64_t> ids;
+                for (int copy = 0; copy < setting.copies; ++copy) {
+                    ids.push_back(pool.add(played.game, 7 + static_cast<std::uint64_t>(copy),
+                                           determinizations > 0 ? &tracker : nullptr));
+                }
+                run(pool, hashed_evaluator(n), setting.batch);
+                require(pool.stats(ids.front()).transpositions > 0, "the position has transpositions");
+                results.push_back(pool.visits(ids.front()));
+            }
+            for (std::size_t i = 1; i < results.size(); ++i) {
+                require(results[i] == results[0], "threads, batches and pool size must not change a DAG search");
+            }
+        }
+    }
+}
+
+/**
+ * Off, the search is the one from before the table existed: visit vectors
+ * pinned from that build (hashed evaluator, 64 simulations, seed 1).
+ */
+void test_transpositions_off_is_bitwise_today() {
+    struct Pin {
+        int players;
+        std::uint64_t seed;
+        int steps;
+        std::uint64_t nodes;
+        std::vector<std::pair<std::size_t, std::uint32_t>> visits;
+    };
+    const std::vector<Pin> pins{
+        {4, 8, 180, 139, {{186, 12}, {223, 8}, {224, 16}, {225, 18}, {226, 10}}},
+        {2, 5, 120, 223,
+         {{248, 2}, {250, 2}, {252, 4}, {254, 16}, {255, 1}, {257, 1}, {260, 2}, {262, 2}, {264, 5},
+          {265, 1}, {270, 3}, {272, 3}, {274, 5}, {275, 1}, {278, 3}, {280, 5}, {282, 5}, {284, 3}}},
+    };
+    for (const Pin& pin : pins) {
+        const Played played = play_random(pin.players, pin.seed, pin.steps);
+        const auto codec = std::make_shared<FlatActionCodec>(pin.players, MapType::base);
+        SearchConfig config;
+        config.simulations = 64;
+        config.max_players = pin.players;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(played.game, 1);
+        run(pool, hashed_evaluator(pin.players));
+        std::vector<std::uint32_t> expected(codec->size(), 0);
+        for (const auto& [index, count] : pin.visits) {
+            expected[index] = count;
+        }
+        require(pool.visits(id) == expected, "visits with transpositions off must match the pinned ones");
+        require(pool.stats(id).nodes == pin.nodes, "the tree size must match the pinned one");
+        require(pool.stats(id).transpositions == 0, "nothing is linked with the option off");
+    }
+}
+
+/**
+ * Re-rooting keeps a subtree whose nodes may have several parents: the
+ * retained graph is re-parented and its table rebuilt, so later
+ * simulations (which rebuild released games along parents) run through
+ * it, and they do so the same on any thread count.
+ */
+void test_advance_on_a_dag() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    for (const bool release : {true, false}) {
+        std::vector<std::vector<std::uint32_t>> results;
+        for (const int threads : {1, 4}) {
+            SearchConfig config;
+            config.simulations = 256;
+            config.max_players = 4;
+            config.transpositions = true;
+            config.release_games = release;
+            config.threads = threads;
+            SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+            const auto id = pool.add(game, 1);
+            Game position = game;
+            for (int step = 0; step < 2; ++step) {
+                run(pool, hashed_evaluator(4));
+                const auto before = pool.stats(id);
+                require(before.transpositions > 0, "the subtree holds linked nodes");
+                // The most visited deterministic root action.
+                const auto visits = pool.visits(id);
+                std::size_t chosen = codec->size();
+                for (std::size_t i = 0; i < visits.size(); ++i) {
+                    if (visits[i] == 0 || (chosen < codec->size() && visits[i] <= visits[chosen])) {
+                        continue;
+                    }
+                    const ActionType type = codec->decode(position, i).type;
+                    if (type != ActionType::roll && type != ActionType::buy_development_card &&
+                        type != ActionType::move_robber) {
+                        chosen = i;
+                    }
+                }
+                require(chosen < codec->size(), "a deterministic root action was visited");
+                require(pool.advance(id, chosen), "re-rooting at a visited deterministic child");
+                position.execute(codec->decode(position, chosen));
+                const auto after = pool.stats(id);
+                require(after.nodes < before.nodes && after.transpositions == before.transpositions,
+                        "the subtree is kept with its counters");
+                require(!pool.done(id), "a fresh budget");
+            }
+            run(pool, hashed_evaluator(4));
+            const auto stats = pool.stats(id);
+            const auto visits = pool.visits(id);
+            require(pool.done(id) && stats.simulations == 256 &&
+                        std::accumulate(visits.begin(), visits.end(), 0U) >= 256,
+                    "the re-rooted search completes its budget on top of the retained visits");
+            require(release == (stats.rebuilt_games > 0), "released games are rebuilt through re-parented nodes");
+            results.push_back(visits);
+        }
+        require(results[0] == results[1], "threads must not change a re-rooted DAG search");
+    }
+}
+
+/** FlatActionCodec with no legal action at one prompt, to fence a subtree. */
+class ClosedPromptCodec final : public ActionCodec {
+public:
+    ClosedPromptCodec(int players, ActionPrompt closed)
+        : inner_(players, MapType::base), closed_(closed) {}
+    [[nodiscard]] std::size_t size() const noexcept override { return inner_.size(); }
+    [[nodiscard]] std::size_t index(const Game& game, const Action& action) const override {
+        return inner_.index(game, action);
+    }
+    [[nodiscard]] Action decode(const Game& game, std::size_t index) const override {
+        return inner_.decode(game, index);
+    }
+    void mask(const Game& game, std::span<std::uint8_t> out) const override {
+        if (game.current_prompt() == closed_) {
+            std::fill(out.begin(), out.end(), 0);
+            return;
+        }
+        inner_.mask(game, out);
+    }
+
+private:
+    FlatActionCodec inner_;
+    ActionPrompt closed_;
+};
+
+/**
+ * Red discards four of two wood, two brick, two sheep and two wheat. Every
+ * order of one multiset of kinds reaches the same hand, so with
+ * transpositions the discard subtree is the lattice of partial multisets
+ * (1 + 4 + 10 + 16 + 19 nodes) however long the search runs; without it,
+ * every order has its own path. The robber prompt after the discards is
+ * closed, so nothing beyond the chain is searched.
+ */
+void test_discard_chain_is_a_lattice() {
+    auto players = random_placements(4, 12);
+    players[0].resources = {2, 2, 2, 2, 0};
+    players[0].discards = 4;
+    Game game(seats(4), MapType::base, 12);
+    GameSetup setup;
+    setup.players = players;
+    setup.has_rolled = true;
+    setup.prompt = ActionPrompt::discard;
+    game.apply_setup(setup);
+    require(game.current_prompt() == ActionPrompt::discard && game.playable_actions().size() == 4,
+            "Red chooses among four kinds");
+    const auto codec = std::make_shared<ClosedPromptCodec>(4, ActionPrompt::move_robber);
+    std::uint64_t with = 0;
+    std::uint64_t without = 0;
+    for (const bool transpositions : {false, true}) {
+        SearchConfig config;
+        config.simulations = 400;
+        config.max_players = 4;
+        config.transpositions = transpositions;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 3);
+        run(pool, hashed_evaluator(4));
+        const auto stats = pool.stats(id);
+        require(stats.max_depth <= 4 && pool.done(id), "the search stays within the discard chain");
+        (transpositions ? with : without) = stats.nodes;
+        require((stats.transpositions > 0) == transpositions, "orders of one multiset link");
+    }
+    require(with <= 50, "the discard subtree is at most the multiset lattice: " + std::to_string(with));
+    require(without > 50,
+            "without the table the chain outgrows the lattice: " + std::to_string(without));
+}
+
 int main() {
     try {
+        test_transpositions_merge_reordered_actions();
+        test_transpositions_are_deterministic();
+        test_transpositions_off_is_bitwise_today();
+        test_advance_on_a_dag();
+        test_discard_chain_is_a_lattice();
         test_gumbel_plays_the_best_scoring_finalist();
         test_two_player_matches_mcts_search();
         test_finds_the_saving_move();

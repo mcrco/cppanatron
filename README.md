@@ -196,6 +196,18 @@ outcomes, monopolies and anything the worlds disagree on, and the caller then
 adds a new search from the real position with the updated tracker.
 Determinized roots offer exactly the real game's legal actions.
 
+`SearchConfig(transpositions=True)` makes each world a graph: a position that
+another order of actions already reached (two roads built either way round,
+one discarder's kinds in any order, a bank trade before or after a build)
+links to the existing node instead of growing a second subtree, so it is
+searched once and its visits and values serve every parent; values back up
+along the path a simulation took. Links are made below the root's children
+and only between nodes at the same depth (reorderings keep the length), so the
+graph stays acyclic and the root's visit counts stay exact; a match is
+verified with `Game.search_equivalent`. `stats(id).transpositions` counts the
+links; `advance` keeps a linked subtree as a whole. Off (the default) the
+search is the plain tree, visit for visit.
+
 Values are per-seat win probabilities (slot 0 = the leaf's player to move);
 each node picks by its own player's value (max^n), which for two players whose
 values sum to one is the usual zero-sum search (`c_puct` is half of

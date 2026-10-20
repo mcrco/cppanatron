@@ -16,6 +16,7 @@
 #include <string>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include "cppanatron/random.hpp"
@@ -243,7 +244,11 @@ struct Node {
      */
     std::unique_ptr<Game> game;
     Values value_sum{};
-    /** Outcome children: identifies the position among its siblings. */
+    /**
+     * Outcome children: identifies the position among its siblings. With
+     * SearchConfig::transpositions, the whole position's hash: the tree
+     * table's key.
+     */
     std::uint64_t fingerprint{};
     std::uint32_t visits{};
     std::uint32_t parent{kNone};
@@ -264,8 +269,15 @@ struct Node {
 struct Tree {
     std::vector<Node> nodes;
     std::vector<TreeEdge> edges;
+    /**
+     * Decision and terminal nodes at depth two or more by fingerprint, so a
+     * position another order of actions reaches again is searched once
+     * (SearchConfig::transpositions). Empty when the option is off.
+     */
+    std::unordered_multimap<std::uint64_t, std::uint32_t> table;
     std::uint64_t coalesced{};
     std::uint64_t rebuilt{};
+    std::uint64_t transpositions{};
     int players{};
 };
 
@@ -297,6 +309,50 @@ std::uint64_t outcome_fingerprint(const Game& game) {
     return hash;
 }
 
+/**
+ * The outcome fingerprint plus what a reordering of one turn's actions can
+ * change: the board, the turn and what each seat has played and rolled. A
+ * hash only (the RNG is left out, and hashes collide): the transposition
+ * table verifies a match with Game::search_equivalent.
+ */
+std::uint64_t transposition_key(const Game& game) {
+    std::uint64_t hash = outcome_fingerprint(game);
+    const auto mix = [&hash](std::uint64_t value) {
+        hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    };
+    const auto signed_mix = [&mix](int value) {
+        mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+    };
+    mix(static_cast<std::uint64_t>(game.num_turns()));
+    mix(static_cast<std::uint64_t>(game.current_turn_index()));
+    mix(static_cast<std::uint64_t>(game.completed_turns()));
+    mix(static_cast<std::uint64_t>(game.is_initial_build_phase()));
+    mix(static_cast<std::uint64_t>(game.free_roads_available()));
+    const Board& board = game.board();
+    for (const auto& [node, building] : board.buildings()) {
+        mix(static_cast<std::uint64_t>(node) * 16 + static_cast<std::uint64_t>(building.color) * 2 +
+            static_cast<std::uint64_t>(building.building));
+    }
+    for (const auto& [edge, color] : board.roads()) {
+        signed_mix(edge.a);
+        signed_mix(edge.b);
+        mix(static_cast<std::uint64_t>(color));
+    }
+    const Coordinate robber = board.robber_coordinate();
+    signed_mix(robber.x);
+    signed_mix(robber.y);
+    signed_mix(robber.z);
+    const auto longest = board.longest_road_color();
+    mix(longest.has_value() ? static_cast<std::uint64_t>(*longest) + 1 : 0);
+    for (const PlayerState& player : game.players()) {
+        for (int count : player.played_development_cards) {
+            mix(static_cast<std::uint64_t>(count));
+        }
+        mix(static_cast<std::uint64_t>(player.has_rolled));
+    }
+    return hash;
+}
+
 struct Leaf {
     std::uint32_t world{};
     std::uint32_t node{};
@@ -304,6 +360,12 @@ struct Leaf {
     bool root{};
     /** The Gumbel root edge this simulation was sent down, or kNone. */
     std::uint32_t root_edge{kNone};
+    /**
+     * The nodes this simulation went through, root first. Values back up
+     * along it rather than along parents: with transpositions a node can
+     * have several.
+     */
+    std::vector<std::uint32_t> path;
 };
 
 struct GumbelRoot {
@@ -498,9 +560,14 @@ struct SearchPool::Impl {
 
     // ------------------------------------------------------------ tree nodes
 
+    /** A node's fingerprint: what tells chance outcomes apart, or with transpositions the table's key. */
+    std::uint64_t fingerprint_of(const Game& game) const {
+        return config.transpositions ? transposition_key(game) : outcome_fingerprint(game);
+    }
+
     std::uint32_t add_node(
-        Tree& tree, std::unique_ptr<Game> game, std::uint32_t parent, std::uint32_t action,
-        std::uint32_t outcome) const {
+        Tree& tree, std::unique_ptr<Game> game, std::uint64_t fingerprint, std::uint32_t parent,
+        std::uint32_t action, std::uint32_t outcome) const {
         Node node;
         node.parent = parent;
         node.action = action;
@@ -513,7 +580,7 @@ struct SearchPool::Impl {
             node.winner = static_cast<std::uint8_t>(
                 std::find(colors.begin(), colors.end(), *winner) - colors.begin());
         }
-        node.fingerprint = outcome_fingerprint(*game);
+        node.fingerprint = fingerprint;
         // A finished game is never expanded; its value is its winner.
         if (!(config.release_games && node.kind == NodeKind::terminal)) {
             node.game = std::move(game);
@@ -522,7 +589,46 @@ struct SearchPool::Impl {
             throw std::length_error("search tree is too large");
         }
         tree.nodes.push_back(std::move(node));
-        return static_cast<std::uint32_t>(tree.nodes.size() - 1);
+        const auto index = static_cast<std::uint32_t>(tree.nodes.size() - 1);
+        if (config.transpositions && tree.nodes[index].depth >= 2) {
+            tree.table.emplace(fingerprint, index);
+        }
+        return index;
+    }
+
+    /**
+     * The node of a new position below `parent`: with transpositions the
+     * one another path already created, if any, else a new node. Links are
+     * made only at depth two or more and only between nodes of equal depth:
+     * a reordering of actions keeps the length, so nothing is lost; no cycle
+     * can form; and the root's children stay distinct, as visits and
+     * policy_target count each root edge's child. A match is verified
+     * exactly, since the key leaves out the RNG and hashes collide.
+     */
+    std::uint32_t place(
+        Tree& tree, std::unique_ptr<Game> game, std::uint64_t fingerprint, std::uint32_t parent,
+        std::uint32_t action, std::uint32_t outcome) const {
+        const auto depth = static_cast<std::uint16_t>(tree.nodes[parent].depth + 1);
+        if (config.transpositions && depth >= 2) {
+            const auto [begin, end] = tree.table.equal_range(fingerprint);
+            for (auto it = begin; it != end; ++it) {
+                const std::uint32_t found = it->second;
+                if (tree.nodes[found].depth != depth) {
+                    continue;
+                }
+                // Verifying a released game rebuilds it; drop it again so lookups do not grow the tree.
+                const bool held = tree.nodes[found].game != nullptr;
+                const bool same = game_of(tree, found).search_equivalent(*game);
+                if (!held) {
+                    tree.nodes[found].game.reset();
+                }
+                if (same) {
+                    ++tree.transpositions;
+                    return found;
+                }
+            }
+        }
+        return add_node(tree, std::move(game), fingerprint, parent, action, outcome);
     }
 
     /** A node's position, rebuilt from its parent's (recursively) if it was released. */
@@ -572,7 +678,8 @@ struct SearchPool::Impl {
             auto next = std::make_unique<Game>(game);
             execute_outcome(
                 *next, action, outcome == kNone ? std::nullopt : std::optional<std::uint32_t>(outcome));
-            child = add_node(tree, std::move(next), node, index, outcome);
+            const std::uint64_t fingerprint = fingerprint_of(*next);
+            child = place(tree, std::move(next), fingerprint, node, index, outcome);
             // A forced position's only child is built; nothing needs it again.
             if (config.release_games && node != 0 && tree.nodes[node].num_edges == 1) {
                 tree.nodes[node].game.reset();
@@ -593,7 +700,7 @@ struct SearchPool::Impl {
         const Game& game = game_of(tree, parent);
         auto next = std::make_unique<Game>(game);
         execute_outcome(*next, codec->decode(game, index), tree.edges[edge].action);
-        const std::uint64_t fingerprint = outcome_fingerprint(*next);
+        const std::uint64_t fingerprint = fingerprint_of(*next);
         const Node& node = tree.nodes[chance];
         for (std::uint32_t e = node.first_edge; e < node.first_edge + node.num_edges; ++e) {
             const std::uint32_t sibling = tree.edges[e].child;
@@ -604,7 +711,8 @@ struct SearchPool::Impl {
                 return sibling;
             }
         }
-        const std::uint32_t child = add_node(tree, std::move(next), chance, index, tree.edges[edge].action);
+        const std::uint32_t child =
+            place(tree, std::move(next), fingerprint, chance, index, tree.edges[edge].action);
         tree.edges[edge].child = child;
         return child;
     }
@@ -742,8 +850,10 @@ struct SearchPool::Impl {
         return chance.first_edge + chance.num_edges - 1;
     }
 
-    static void backup(Tree& tree, std::uint32_t node, const Values& values, bool count_visit) {
-        for (std::uint32_t n = node; n != kNone; n = tree.nodes[n].parent) {
+    /** Add `values` to every node of `path`, the nodes one simulation went through. */
+    static void backup(
+        Tree& tree, std::span<const std::uint32_t> path, const Values& values, bool count_visit) {
+        for (const std::uint32_t n : path) {
             Node& target = tree.nodes[n];
             if (count_visit) {
                 ++target.visits;
@@ -769,9 +879,14 @@ struct SearchPool::Impl {
         std::uint32_t node{};
     };
 
-    Descent descend(Search& search, Tree& tree, std::optional<std::size_t> root_edge) const {
+    /** Walk from the root to the next leaf, recording the nodes passed in `path`. */
+    Descent descend(
+        Search& search, Tree& tree, std::optional<std::size_t> root_edge,
+        std::vector<std::uint32_t>& path) const {
+        path.clear();
         std::uint32_t node = 0;
         while (true) {
+            path.push_back(node);
             Node& current = tree.nodes[node];
             if (current.kind == NodeKind::terminal) {
                 return {Stop::terminal, node};
@@ -787,11 +902,10 @@ struct SearchPool::Impl {
                 return {Stop::collision, node};
             }
             if (!current.expanded) {
-                if (config.skip_forced && node != 0 && current.game->playable_actions().size() == 1) {
-                    expand_forced(tree, node);
-                    continue;
+                if (!(config.skip_forced && node != 0 && current.game->playable_actions().size() == 1)) {
+                    return {Stop::leaf, node};
                 }
-                return {Stop::leaf, node};
+                expand_forced(tree, node);
             }
             if (current.num_edges == 0) {
                 return {Stop::dead_end, node};
@@ -1024,13 +1138,14 @@ struct SearchPool::Impl {
 
     /** Issue up to `quota` leaves of one search, backing up terminal ones. */
     void gather(Search& search, int quota) const {
+        thread_local std::vector<std::uint32_t> path;
         int issued = 0;
         if (!search.roots_ready) {
             for (std::uint32_t w = 0; w < search.worlds.size() && issued < quota; ++w) {
                 Node& root = search.worlds[w].nodes.front();
                 if (!root.expanded && !root.pending) {
                     root.pending = true;
-                    search.issued.push_back({w, 0, true, kNone});
+                    search.issued.push_back({w, 0, true, kNone, {0}});
                     ++search.pending;
                     ++issued;
                 }
@@ -1056,7 +1171,7 @@ struct SearchPool::Impl {
             };
             Descent descent;
             try {
-                descent = descend(search, tree, root_edge);
+                descent = descend(search, tree, root_edge, path);
             } catch (...) {
                 unpop();
                 throw;
@@ -1069,12 +1184,12 @@ struct SearchPool::Impl {
             Node& node = tree.nodes[descent.node];
             if (descent.stop == Stop::leaf) {
                 node.pending = true;
-                for (std::uint32_t n = descent.node; n != kNone; n = tree.nodes[n].parent) {
+                for (const std::uint32_t n : path) {
                     ++tree.nodes[n].visits;
                 }
                 search.issued.push_back(
                     {world, descent.node, false,
-                     root_edge.has_value() ? static_cast<std::uint32_t>(*root_edge) : kNone});
+                     root_edge.has_value() ? static_cast<std::uint32_t>(*root_edge) : kNone, path});
                 ++search.pending;
                 ++issued;
                 continue;
@@ -1088,7 +1203,7 @@ struct SearchPool::Impl {
                         node.visits > 0 ? mean(node, seat) : 1.0 / search.players;
                 }
             }
-            backup(tree, descent.node, values, true);
+            backup(tree, path, values, true);
             ++search.completed;
             record_depth(search, node);
         }
@@ -1103,7 +1218,7 @@ struct SearchPool::Impl {
         if (leaf.root) {
             return;
         }
-        for (std::uint32_t n = leaf.node; n != kNone; n = tree.nodes[n].parent) {
+        for (const std::uint32_t n : leaf.path) {
             --tree.nodes[n].visits;
         }
         --search.started;
@@ -1134,14 +1249,14 @@ struct SearchPool::Impl {
         ++search.evaluations;
         --search.pending;
         if (leaf.node == 0) {
-            backup(tree, 0, absolute, true);
+            backup(tree, leaf.path, absolute, true);
             search.root_net_value += absolute[static_cast<std::size_t>(search.root_player)];
             if (++search.roots_evaluated == static_cast<int>(search.worlds.size())) {
                 search.roots_ready = true;
                 prepare_root(search, search.root_net_value / search.roots_evaluated);
             }
         } else {
-            backup(tree, leaf.node, absolute, false);
+            backup(tree, leaf.path, absolute, false);
             ++search.completed;
             record_depth(search, tree.nodes[leaf.node]);
         }
@@ -1204,8 +1319,8 @@ struct SearchPool::Impl {
                 throw;
             }
             for (Search* search : active) {
-                for (const Leaf& leaf : search->issued) {
-                    batch.push_back({search, leaf});
+                for (Leaf& leaf : search->issued) {
+                    batch.push_back({search, std::move(leaf)});
                 }
                 search->issued.clear();
             }
@@ -1300,36 +1415,57 @@ struct SearchPool::Impl {
 
     // ------------------------------------------------------------ re-rooting
 
-    static Tree extract(Tree& tree, std::uint32_t root) {
+    /**
+     * The subtree under `root` as a tree of its own. A node several parents
+     * share (transpositions) keeps the one the breadth-first walk found it
+     * by, which survives, so game_of can rebuild along parents; every path
+     * to a node has the same length, so its depth is the same whichever.
+     */
+    Tree extract(Tree& tree, std::uint32_t root) const {
+        struct Reached {
+            std::uint32_t old;
+            std::uint32_t parent;
+            std::uint32_t action;
+            std::uint32_t outcome;
+        };
         std::vector<std::uint32_t> remap(tree.nodes.size(), kNone);
-        std::vector<std::uint32_t> order{root};
+        std::vector<Reached> order{{root, kNone, tree.nodes[root].action, tree.nodes[root].outcome}};
         remap[root] = 0;
         for (std::size_t i = 0; i < order.size(); ++i) {
-            const Node& node = tree.nodes[order[i]];
+            const Node& node = tree.nodes[order[i].old];
+            const bool chance = node.kind == NodeKind::chance;
             for (std::uint32_t e = node.first_edge; e < node.first_edge + node.num_edges; ++e) {
                 const std::uint32_t child = tree.edges[e].child;
                 if (child != kNone && remap[child] == kNone) {
                     remap[child] = static_cast<std::uint32_t>(order.size());
-                    order.push_back(child);
+                    order.push_back(
+                        {child, static_cast<std::uint32_t>(i), chance ? node.action : tree.edges[e].action,
+                         chance ? tree.edges[e].action : kNone});
                 }
             }
         }
         Tree result;
         result.coalesced = tree.coalesced;
         result.rebuilt = tree.rebuilt;
+        result.transpositions = tree.transpositions;
         result.players = tree.players;
         result.nodes.reserve(order.size());
         const std::uint16_t base = tree.nodes[root].depth;
-        for (std::uint32_t old : order) {
-            Node node = std::move(tree.nodes[old]);
+        for (const Reached& reached : order) {
+            Node node = std::move(tree.nodes[reached.old]);
             const std::uint32_t first = node.first_edge;
-            node.parent = old == root ? kNone : remap[node.parent];
+            node.parent = reached.parent;
+            node.action = reached.action;
+            node.outcome = reached.outcome;
             node.depth = static_cast<std::uint16_t>(node.depth - base);
             node.first_edge = static_cast<std::uint32_t>(result.edges.size());
             for (std::uint32_t e = first; e < first + node.num_edges; ++e) {
                 TreeEdge edge = tree.edges[e];
                 edge.child = edge.child == kNone ? kNone : remap[edge.child];
                 result.edges.push_back(edge);
+            }
+            if (config.transpositions && node.kind != NodeKind::chance && node.depth >= 2) {
+                result.table.emplace(node.fingerprint, static_cast<std::uint32_t>(result.nodes.size()));
             }
             result.nodes.push_back(std::move(node));
         }
@@ -1573,11 +1709,18 @@ struct SearchPool::Impl {
             result.edges += tree.edges.size();
             result.coalesced_outcomes += tree.coalesced;
             result.rebuilt_games += tree.rebuilt;
+            result.transpositions += tree.transpositions;
             for (const Node& node : tree.nodes) {
                 result.chance_nodes += node.kind == NodeKind::chance;
                 result.games += node.game != nullptr;
             }
             result.tree_bytes += tree.nodes.capacity() * sizeof(Node) + tree.edges.capacity() * sizeof(TreeEdge);
+            if (!tree.table.empty()) {
+                // Hash nodes (key, index, chain link) and the bucket array.
+                result.tree_bytes +=
+                    tree.table.size() * (sizeof(std::pair<const std::uint64_t, std::uint32_t>) + sizeof(void*)) +
+                    tree.table.bucket_count() * sizeof(void*);
+            }
         }
         result.tree_bytes += result.games * sizeof(Game);
         return result;
@@ -1687,7 +1830,8 @@ std::int64_t SearchPool::add(
         for (Game& world : worlds) {
             Tree tree;
             tree.players = players;
-            impl_->add_node(tree, std::make_unique<Game>(std::move(world)), kNone, kNone, kNone);
+            const std::uint64_t fingerprint = impl_->fingerprint_of(world);
+            impl_->add_node(tree, std::make_unique<Game>(std::move(world)), fingerprint, kNone, kNone, kNone);
             search->worlds.push_back(std::move(tree));
         }
     }

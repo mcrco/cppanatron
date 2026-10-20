@@ -1,7 +1,7 @@
 // Throughput and memory of SearchPool (and MCTSSearch for reference) with a
 // trivial evaluator: uniform logits, every value 0.5.
 //
-//   cppanatron_search_bench MODE PLAYERS [SEARCHES] [SIMULATIONS] [THREADS]
+//   cppanatron_search_bench MODE PLAYERS [SEARCHES] [SIMULATIONS] [THREADS] [TRANSPOSITIONS]
 //
 // The pool runs its searches twice and reports the second round's speed,
 // when the allocator reuses the first round's memory as in steady use.
@@ -64,7 +64,8 @@ Game position(int players) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "usage: " << argv[0] << " pool|mcts|game PLAYERS [SEARCHES] [SIMS] [THREADS]\n";
+        std::cerr << "usage: " << argv[0]
+                  << " pool|mcts|game PLAYERS [SEARCHES] [SIMS] [THREADS] [TRANSPOSITIONS]\n";
         return 2;
     }
     const std::string mode = argv[1];
@@ -72,6 +73,7 @@ int main(int argc, char** argv) {
     const int searches = argc > 3 ? std::atoi(argv[3]) : 64;
     const int simulations = argc > 4 ? std::atoi(argv[4]) : 256;
     const int threads = argc > 5 ? std::atoi(argv[5]) : 1;
+    const bool transpositions = argc > 6 && std::atoi(argv[6]) != 0;
     const Game game = position(players);
     const auto codec = std::make_shared<FlatActionCodec>(players, MapType::base);
     const double before = resident_bytes();
@@ -80,6 +82,7 @@ int main(int argc, char** argv) {
     std::uint64_t nodes = 0;
     std::uint64_t games = 0;
     std::uint64_t tree_bytes = 0;
+    std::uint64_t linked = 0;
 
     if (mode == "game") {
         std::vector<Game> copies(static_cast<std::size_t>(searches), game);
@@ -94,6 +97,7 @@ int main(int argc, char** argv) {
         config.simulations = simulations;
         config.max_players = players;
         config.threads = threads;
+        config.transpositions = transpositions;
         SearchPool pool(codec, std::make_shared<NullEncoder>(), config);
         const std::size_t batch = static_cast<std::size_t>(searches);
         std::vector<float> observations(batch * pool.observation_size());
@@ -117,11 +121,12 @@ int main(int argc, char** argv) {
             if (round == 0) {
                 grown = resident_bytes() - before;
             }
-            total_simulations = nodes = games = tree_bytes = 0;
+            total_simulations = nodes = games = tree_bytes = linked = 0;
             for (const auto id : ids) {
                 const auto stats = pool.stats(id);
                 total_simulations += stats.simulations;
                 nodes += stats.nodes;
+                linked += stats.transpositions;
                 games += stats.games;
                 tree_bytes += stats.tree_bytes;
                 pool.remove(id);
@@ -130,7 +135,8 @@ int main(int argc, char** argv) {
         std::cout << "pool " << players << "p threads=" << threads << ": "
                   << total_simulations / seconds << " sims/s, " << grown / searches / 1e6
                   << " MB/tree, " << grown / static_cast<double>(nodes) << " B/node (" << nodes / searches
-                  << " nodes, " << games / searches << " games per tree; tree structure "
+                  << " nodes, " << games / searches << " games, " << linked / searches
+                  << " transpositions per tree; tree structure "
                   << tree_bytes / static_cast<double>(nodes) << " B/node)\n";
         return 0;
     }

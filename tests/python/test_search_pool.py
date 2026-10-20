@@ -199,11 +199,13 @@ def test_search_pool_gumbel_and_determinized_worlds():
     assert pool.policy_target(truth_id).sum() == pytest.approx(1.0)
 
 
-def test_search_pool_buffers_and_reuse():
+@pytest.mark.parametrize("transpositions", [False, True])
+def test_search_pool_buffers_and_reuse(transpositions):
     game, _ = random_game(2, 8, 60)
     codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
     encoder = cpp.FlatObservationEncoder(2, observation_layout())
-    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=40, max_players=2))
+    pool = cpp.SearchPool(
+        codec, encoder, cpp.SearchConfig(simulations=40, max_players=2, transpositions=transpositions))
     search = pool.add(game, 1)
     with pytest.raises(TypeError):
         pool.collect(np.zeros((4, pool.observation_size)), np.zeros(4, dtype=np.int64))  # float64
@@ -238,6 +240,46 @@ def test_search_pool_buffers_and_reuse():
         assert pool.stats(search).simulations == 40
         break
     assert advanced
+
+
+def placements(players: int, seed: int) -> list[cpp.PlayerSetup]:
+    """The pieces of a random initial build phase, as setups to edit."""
+    game = cpp.Game(players, seed=seed)
+    rng = random.Random(seed)
+    while game.is_initial_build_phase:
+        game.execute(rng.choice(game.playable_actions))
+    return [cpp.PlayerSetup(settlements=list(game.player(seat).settlements), roads=list(game.player(seat).roads))
+            for seat in range(players)]
+
+
+def test_search_pool_transpositions():
+    """Red discards four of two wood, two brick, two sheep and two wheat: every
+    order of one multiset of kinds reaches one hand, which the table searches
+    once. Off is the default and links nothing; threads change nothing."""
+    assert cpp.SearchConfig().transpositions is False
+    config = cpp.SearchConfig(simulations=128, max_players=4, transpositions=True)
+    assert config.transpositions and "transpositions=True" in repr(config)
+    players = placements(4, 12)
+    players[0] = cpp.PlayerSetup(settlements=players[0].settlements, roads=players[0].roads,
+                                 resources=(2, 2, 2, 2, 0), discards=4)
+    game = cpp.Game(4, seed=12)
+    game.apply_setup(players, has_rolled=True, prompt=cpp.ActionPrompt.DISCARD)
+    assert game.current_prompt == cpp.ActionPrompt.DISCARD and len(game.playable_actions) == 4
+    codec = cpp.FlatActionCodec(4, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(4, observation_layout())
+    results = {}
+    for transpositions in (False, True):
+        for threads in (1, 4):
+            config = cpp.SearchConfig(simulations=128, max_players=4, transpositions=transpositions, threads=threads)
+            pool = cpp.SearchPool(codec, encoder, config)
+            search = pool.add(game, 5)
+            run(pool, 4, batch=8)
+            stats = pool.stats(search)
+            assert pool.done(search) and pool.visits(search).sum() == 128 == stats.simulations
+            assert (stats.transpositions > 0) == transpositions
+            assert codec.mask(game)[pool.select(search)]
+            results[transpositions, threads] = pool.visits(search).tolist()
+    assert results[True, 1] == results[True, 4] and results[False, 1] == results[False, 4]
 
 
 def test_search_pool_rejected_apply_can_be_retried_or_cancelled():

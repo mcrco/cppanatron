@@ -273,6 +273,13 @@ struct Node {
     std::uint8_t winner{};
     bool expanded{};
     bool pending{};
+    /**
+     * Its visits count simulations that its parent's visits do not: another
+     * edge led here as well (a transposition), or its parent's statistics
+     * were restarted by advance (SearchPool::Impl::extract) after it was
+     * visited. Set only with transpositions.
+     */
+    bool foreign{};
 };
 
 struct Tree {
@@ -633,6 +640,7 @@ struct SearchPool::Impl {
                 }
                 if (same) {
                     ++tree.transpositions;
+                    tree.nodes[found].foreign = true;
                     return found;
                 }
             }
@@ -1432,6 +1440,17 @@ struct SearchPool::Impl {
      * to a node has the same length, so its depth is the same whichever.
      * The action and outcome come from the discovering edge, a decision
      * edge's single drawn outcome included (TreeEdge::outcome).
+     *
+     * The new root's children come from the old graph's depth two, where
+     * links are made, but a root counts each edge's child as that edge's
+     * visits (visits, policy_target, select, root_statistics), so they are
+     * made private, as at a fresh root, where place() never links: a root
+     * edge onto a child an earlier root edge already has builds its own
+     * when next selected, and a child with foreign visits (Node::foreign:
+     * simulations through other parents, cut away now or by an earlier
+     * advance) keeps its subtree but restarts its own visits and values,
+     * and passes the mark on to its children, whose visits its own no
+     * longer count. Each root child then counts only what passed the root.
      */
     Tree extract(Tree& tree, std::uint32_t root) const {
         struct Reached {
@@ -1480,6 +1499,32 @@ struct SearchPool::Impl {
                 result.table.emplace(node.fingerprint, static_cast<std::uint32_t>(result.nodes.size()));
             }
             result.nodes.push_back(std::move(node));
+        }
+        std::vector<std::uint32_t> restarted;
+        const Node& top = result.nodes.front();
+        for (std::uint32_t e = top.first_edge; e < top.first_edge + top.num_edges; ++e) {
+            TreeEdge& edge = result.edges[e];
+            if (edge.child == kNone || !result.nodes[edge.child].foreign) {
+                continue;
+            }
+            if (std::find(restarted.begin(), restarted.end(), edge.child) != restarted.end()) {
+                edge.child = kNone;
+                edge.outcome = kNone;
+                continue;
+            }
+            restarted.push_back(edge.child);
+        }
+        for (const std::uint32_t index : restarted) {
+            Node& child = result.nodes[index];
+            child.visits = 0;
+            child.value_sum = {};
+            // Private from here on: place() never links at depth one.
+            child.foreign = false;
+            for (std::uint32_t e = child.first_edge; e < child.first_edge + child.num_edges; ++e) {
+                if (result.edges[e].child != kNone) {
+                    result.nodes[result.edges[e].child].foreign = true;
+                }
+            }
         }
         return result;
     }

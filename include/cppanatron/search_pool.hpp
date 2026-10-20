@@ -221,7 +221,9 @@ public:
     [[nodiscard]] std::size_t select(std::int64_t id, double temperature = 0.0);
     /**
      * Re-root every world at the child of a deterministic root action and
-     * start a fresh simulation budget, keeping the subtree. Returns false
+     * start a fresh simulation budget, keeping the subtree; with
+     * transpositions the new root's children count only visits that passed
+     * through the new root (SearchConfig::transpositions). Returns false
      * (and changes the search no further) when the action leads to a chance
      * node, a finished game or an unvisited child, and, with
      * determinizations, when the child is another player's decision, was

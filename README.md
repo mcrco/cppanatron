@@ -211,8 +211,12 @@ along the path a simulation took. Links are made below the root's children
 and only between nodes at the same depth (reorderings keep the length), so the
 graph stays acyclic and the root's visit counts stay exact; a match is
 verified with `Game.search_equivalent`. `stats(id).transpositions` counts the
-links; `advance` keeps a linked subtree as a whole. Off (the default) the
-search is the plain tree, visit for visit.
+links; `advance` keeps a linked subtree as a whole but makes the new root's
+children private again: a root edge onto a child an earlier root edge already
+has builds its own, and a child whose visits came partly through other
+parents (or before its parent's statistics restarted) keeps its subtree and
+restarts its own visits and values, so the new root counts each simulation
+once. Off (the default) the search is the plain tree, visit for visit.
 
 Values are per-seat win probabilities (slot 0 = the leaf's player to move);
 each node picks by its own player's value (max^n), which for two players whose

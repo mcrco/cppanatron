@@ -322,6 +322,68 @@ def test_advance_keeps_a_one_kind_steal_refusable_after_re_rooting(transposition
         assert not pool.advance(search, index)
 
 
+def re_rooted_root_visits(game: cpp.Game, actions, config: cpp.SearchConfig, seed: int, tracker: bool):
+    """Search ``game``, then advance along each of ``actions`` (an action, or None for
+    the selected one) and search again. Per advance: the action's visits before it, the
+    new root's child visits right after it and after the new budget."""
+    codec = cpp.FlatActionCodec(4, cpp.MapType.BASE)
+    pool = cpp.SearchPool(codec, cpp.FlatObservationEncoder(4, observation_layout()), config)
+    search = pool.add(game, seed, cpp.HandTracker(game, 0)) if tracker else pool.add(game, seed)
+    run(pool, 4)
+    game = game.copy()
+    counts = []
+    for action in actions:
+        index = pool.select(search) if action is None else codec.index(game, action)
+        retained = int(pool.visits(search)[index])
+        assert retained > 0 and pool.advance(search, index)
+        kept = int(pool.visits(search).sum())
+        run(pool, 4)
+        assert pool.stats(search).simulations == config.simulations
+        game.execute(codec.decode(game, index))
+        assert codec.mask(game)[pool.select(search)]
+        counts.append((retained, kept, int(pool.visits(search).sum())))
+    return counts
+
+
+@pytest.mark.parametrize("transpositions", [False, True])
+def test_advance_keeps_the_root_children_private(transpositions):
+    """A root counts each edge's child as that edge's visits, so place() never links the
+    root's children; after advance the old depth two (where links are made) is the new
+    root's children. Red holds a monopoly and four wood, nobody else holds a card: every
+    monopoly reaches one position, so after a bank trade the five monopolies shared one
+    child (the new root counted it five times, and once more per simulation through it),
+    and a child that the monopoly-then-trade orders reached as well counted their visits
+    too. Now the new root counts only what passed through it: fewer than the action's
+    visits right after the advance, one per simulation after. A discard chain (one
+    discarder's kinds in any order reach one hand), followed advance after advance, shows
+    the second case, and that a child whose statistics restarted passes that on to its
+    children, which its own visits no longer count."""
+    players = placements(4, 3)
+    players[0] = cpp.PlayerSetup(settlements=players[0].settlements, roads=players[0].roads,
+                                 resources=(4, 0, 0, 0, 0), development_cards=(0, 0, 1, 0, 0))
+    game = cpp.Game(4, seed=3)
+    game.apply_setup(players, has_rolled=True)
+    trade = next(a for a in game.playable_actions if a.action_type == cpp.ActionType.MARITIME_TRADE)
+    assert sum(a.action_type == cpp.ActionType.PLAY_MONOPOLY for a in game.playable_actions) == 5
+    for root in (cpp.RootSelection.PUCT, cpp.RootSelection.GUMBEL):
+        config = cpp.SearchConfig(simulations=256, max_players=4, determinizations=1, root=root,
+                                  transpositions=transpositions)
+        [(retained, kept, total)] = re_rooted_root_visits(game, [trade], config, 3, tracker=True)
+        assert kept < retained and total == kept + 256
+
+    config = cpp.SearchConfig(simulations=64, max_players=4, transpositions=transpositions)
+    for hand in ((2, 2, 2, 2, 0), (1, 1, 1, 1, 4)):
+        players = placements(4, 12)
+        players[0] = cpp.PlayerSetup(settlements=players[0].settlements, roads=players[0].roads,
+                                     resources=hand, discards=4)
+        game = cpp.Game(4, seed=12)
+        game.apply_setup(players, has_rolled=True, prompt=cpp.ActionPrompt.DISCARD)
+        for first in game.playable_actions:
+            counts = re_rooted_root_visits(game, [first, None, None], config, 5, tracker=False)
+            for retained, kept, total in counts:
+                assert kept < retained and total == kept + 64
+
+
 def test_search_pool_rejected_apply_can_be_retried_or_cancelled():
     game, _ = random_game(3, 4, 120)
     codec = cpp.FlatActionCodec(3, cpp.MapType.BASE)

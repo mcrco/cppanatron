@@ -234,6 +234,20 @@ public:
      * next reset().
      */
     void step();
+    /**
+     * Side channel for actions the action space does not index (domestic
+     * trades): on the next step() env_index's acting learner row plays
+     * `action` in place of its buffers.actions entry, which is then not
+     * read. That step refuses it before any env moves, like a bad index: on
+     * an idle env, for a colour that is not the seat to move, for an offer
+     * the seat cannot pay or the game refuses (before the roll, a malformed
+     * bundle), and for any other action that is not playable now. The action
+     * counts as the seat's decision and every tracker observes it. The step
+     * consumes it; reset() and start_games drop it.
+     */
+    void set_action(int env_index, const Action& action);
+    /** Drop a pending set_action: the row's buffers.actions entry plays. */
+    void clear_action(int env_index);
     /** Aggregates of the episodes finished since the last call. */
     [[nodiscard]] EpisodeStats pop_stats();
 
@@ -275,6 +289,7 @@ private:
     void for_each_env(void (VecEnv::*method)(int));
     void start_env(int env_index);
     void check_action(int env_index);
+    void check_override(int env_index);
     void step_env(int env_index);
     void start_game(Env& env);
     void play(Env& env, Action action);

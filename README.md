@@ -113,6 +113,12 @@ decisions per seat, so the games played do not depend on `num_envs`, threads
 or finishing order. Random bots draw from a stream seeded per game, and the
 optional `lineup_slot` buffer says who plays each row's seat.
 
+Domestic trades stay outside the action space: a harness agent plays them
+through `env.set_action(e, action)`, which makes env `e`'s acting learner row
+play that `cpp.Action` (an offer, accept, reject, confirm or cancel) on the
+next `step()` instead of its `actions` entry, checked before any env moves and
+counted as the seat's decision; `env.clear_action(e)` drops it.
+
 `trackers=True` keeps a `HandTracker` for every learner seat, fed every
 transition in the env (learner actions, forced moves, bot moves) and the
 seat's own friendly-robber options; `env.tracker(e, seat)` returns a copy for

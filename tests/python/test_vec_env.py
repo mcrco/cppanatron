@@ -686,3 +686,356 @@ def test_actor_critic_encoder_writes_vec_env_rows_and_search_leaves():
     ids = np.zeros(4, dtype=np.int64)
     assert pool.collect(observations, ids) >= 1
     assert np.array_equal(observations[0], encoder.encode(game, game.current_player_index))
+
+
+# ---------------------------------------------------------------- set_action (domestic trades)
+
+
+PLAY_TURN = cpp.ActionPrompt.PLAY_TURN
+DECIDE_TRADE = cpp.ActionPrompt.DECIDE_TRADE
+DECIDE_ACCEPTEES = cpp.ActionPrompt.DECIDE_ACCEPTEES
+
+
+def scheduled(seats: list[str], *, seed: int, num_envs: int = 1, games: int | None = None,
+              turn_limit: int = 60, **options) -> tuple[cpp.VecEnv, dict]:
+    """A schedule-mode VecEnv with one base-map game of `seats` in each of the
+    first `games` envs (all of them by default)."""
+    env = cpp.VecEnv([cpp.Scenario(num_players=len(seats), turn_limit=turn_limit)],
+                     num_envs=num_envs, auto_reset=False, **options)
+    buffers = env.allocate()
+    env.reset()
+    env.start_games([dict(env=e, map=cpp.CatanMap.build(cpp.MapType.BASE, seed + e),
+                          game_seed=seed + e, seats=seats)
+                     for e in range(num_envs if games is None else games)])
+    return env, buffers
+
+
+class Driver:
+    """Steps a VecEnv with a fixed policy (roll; else buy a development card,
+    so a knight in hand makes a pre-roll row a decision; else end the turn,
+    so hands grow and trades come up; else the row's hash choice) and counts
+    each env's decisions per seat the way pop_finished does: one per step a
+    row acted."""
+
+    def __init__(self, env: cpp.VecEnv, buffers: dict):
+        self.env, self.buffers = env, buffers
+        self.offset, (self.size,) = env.encoder.layout()["action_mask"]
+        self.decisions: dict[int, list[int]] = {}
+
+    def policy(self) -> None:
+        """An index for every acting row that has one; a trade prompt (no
+        legal index) is left to set_action."""
+        space = self.env.encoder.action_space
+        for row in np.flatnonzero(self.buffers["acting"]):
+            observation = self.buffers["observations"][row]
+            legal = np.flatnonzero(observation[self.offset: self.offset + self.size])
+            if len(legal) == 0:
+                continue
+            game = self.env.game(int(row) // self.env.max_players)
+            digest = hashlib.blake2b(observation.tobytes(), digest_size=8).digest()
+            self.buffers["actions"][row] = legal[int.from_bytes(digest, "little") % len(legal)]
+            for wanted in (cpp.ActionType.ROLL, cpp.ActionType.BUY_DEVELOPMENT_CARD,
+                           cpp.ActionType.END_TURN):
+                action = next((a for a in game.playable_actions if a.action_type == wanted), None)
+                if action is not None:
+                    self.buffers["actions"][row] = space.index(game, action)
+                    break
+
+    def step(self) -> None:
+        for row in np.flatnonzero(self.buffers["acting"]):
+            e, seat = divmod(int(row), self.env.max_players)
+            counts = self.decisions.setdefault(e, [0] * len(self.env.game(e).colors))
+            counts[seat] += 1
+        self.env.step()
+
+    def until(self, ready, limit: int = 1_000) -> None:
+        for _ in range(limit):
+            if ready():
+                return
+            self.policy()
+            self.step()
+        raise AssertionError("the wanted position never came up")
+
+    def finish(self) -> None:
+        self.until(lambda: not any(self.env.active(e) for e in range(self.env.num_envs)),
+                   limit=20_000)
+
+
+def offers_at(game: cpp.Game) -> list[tuple[int, int, list[int]]]:
+    """Every one-for-one offer the seat to move can pay after its roll, with
+    the other seats holding the asked kind (who may accept); [] elsewhere."""
+    seat = game.current_player_index
+    players = game.players
+    if game.current_prompt != PLAY_TURN or not players[seat].has_rolled:
+        return []
+    return [(give, get, [s for s in range(len(players))
+                         if s != seat and players[s].resources[get] > 0])
+            for give in range(5) for get in range(5)
+            if give != get and players[seat].resources[give] > 0]
+
+
+def bundle(give: int, get: int) -> tuple[int, ...]:
+    counts = [0] * 10
+    counts[give] = 1
+    counts[5 + get] = 1
+    return tuple(counts)
+
+
+def one_for_one(game: cpp.Game, give: int, get: int) -> cpp.Action:
+    return cpp.Action(game.current_color, cpp.ActionType.OFFER_TRADE, bundle(give, get))
+
+
+def answer(game: cpp.Game, accept: bool) -> cpp.Action:
+    wanted = cpp.ActionType.ACCEPT_TRADE if accept else cpp.ActionType.REJECT_TRADE
+    return next(a for a in game.playable_actions if a.action_type == wanted)
+
+
+def forced_moves(game: cpp.Game, turn_limit: int) -> list[cpp.Action]:
+    """Play the game's lone legal actions, as the env does inside a step."""
+    played = []
+    while (game.winning_color is None and game.num_turns < turn_limit
+           and len(game.playable_actions) == 1):
+        played.append(game.playable_actions[0])
+        game.execute(played[-1])
+    return played
+
+
+def test_set_action_plays_a_negotiation_through_the_learner_rows():
+    """An injected offer prompts the learners who can pay (the others' lone
+    REJECT is a forced move inside the env), their answers and the confirm go
+    through the same rows, and only the rows that acted count as decisions."""
+    env, buffers = scheduled(["learner"] * 3, seed=31, turn_limit=40)
+    driver = Driver(env, buffers)
+    encoder = env.encoder
+    mask_offset, (mask_size,) = encoder.layout()["action_mask"]
+    global_offset, _ = encoder.layout()["global"]
+    names = encoder.feature_names("global")
+    assert names[5] == "prompt_decide_trade" and names[6] == "prompt_decide_acceptees"
+
+    def split(offer):
+        give, get, payers = offer
+        return bool(payers) and len(payers) < 2  # one other seat can pay, one cannot
+
+    driver.until(lambda: any(split(o) for o in offers_at(env.game(0))))
+    game = env.game(0)
+    give, get, payers = next(o for o in offers_at(game) if split(o))
+    proposer = game.current_player_index
+    colors = game.colors
+    hands_before = [list(p.resources) for p in game.players]
+    bank_before = game.resource_bank
+    counted_before = list(driver.decisions[0])
+    forced: list[cpp.Action] = []
+    acted = []
+
+    def inject(action: cpp.Action) -> cpp.Game:
+        """Plays `action` in the env and on the copy; returns the copy right
+        after it, before the forced moves the env plays on in the same step."""
+        buffers["actions"][:] = -1  # never read for an overridden row
+        acted.append(game.current_player_index)
+        env.set_action(0, action)
+        driver.step()
+        game.execute(action)
+        post = game.copy()
+        forced.extend(forced_moves(game, 40))
+        assert env.game(0).search_equivalent(game)
+        return post
+
+    def acting_row(prompt_flags: list[int]) -> None:
+        rows = np.flatnonzero(buffers["acting"]).tolist()
+        assert rows == [game.current_player_index]
+        row = buffers["observations"][rows[0]]
+        assert np.array_equal(row, encoder.encode(game, rows[0]))
+        assert not row[mask_offset: mask_offset + mask_size].any()  # no legal index, no no-op
+        assert row[global_offset: global_offset + 7].tolist() == prompt_flags
+        assert len(game.playable_actions) == 2
+
+    inject(one_for_one(game, give, get))
+    acceptees = []
+    while game.current_prompt == DECIDE_TRADE:
+        seat = game.current_player_index
+        acting_row([0, 0, 0, 0, 0, 1, 0])
+        assert seat in payers or seat == proposer  # a seat prompted on its own offer may pay
+        if seat != proposer:
+            acceptees.append(seat)
+        inject(answer(game, accept=seat != proposer))
+    assert acceptees == payers
+    assert forced and all(a.action_type == cpp.ActionType.REJECT_TRADE for a in forced)
+    assert game.current_prompt == DECIDE_ACCEPTEES and game.current_player_index == proposer
+    acting_row([0, 0, 0, 0, 0, 0, 1])
+
+    partner = acceptees[0]
+    # Built in Python, so it names no offering seat; set_action matches the listed one.
+    after = inject(cpp.Action(colors[proposer], cpp.ActionType.CONFIRM_TRADE,
+                              (*bundle(give, get), colors[partner])))
+    assert after.current_prompt == PLAY_TURN and after.current_player_index == proposer
+    assert after.players[proposer].has_rolled
+    expected = [list(hand) for hand in hands_before]
+    expected[proposer][give] -= 1
+    expected[proposer][get] += 1
+    expected[partner][give] += 1
+    expected[partner][get] -= 1
+    assert [list(p.resources) for p in after.players] == expected
+    assert after.resource_bank == bank_before
+
+    negotiation = [0, 0, 0]
+    for seat in acted:
+        negotiation[seat] += 1
+    assert [a - b for a, b in zip(driver.decisions[0], counted_before)] == negotiation
+    assert negotiation[proposer] >= 2 and sum(negotiation) == 2 + len(acceptees) + (
+        proposer in acted[1:-1])
+    driver.finish()
+    (finished,) = env.pop_finished()
+    assert finished["decisions"] == driver.decisions[0]
+
+
+def test_set_action_refusals_leave_every_env_as_it_was():
+    env, buffers = scheduled(["learner"] * 3, seed=5, num_envs=3, games=2, turn_limit=200,
+                             num_threads=2)
+    driver = Driver(env, buffers)
+    space = env.encoder.action_space
+
+    def pre_roll() -> bool:
+        game = env.game(0)
+        player = game.players[game.current_player_index]
+        return game.current_prompt == PLAY_TURN and not player.has_rolled and any(player.resources)
+
+    def post_roll() -> bool:
+        return bool(offers_at(env.game(0)))
+
+    def refused(env_index: int, action: cpp.Action, message: str) -> None:
+        env.set_action(env_index, action)
+        with pytest.raises(ValueError, match=message):
+            env.step()
+        assert all(env.game(e).search_equivalent(games[e]) for e in range(2))
+        assert not env.active(2)
+        env.clear_action(env_index)
+
+    def replayed(e: int, limit: int = 200) -> cpp.Game:
+        """Env e's game after the index step the policy pending in its row."""
+        game = games[e].copy()
+        row = e * env.max_players + game.current_player_index
+        game.execute(space.decode(game, int(buffers["actions"][row])))
+        forced_moves(game, limit)
+        return game
+
+    driver.until(pre_roll)
+    games = [env.game(e) for e in range(2)]
+    game = games[0]
+    seat = game.current_player_index
+    give = next(k for k, n in enumerate(game.players[seat].resources) if n > 0)
+    get = (give + 1) % 5
+    driver.policy()  # env 1's index stays pending through every refusal
+    refused(0, one_for_one(game, give, get), "offer_trade is not playable")  # before the roll
+    refused(0, cpp.Action(game.current_color, cpp.ActionType.REJECT_TRADE, (0,) * 10 + (seat,)),
+            "not playable now")
+    refused(2, one_for_one(game, give, get), "idle env")
+    with pytest.raises(IndexError):
+        env.set_action(3, one_for_one(game, give, get))
+    env.clear_action(2)  # nothing pending is fine
+
+    driver.until(post_roll)
+    games = [env.game(e) for e in range(2)]
+    game = games[0]
+    seat = game.current_player_index
+    give, get, _ = offers_at(game)[0]
+    driver.policy()
+    too_many = list(bundle(give, get))
+    too_many[give] = game.players[seat].resources[give] + 1
+    refused(0, cpp.Action(game.current_color, cpp.ActionType.OFFER_TRADE, tuple(too_many)),
+            "more than the seat holds")
+    refused(0, cpp.Action(game.colors[(seat + 1) % 3], cpp.ActionType.OFFER_TRADE,
+                          bundle(give, get)), "not the seat to move")
+    # Expert labels ignore a pending override.
+    labels = env.expert_actions()
+    env.set_action(0, one_for_one(game, give, get))
+    assert np.array_equal(env.expert_actions(), labels)
+    assert labels[seat] == space.index(game, cpp.value_action(game))
+    # Fixing the action lets the same step go through, env 1 by its index.
+    driver.step()
+    expected = games[0].copy()
+    expected.execute(one_for_one(game, give, get))
+    forced_moves(expected, 200)
+    assert env.game(0).search_equivalent(expected)
+    assert env.game(1).search_equivalent(replayed(1))
+    while env.game(0).current_prompt in (DECIDE_TRADE, DECIDE_ACCEPTEES):
+        env.set_action(0, env.game(0).playable_actions[0])  # REJECT, then CANCEL
+        driver.policy()
+        driver.step()
+
+    # A cleared override leaves the index path alone, even one that would be refused.
+    games = [env.game(e) for e in range(2)]
+    game = games[0]
+    env.set_action(0, cpp.Action(game.current_color, cpp.ActionType.REJECT_TRADE,
+                                 (0,) * 10 + (game.current_player_index,)))
+    env.clear_action(0)
+    driver.policy()
+    driver.step()
+    assert env.game(0).current_prompt not in (DECIDE_TRADE, DECIDE_ACCEPTEES)
+    assert all(env.game(e).search_equivalent(replayed(e)) for e in range(2))
+
+
+def test_trackers_observe_an_injected_negotiation():
+    env, buffers = scheduled(["learner"] * 3, seed=19, turn_limit=60, trackers=True)
+    driver = Driver(env, buffers)
+    driver.until(lambda: any(payers for *_, payers in offers_at(env.game(0))))
+    game = env.game(0)
+    give, get, payers = next(o for o in offers_at(game) if o[2])
+    proposer = game.current_player_index
+    trackers = [env.tracker(0, seat) for seat in range(3)]
+
+    def play(action: cpp.Action) -> None:
+        before = game.copy()
+        game.execute(action)
+        for tracker in trackers:
+            tracker.observe(before, action, game)
+        if game.winning_color is None:
+            trackers[game.current_player_index].observe_options(game, game.playable_actions)
+
+    def inject(action: cpp.Action) -> cpp.Game:
+        env.set_action(0, action)
+        driver.step()
+        play(action)
+        post = game.copy()
+        while game.winning_color is None and len(game.playable_actions) == 1:
+            play(game.playable_actions[0])
+        assert env.game(0).search_equivalent(game)
+        for seat in range(3):
+            assert env.tracker(0, seat) == trackers[seat]
+            assert env.tracker(0, seat).consistent_with(game)
+            env.tracker(0, seat).check_public(game)
+        return post
+
+    inject(one_for_one(game, give, get))
+    while game.current_prompt == DECIDE_TRADE:
+        inject(answer(game, accept=game.current_player_index != proposer))
+    assert game.current_prompt == DECIDE_ACCEPTEES
+    partner = payers[0]
+    held = game.players[partner].resources[give]
+    post = inject(cpp.Action(game.colors[proposer], cpp.ActionType.CONFIRM_TRADE,
+                             (*bundle(give, get), game.colors[partner])))
+    assert post.current_prompt == PLAY_TURN
+    assert post.players[partner].resources[give] == held + 1
+
+
+def test_f_responders_reject_every_injected_offer():
+    """F keeps the listed REJECT (ACCEPT moves no cards until the confirm, so
+    it scores no higher): the step lands back on the proposer's PLAY_TURN with
+    the game as it was, and the offer counts as the proposer's decision."""
+    env, buffers = scheduled(["learner", "F", "F"], seed=23, turn_limit=40)
+    driver = Driver(env, buffers)
+    driver.until(lambda: any(payers for *_, payers in offers_at(env.game(0))))
+    game = env.game(0)
+    give, get, payers = next(o for o in offers_at(game) if o[2])
+    assert payers  # an F that could have accepted
+    buffers["actions"][:] = -1
+    env.set_action(0, one_for_one(game, give, get))
+    driver.step()
+    after = env.game(0)
+    assert after.current_prompt == PLAY_TURN and after.current_player_index == 0
+    assert after.search_equivalent(game)  # a rejected offer restores the state, no RNG moves
+    assert buffers["acting"].tolist() == [1, 0, 0]
+    assert np.array_equal(buffers["observations"][0], env.encoder.encode(after, 0))
+    driver.finish()
+    (finished,) = env.pop_finished()
+    assert finished["decisions"] == driver.decisions[0]
+    assert finished["decisions"][1:] == [0, 0]

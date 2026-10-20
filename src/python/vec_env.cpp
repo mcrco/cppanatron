@@ -409,6 +409,34 @@ void bind_vec_env(nb::module_& module) {
             },
             "Apply the acting rows' actions and advance to the next learner decisions.")
         .def(
+            "set_action",
+            [](PyVecEnv& self, int env_index, const Action& action) {
+                // A Python-built CONFIRM names no offering seat: match the listed one.
+                const Action resolved = self.env.active(env_index)
+                                            ? resolve_playable(self.env.game(env_index), action)
+                                            : action;
+                nb::gil_scoped_release release;
+                self.env.set_action(env_index, resolved);
+            },
+            nb::arg("env_index"), nb::arg("action"),
+            "Play ``action`` (a cpp.Action the action space does not index: an\n"
+            "offer, accept, reject, confirm or cancel of a domestic trade) for env\n"
+            "``env_index``'s acting learner row on the next ``step()`` in place of\n"
+            "its ``actions`` entry, which is then not read. The step refuses it\n"
+            "before any env moves (``ValueError``): an idle env, a colour that is\n"
+            "not the seat to move, an offer the seat cannot pay or the game refuses,\n"
+            "or an action that is not playable now. It counts as the seat's decision\n"
+            "and the trackers observe it; the step consumes it, ``reset`` and\n"
+            "``start_games`` drop it.")
+        .def(
+            "clear_action",
+            [](PyVecEnv& self, int env_index) {
+                nb::gil_scoped_release release;
+                self.env.clear_action(env_index);
+            },
+            nb::arg("env_index"),
+            "Drop a pending ``set_action``: the row's ``actions`` entry plays.")
+        .def(
             "pop_stats",
             [](PyVecEnv& self) {
                 const EpisodeStats stats = self.env.pop_stats();

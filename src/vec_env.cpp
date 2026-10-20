@@ -9,10 +9,12 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 
 #include "cppanatron/random.hpp"
 
@@ -193,6 +195,11 @@ struct VecEnv::Env {
     /** The acting row's decoded action, or why it cannot be played. */
     Action pending;
     std::string refusal;
+    /**
+     * set_action: what the acting row plays on the next step in place of its
+     * buffers.actions entry (domestic trades, which the space does not index).
+     */
+    std::optional<Action> override;
 };
 
 /**
@@ -392,6 +399,14 @@ void VecEnv::step() {
         ready_ = false;
         throw;
     }
+}
+
+void VecEnv::set_action(int env_index, const Action& action) {
+    envs_.at(static_cast<std::size_t>(env_index)).override = action;
+}
+
+void VecEnv::clear_action(int env_index) {
+    envs_.at(static_cast<std::size_t>(env_index)).override.reset();
 }
 
 void VecEnv::start_game(Env& env) {
@@ -627,6 +642,7 @@ void VecEnv::clear_transition(int env_index) {
 
 void VecEnv::start_env(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
+    env.override.reset();
     env.waiting_written.assign(static_cast<std::size_t>(max_players()), false);
     clear_transition(env_index);
     if (config_.auto_reset) {
@@ -644,6 +660,10 @@ void VecEnv::start_env(int env_index) {
 void VecEnv::check_action(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     env.refusal.clear();
+    if (env.override.has_value()) {
+        check_override(env_index);
+        return;
+    }
     if (env.game == nullptr) {
         return;  // idle: no row acts
     }
@@ -671,6 +691,51 @@ void VecEnv::check_action(int env_index) {
     }
 }
 
+void VecEnv::check_override(int env_index) {
+    Env& env = envs_[static_cast<std::size_t>(env_index)];
+    const Action& action = *env.override;
+    const auto refuse = [&](const std::string& why) {
+        env.refusal = "env " + std::to_string(env_index) + ": set_action " + why;
+    };
+    if (env.game == nullptr) {
+        refuse("on an idle env (no row acts)");
+        return;
+    }
+    const Game& game = *env.game;
+    if (action.color != game.current_color()) {
+        refuse("for a colour that is not the seat to move (seat " +
+               std::to_string(game.current_player_index()) + ")");
+        return;
+    }
+    if (action.type == ActionType::offer_trade) {
+        // Game::execute checks an offer's form and moment but never the hand
+        // behind it, and a confirm debits blindly: an unpayable offer would
+        // drive the proposer's hand negative.
+        const auto* trade = std::get_if<DomesticTrade>(&action.value);
+        const auto& hand = game.player(action.color).resources;
+        for (std::size_t i = 0; trade != nullptr && i < hand.size(); ++i) {
+            if (trade->offering[i] > hand[i]) {
+                refuse("offer_trade offers more than the seat holds");
+                return;
+            }
+        }
+        try {
+            Game copy = game;
+            copy.execute(action);
+        } catch (const std::exception& error) {
+            refuse(std::string("offer_trade is not playable: ") + error.what());
+            return;
+        }
+    } else {
+        const auto& playable = game.playable_actions();
+        if (std::find(playable.begin(), playable.end(), action) == playable.end()) {
+            refuse("is not playable now (not among the seat's playable actions)");
+            return;
+        }
+    }
+    env.pending = action;
+}
+
 void VecEnv::step_env(int env_index) {
     Env& env = envs_[static_cast<std::size_t>(env_index)];
     clear_transition(env_index);
@@ -679,6 +744,7 @@ void VecEnv::step_env(int env_index) {
     }
     ++env.seat_decisions[static_cast<std::size_t>(env.game->current_player_index())];
     play(env, env.pending);
+    env.override.reset();
     ++env.decisions;
 
     const std::uint64_t episodes = env.stats.total.episodes;
@@ -737,6 +803,7 @@ void VecEnv::start_games(const std::vector<GameStart>& games) {
             std::iota(slots.begin(), slots.end(), 0);
         }
         clear_transition(start.env);
+        env.override.reset();
         begin_game(env, start.scenario, start.map, start.game_seed, start.seats,
                    std::move(slots), start.bot_seed);
         play_until_learner(start.env);

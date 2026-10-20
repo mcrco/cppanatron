@@ -282,6 +282,46 @@ def test_search_pool_transpositions():
     assert results[True, 1] == results[True, 4] and results[False, 1] == results[False, 4]
 
 
+@pytest.mark.parametrize("transpositions", [False, True])
+def test_advance_keeps_a_one_kind_steal_refusable_after_re_rooting(transpositions):
+    """Red, holding a knight and no resources, plays it and robs Blue, who holds two
+    brick: in a world dealt from Red's tracker the steal has one outcome, so its node
+    is a decision child with a drawn outcome, which a determinized advance refuses
+    (the world's cards drew it, not the real game's: here Blue's real hand could be a
+    brick and an ore). Re-rooting at the knight must keep that outcome on the child
+    (it travels with the edge that discovered it), so the second advance, along the
+    robber move, is refused as well; before, the re-parenting dropped it, the search
+    advanced to a position the real game never reached and selected from its options."""
+    players = placements(4, 21)
+    players[0] = cpp.PlayerSetup(settlements=players[0].settlements, roads=players[0].roads,
+                                 development_cards=(1, 0, 0, 0, 0))
+    players[1] = cpp.PlayerSetup(settlements=players[1].settlements, roads=players[1].roads,
+                                 resources=(0, 2, 0, 0, 0))
+    game = cpp.Game(4, seed=21)
+    game.apply_setup(players, has_rolled=True)
+    knight = cpp.Action(game.current_color, cpp.ActionType.PLAY_KNIGHT_CARD, None)
+    assert knight in game.playable_actions and len(game.playable_actions) == 2
+    codec = cpp.FlatActionCodec(4, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(4, observation_layout())
+    config = cpp.SearchConfig(simulations=64, max_players=4, determinizations=1, transpositions=transpositions)
+    pool = cpp.SearchPool(codec, encoder, config)
+    search = pool.add(game, 9, cpp.HandTracker(game, 0))
+    run(pool, 4)
+    index = codec.index(game, knight)
+    assert pool.visits(search)[index] > 0 and pool.advance(search, index)
+    run(pool, 4)
+    after = game.copy()
+    after.execute(knight)
+    victim = game.colors[1]
+    robberies = [a for a in after.playable_actions
+                 if a.action_type == cpp.ActionType.MOVE_ROBBER and a.value[1] == victim]
+    visits = pool.visits(search)
+    visited = [codec.index(after, a) for a in robberies if visits[codec.index(after, a)] > 0]
+    assert visited
+    for index in visited:
+        assert not pool.advance(search, index)
+
+
 def test_search_pool_rejected_apply_can_be_retried_or_cancelled():
     game, _ = random_game(3, 4, 120)
     codec = cpp.FlatActionCodec(3, cpp.MapType.BASE)

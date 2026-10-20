@@ -234,6 +234,15 @@ struct TreeEdge {
     std::uint32_t action{};
     float prior{};
     std::uint32_t child{kNone};
+    /**
+     * A decision edge whose action has exactly one random outcome (a steal
+     * from a one-kind hand, a purchase from a one-kind deck): its code, else
+     * kNone. The child's position follows it, so when advance re-parents
+     * the child to this edge the outcome travels with it: a determinized
+     * search must still refuse to advance along it (the world's hidden
+     * cards drew it, not the real game's).
+     */
+    std::uint32_t outcome{kNone};
 };
 
 struct Node {
@@ -680,6 +689,7 @@ struct SearchPool::Impl {
                 *next, action, outcome == kNone ? std::nullopt : std::optional<std::uint32_t>(outcome));
             const std::uint64_t fingerprint = fingerprint_of(*next);
             child = place(tree, std::move(next), fingerprint, node, index, outcome);
+            tree.edges[edge].outcome = outcome;
             // A forced position's only child is built; nothing needs it again.
             if (config.release_games && node != 0 && tree.nodes[node].num_edges == 1) {
                 tree.nodes[node].game.reset();
@@ -1420,6 +1430,8 @@ struct SearchPool::Impl {
      * share (transpositions) keeps the one the breadth-first walk found it
      * by, which survives, so game_of can rebuild along parents; every path
      * to a node has the same length, so its depth is the same whichever.
+     * The action and outcome come from the discovering edge, a decision
+     * edge's single drawn outcome included (TreeEdge::outcome).
      */
     Tree extract(Tree& tree, std::uint32_t root) const {
         struct Reached {
@@ -1440,7 +1452,7 @@ struct SearchPool::Impl {
                     remap[child] = static_cast<std::uint32_t>(order.size());
                     order.push_back(
                         {child, static_cast<std::uint32_t>(i), chance ? node.action : tree.edges[e].action,
-                         chance ? tree.edges[e].action : kNone});
+                         chance ? tree.edges[e].action : tree.edges[e].outcome});
                 }
             }
         }

@@ -7,6 +7,10 @@ state digests), and searches over them give the same visits, values and
 tree statistics (chance nodes use the fixed 2d6 odds, and chance outcomes
 coalesce as before).
 
+The games leave the friendly robber off: wt/friendly changes that rule, so a
+friendly-robber game no longer plays as it did at e9f12af, whatever the dice.
+Its own tests pin it.
+
 A change here means seeded results changed: only accept it on purpose.
 """
 
@@ -49,9 +53,9 @@ def play_digest(game: cpp.Game, salt: int, limit: int = 3000) -> tuple[str, int,
 GAMES = {
     "2p base": lambda: cpp.Game(2, seed=5),
     "4p random numbers": lambda: cpp.Game(4, seed=2024, number_placement=cpp.NumberPlacement.RANDOM),
-    "3p friendly robber": lambda: cpp.Game(3, seed=77, friendly_robber=True, vps_to_win=12),
-    "1v1 rules, random dice": lambda: cpp.Game(
-        2, seed=31, rules=cpp.GameRules(vps_to_win=15, discard_limit=9, friendly_robber=True)),
+    "3p, 12 vp": lambda: cpp.Game(3, seed=77, vps_to_win=12),
+    "15 vp, discard above 9, random dice": lambda: cpp.Game(
+        2, seed=31, rules=cpp.GameRules(vps_to_win=15, discard_limit=9)),
 }
 
 GOLDEN_GAMES = {'2p base': ('80a2e422328274a0c2ccf3b6f070ff9d8cfffc0a58b65e94c378558cc08b3088', 1177, 438, 'RED'),
@@ -59,14 +63,14 @@ GOLDEN_GAMES = {'2p base': ('80a2e422328274a0c2ccf3b6f070ff9d8cfffc0a58b65e94c37
                        1141,
                        321,
                        'ORANGE'),
- '3p friendly robber': ('541a8200309fff624979263995e7fa8f959661bd84bd74be14983261b0398a1e',
-                        1403,
-                        420,
-                        'WHITE'),
- '1v1 rules, random dice': ('a4809a69d3973d9325c02e060b82460e596c2e929bc6ae9f3b9db34b2f78c1d9',
-                            1106,
-                            385,
-                            'BLUE')}
+ '3p, 12 vp': ('4ffadf4fcee1ae4502e4c9302a901fa38eccd7d319c6da05687d2113d6dc9623',
+               872,
+               306,
+               'WHITE'),
+ '15 vp, discard above 9, random dice': ('8c4e3794e1ff3ff7165eb37fd70cc810c2c519123a9fe99ab6b00cb4cb95efa3',
+                                         2575,
+                                         1001,
+                                         'BLUE')}
 
 
 def random_position(players: int, seed: int, steps: int, **options):

@@ -822,7 +822,9 @@ void bind_game(nb::module_& module) {
             "pieces in snake order, each seat's newest settlement last).\n"
             "``longest_road_length`` is the length Longest Road was won with\n"
             "(Catanatron's board.road_length; default the holder's). ``dice`` is the\n"
-            "BalancedDice state under BALANCED dice (default: a full deck, no history).\n"
+            "BalancedDice state under BALANCED dice (default: a full deck, no history;\n"
+            "declared during the initial placement, its deck is refilled when the main\n"
+            "phase starts, as OpenHex does).\n"
             "Raises ValueError for positions the rules cannot produce.")
         .def(
             "determinize_development_cards",

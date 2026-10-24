@@ -106,7 +106,8 @@ struct GameSetup {
     std::optional<int> longest_road_length;
     /**
      * The balanced dice (DiceMode::balanced only; its `seats` the game's);
-     * unset: a full deck and no history.
+     * unset: a full deck and no history. Declared at an initial-placement
+     * prompt, its deck is refilled when the main phase starts.
      */
     std::optional<BalancedDice> dice;
 };

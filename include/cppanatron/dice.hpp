@@ -18,8 +18,9 @@ namespace cppanatron {
  *
  *  1. If at most 13 cards remain, the deck is first refilled to all 36. Only
  *     the deck resets: the window, the sevens and the streak carry over. A
- *     game starts with a full deck and no history (OpenHex refills when the
- *     main phase starts; no roll comes before).
+ *     game starts with a full deck and no history, and the deck is refilled
+ *     again when the main phase starts (as OpenHex does; it matters only for
+ *     a dice state declared during the initial placement).
  *  2. Total k in 2..12 weighs w_k = c_k / T * max(0, 1 - 0.34 a_k), with c_k
  *     of the T cards left of total k and a_k the times k is among the last
  *     five totals.

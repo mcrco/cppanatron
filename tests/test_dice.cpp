@@ -414,6 +414,66 @@ void test_positions_declare_and_keep_the_dice() {
     require(redealt.balanced_dice() == played.balanced_dice(), "redeal keeps the dice");
 }
 
+/**
+ * A dice state declared during the initial placement keeps its deck through
+ * the placement, and the main phase starts on a full deck with the window,
+ * the sevens and the streak carried over (OpenHex refills at that point).
+ */
+void test_the_main_phase_starts_on_a_full_deck() {
+    BalancedDice partial = BalancedDice::fresh(2);
+    partial.deck = (std::uint64_t{1} << 20U) - 1U;  // 20 cards: no total above 9
+    partial.recent = {6, 7, 0, 0, 0};
+    partial.recent_count = 2;
+    partial.sevens = {1, 0, 0, 0, 0, 0};
+    partial.streak_player = 0;
+    partial.streak_count = 1;
+    require(partial.remaining() == 20, "a 20-card deck");
+
+    for (ActionPrompt prompt :
+         {ActionPrompt::build_initial_settlement, ActionPrompt::build_initial_road}) {
+        GameSetup setup;
+        setup.players.resize(2);
+        setup.prompt = prompt;
+        if (prompt == ActionPrompt::build_initial_road) {
+            Game placed(seats(2), MapType::base, 6, balanced_rules());
+            placed.execute(placed.playable_actions().front());
+            setup.players[0].settlements = placed.players()[0].settlements;
+        }
+        setup.dice = partial;
+        Game game(seats(2), MapType::base, 6, balanced_rules());
+        game.apply_setup(setup);
+        require(game.balanced_dice() == partial, "the declared state during the placement");
+        while (game.is_initial_build_phase()) {
+            require(game.balanced_dice() == partial, "the placement draws nothing");
+            game.execute(game.playable_actions().front());
+        }
+        BalancedDice expected = partial;
+        expected.deck = BalancedDice::kFullDeck;
+        require(game.balanced_dice() == expected,
+                "the main phase refills the deck and keeps the history");
+        require(game.roll_probabilities(0) == expected.sum_probabilities(0),
+                "the first roll's odds are the full deck's");
+        require(game.roll_probabilities(0)[5] != partial.sum_probabilities(0)[5],
+                "the refill changes the 7's odds here");
+    }
+
+    // Declared in the main phase, a partial deck stays (no refill before 13 left).
+    GameSetup main_setup;
+    main_setup.players.resize(2);
+    Game placed(seats(2), MapType::base, 6, balanced_rules());
+    while (placed.is_initial_build_phase()) {
+        placed.execute(placed.playable_actions().front());
+    }
+    for (std::size_t seat = 0; seat < 2; ++seat) {
+        main_setup.players[seat].settlements = placed.players()[seat].settlements;
+        main_setup.players[seat].roads = placed.players()[seat].roads;
+    }
+    main_setup.dice = partial;
+    Game main_game(seats(2), MapType::base, 6, balanced_rules());
+    main_game.apply_setup(main_setup);
+    require(main_game.balanced_dice() == partial, "a main-phase position keeps its deck");
+}
+
 /** Seat 0: 7, seat 1: 6, seat 0: 7, seat 1: 8, seat 0: 6; seat 1 to roll. */
 Game window_root() {
     Game game(seats(2), MapType::base, 31, balanced_rules());
@@ -554,6 +614,7 @@ int main() {
         test_balanced_games_draw_from_the_state();
         test_replayed_rolls_update_and_refuse();
         test_positions_declare_and_keep_the_dice();
+        test_the_main_phase_starts_on_a_full_deck();
         test_mcts_outcomes_follow_the_state();
         test_search_pool_chance_nodes_follow_the_state();
     } catch (const std::exception& error) {

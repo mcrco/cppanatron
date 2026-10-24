@@ -680,6 +680,11 @@ void Game::apply_build_road(const Action& action) {
         } else if (num_buildings == 2 * num_players) {
             is_initial_build_phase_ = false;
             current_prompt_ = ActionPrompt::play_turn;
+            if (rules_.dice_mode == DiceMode::balanced) {
+                // OpenHex refills the deck when the main phase starts (only the
+                // deck: the window, the sevens and the streak carry over).
+                dice_.deck = BalancedDice::kFullDeck;
+            }
         } else {
             advance_turn(-1);
             current_prompt_ = ActionPrompt::build_initial_settlement;

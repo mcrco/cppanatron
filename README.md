@@ -22,7 +22,10 @@ pieces per player, e.g. the 5–6 player extension's bank of 24 per resource and
 a tile is shielded when an opponent of the mover with at most 2 public victory
 points (buildings and awards, never hidden victory point cards) has a building
 on it; shielded tiles are illegal unless every tile but the robber's is
-shielded, when all are legal. The 5–6 player special building phase is not implemented.
+shielded, when all are legal. A knight's robber is placed on the points before
+the knight's Largest Army award, as OpenHex places it with the knight (a seat
+the knight takes the award from keeps its 2 points for that robber move;
+`Game.largest_army_taken_from`). The 5–6 player special building phase is not implemented.
 
 The engine also includes a policy/value-guided stochastic PUCT implementation.
 It keeps cloned game states, tree traversal, exact dice/development-card/robber

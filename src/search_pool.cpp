@@ -344,6 +344,8 @@ std::uint64_t transposition_key(const Game& game) {
     mix(static_cast<std::uint64_t>(game.completed_turns()));
     mix(static_cast<std::uint64_t>(game.is_initial_build_phase()));
     mix(static_cast<std::uint64_t>(game.free_roads_available()));
+    const auto taken = game.largest_army_taken_from();
+    mix(taken.has_value() ? static_cast<std::uint64_t>(*taken) + 1 : 0);
     const Board& board = game.board();
     for (const auto& [node, building] : board.buildings()) {
         mix(static_cast<std::uint64_t>(node) * 16 + static_cast<std::uint64_t>(building.color) * 2 +
@@ -475,7 +477,8 @@ bool same_public_state(const Game& lhs, const Game& rhs, int observer) {
     if (lhs.resource_bank() != rhs.resource_bank() ||
         lhs.development_cards_remaining() != rhs.development_cards_remaining() ||
         lhs.current_player_index() != rhs.current_player_index() ||
-        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns()) {
+        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns() ||
+        lhs.largest_army_taken_from() != rhs.largest_army_taken_from()) {
         return false;
     }
     for (std::size_t seat = 0; seat < lhs.players().size(); ++seat) {

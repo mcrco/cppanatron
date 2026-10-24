@@ -76,8 +76,9 @@ struct VecEnvConfig {
     /**
      * Keep a HandTracker for every learner seat, fed every transition in the
      * env (the learners' actions, forced moves, bot moves) and the seat's own
-     * options when it is to move (friendly-robber bounds). For determinized
-     * search and belief agents; costs a game copy per transition.
+     * options when it is to move (an inert hook: the engine's legal actions
+     * reveal no hidden cards; see HandTracker::option_events). For
+     * determinized search and belief agents; costs a game copy per transition.
      */
     bool trackers{false};
     /** The trackers' mode (HandTracker); exact keeps the posterior over hidden steals. */

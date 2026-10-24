@@ -130,6 +130,16 @@ public:
     }
     [[nodiscard]] int discard_limit() const noexcept { return discard_limit_; }
     [[nodiscard]] bool friendly_robber() const noexcept { return friendly_robber_; }
+    /**
+     * Under the friendly robber, at the robber prompt of a knight that took
+     * Largest Army from another seat: that seat (unset otherwise, and once the
+     * robber has moved). OpenHex places a knight's robber before it awards
+     * Largest Army, so that seat's tiles are shielded on its points before
+     * the award (2 more than it shows now).
+     */
+    [[nodiscard]] std::optional<int> largest_army_taken_from() const noexcept {
+        return largest_army_taken_from_;
+    }
     [[nodiscard]] const GameRules& rules() const noexcept { return rules_; }
 
     /**
@@ -252,6 +262,7 @@ private:
     bool is_initial_build_phase_{true};
     bool is_discarding_{};
     bool is_moving_knight_{};
+    std::optional<int> largest_army_taken_from_;
     bool is_road_building_{};
     int free_roads_available_{};
     bool is_resolving_trade_{};

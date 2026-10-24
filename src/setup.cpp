@@ -230,6 +230,11 @@ void Game::apply_setup(const GameSetup& setup) {
     if (setup.free_roads > 0 && !setup.has_played_development_card) {
         throw std::invalid_argument("free roads come from a road building card played this turn");
     }
+    if (setup.largest_army_taken_from.has_value() &&
+        (!friendly_robber_ || prompt != ActionPrompt::move_robber || !setup.has_played_development_card)) {
+        throw std::invalid_argument(
+            "largest_army_taken_from is for a knight's robber prompt under the friendly robber");
+    }
 
     // Played from the start, everyone builds a first road in seating order.
     board_.restore(buildings, roads, setup.robber.value_or(board_.robber_coordinate()), colors_);
@@ -257,6 +262,19 @@ void Game::apply_setup(const GameSetup& setup) {
     const auto road_holder =
         resolve_award(setup.longest_road, road_lengths, 5, 1, "Longest Road");
     const auto army_holder = resolve_award(setup.largest_army, knights, 3, 3, "Largest Army");
+    if (setup.largest_army_taken_from.has_value()) {
+        // The knight just played took the award: its former holder trails
+        // the current player by that one knight.
+        const int loser = *setup.largest_army_taken_from;
+        if (loser < 0 || loser >= n || loser == setup.current_player ||
+            army_holder != setup.current_player ||
+            knights[static_cast<std::size_t>(loser)] < 3 ||
+            knights[static_cast<std::size_t>(loser)] !=
+                knights[static_cast<std::size_t>(setup.current_player)] - 1) {
+            throw std::invalid_argument(
+                "largest_army_taken_from must be a seat the current player's last knight took Largest Army from");
+        }
+    }
     board_.set_longest_road_holder(
         road_holder.has_value()
             ? std::optional<Color>(colors_[static_cast<std::size_t>(*road_holder)])
@@ -328,6 +346,7 @@ void Game::apply_setup(const GameSetup& setup) {
     completed_turns_ = setup.completed_turns;
     is_discarding_ = prompt == ActionPrompt::discard;
     is_moving_knight_ = prompt == ActionPrompt::move_robber;
+    largest_army_taken_from_ = setup.largest_army_taken_from;
     is_road_building_ = setup.free_roads > 0;
     free_roads_available_ = setup.free_roads;
     if (initial) {

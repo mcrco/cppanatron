@@ -483,6 +483,11 @@ void bind_game(nb::module_& module) {
         .def_prop_ro("vps_to_win", &Game::victory_points_to_win)
         .def_prop_ro("discard_limit", &Game::discard_limit)
         .def_prop_ro("friendly_robber", &Game::friendly_robber)
+        .def_prop_ro(
+            "largest_army_taken_from", &Game::largest_army_taken_from,
+            "Under the friendly robber, at the robber prompt of a knight that took\n"
+            "Largest Army: the seat it took it from, shielded on its points before\n"
+            "the award (OpenHex places a knight's robber first). None otherwise.")
         .def_prop_ro("rules", &Game::rules, nb::rv_policy::copy)
         .def_prop_ro(
             "resource_bank", [](const Game& game) { return to_tuple(game.resource_bank()); })
@@ -561,7 +566,7 @@ void bind_game(nb::module_& module) {
                bool has_played_development_card, int completed_turns,
                std::optional<int> longest_road, std::optional<int> largest_army,
                ActionPrompt prompt, std::optional<int> acting_player, int free_roads,
-               std::optional<int> longest_road_length) {
+               std::optional<int> longest_road_length, std::optional<int> largest_army_taken_from) {
                 GameSetup setup;
                 setup.players = players;
                 if (robber.has_value()) {
@@ -577,6 +582,7 @@ void bind_game(nb::module_& module) {
                 setup.acting_player = acting_player;
                 setup.free_roads = free_roads;
                 setup.longest_road_length = longest_road_length;
+                setup.largest_army_taken_from = largest_army_taken_from;
                 game.apply_setup(setup);
             },
             nb::arg("players"), nb::kw_only(), nb::arg("robber") = nb::none(),
@@ -585,6 +591,7 @@ void bind_game(nb::module_& module) {
             nb::arg("longest_road") = nb::none(), nb::arg("largest_army") = nb::none(),
             nb::arg("prompt") = ActionPrompt::play_turn, nb::arg("acting_player") = nb::none(),
             nb::arg("free_roads") = 0, nb::arg("longest_road_length") = nb::none(),
+            nb::arg("largest_army_taken_from") = nb::none(),
             "Scenario setup: put a freshly created game into an exact position.\n\n"
             "``players`` holds one PlayerSetup per seat. The bank and deck are the\n"
             "rules' starting counts minus every hand and played card, and the deck\n"
@@ -598,8 +605,11 @@ void bind_game(nb::module_& module) {
             "placement (BUILD_INITIAL_SETTLEMENT/ROAD, its progress read from the\n"
             "pieces in snake order, each seat's newest settlement last).\n"
             "``longest_road_length`` is the length Longest Road was won with\n"
-            "(Catanatron's board.road_length; default the holder's). Raises ValueError\n"
-            "for positions the rules cannot produce.")
+            "(Catanatron's board.road_length; default the holder's).\n"
+            "``largest_army_taken_from`` (friendly robber, MOVE_ROBBER after a knight\n"
+            "that took Largest Army) is the seat it took it from; see\n"
+            "Game.largest_army_taken_from. Raises ValueError for positions the rules\n"
+            "cannot produce.")
         .def(
             "determinize_development_cards",
             [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,

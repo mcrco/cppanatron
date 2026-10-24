@@ -322,6 +322,7 @@ def declare_everything(game: cpp.Game) -> tuple[list[cpp.PlayerSetup], dict]:
         prompt=game.current_prompt,
         free_roads=game.free_roads_available,
         longest_road_length=game.board.longest_road_length if road_holder >= 0 else None,
+        largest_army_taken_from=game.largest_army_taken_from,
     )
     return players, options
 
@@ -339,6 +340,7 @@ def state(game: cpp.Game) -> tuple:
         [(p.settlements, p.cities, sorted(p.roads), p.last_knight_completed_turn,
           p.last_development_card_bought_completed_turn) for p in game.players],
         [game.board.road_components(color) for color in game.colors],
+        game.largest_army_taken_from,
     )
 
 
@@ -444,6 +446,8 @@ def test_road_building_and_discard_prompts_round_trip():
         (dict(prompt=cpp.ActionPrompt.MOVE_ROBBER), "7 or a knight"),
         (dict(prompt=cpp.ActionPrompt.DISCARD, has_rolled=True, acting_player=1), "discard"),
         (dict(prompt=cpp.ActionPrompt.BUILD_INITIAL_SETTLEMENT), "initial placement"),
+        (dict(prompt=cpp.ActionPrompt.MOVE_ROBBER, has_played_development_card=True,
+              largest_army_taken_from=1), "friendly robber"),
     ],
 )
 def test_impossible_prompts_are_rejected(change, message):

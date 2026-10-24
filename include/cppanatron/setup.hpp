@@ -62,7 +62,8 @@ struct PlayerSetup {
  *                             while a road building card is being played
  *   discard                   after a 7: `acting_player` is the first seat
  *                             (in seat order) with `discards` left
- *   move_robber               after a 7 (rolled) or a knight
+ *   move_robber               after a 7 (rolled) or a knight (and see
+ *                             largest_army_taken_from)
  *   build_initial_settlement  the initial placement, its state read from the
  *   build_initial_road        pieces: the seats placed so far in snake order,
  *                             the last of a seat's settlements being its newest
@@ -103,6 +104,13 @@ struct GameSetup {
      * unset: the holder's cached length.
      */
     std::optional<int> longest_road_length;
+    /**
+     * Under the friendly robber, at move_robber after a knight that took
+     * Largest Army: the seat it took the award from, whose tiles are then
+     * shielded on its points before the award (Game::largest_army_taken_from).
+     * Unset: the shields read the points as declared, as after a seven.
+     */
+    std::optional<int> largest_army_taken_from;
 };
 
 }  // namespace cppanatron

@@ -4,11 +4,13 @@
 #include <functional>
 #include <iostream>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cppanatron/board.hpp"
@@ -518,20 +520,33 @@ bool has_building_of(const Game& game, Coordinate coordinate, Color color) {
     return false;
 }
 
+/** Every seat's public victory points now. */
+std::vector<int> public_points(const Game& game) {
+    std::vector<int> points;
+    for (const auto& state : game.players()) {
+        points.push_back(state.victory_points);
+    }
+    return points;
+}
+
 /**
  * OpenHex's friendly robber from public state alone (open-hex
  * engine.py _validate_robber_placement): a tile is shielded when an
  * opponent of the mover with at most 2 public points has a building on it;
  * shielded tiles are off limits unless every candidate is shielded.
+ * `points` are the seats' public points the placement is validated on:
+ * now, or for a knight's robber those before the knight (OpenHex validates
+ * the knight's tile before it awards Largest Army).
  */
-std::set<Coordinate> openhex_friendly_tiles(const Game& game) {
+std::set<Coordinate> openhex_friendly_tiles(const Game& game, const std::vector<int>& points) {
     const Color mover = game.current_color();
     std::set<Coordinate> candidates = robber_candidates(game);
     std::set<Coordinate> allowed;
     for (const Coordinate& coordinate : candidates) {
         bool shielded = false;
-        for (Color color : game.colors()) {
-            shielded = shielded || (color != mover && game.player(color).victory_points <= 2 &&
+        for (std::size_t seat = 0; seat < game.colors().size(); ++seat) {
+            const Color color = game.colors()[seat];
+            shielded = shielded || (color != mover && points[seat] <= 2 &&
                                     has_building_of(game, coordinate, color));
         }
         if (!shielded) {
@@ -539,6 +554,10 @@ std::set<Coordinate> openhex_friendly_tiles(const Game& game) {
         }
     }
     return allowed.empty() ? candidates : allowed;
+}
+
+std::set<Coordinate> openhex_friendly_tiles(const Game& game) {
+    return openhex_friendly_tiles(game, public_points(game));
 }
 
 GameRules friendly_rules(int players) {
@@ -727,8 +746,129 @@ void test_friendly_robber_falls_back_when_every_tile_is_shielded() {
 }
 
 /**
+ * Red plays its fourth knight and takes Largest Army from Blue, which shows
+ * its two settlements and the award: 4 public points before the award, 2
+ * after. OpenHex validates a knight's tile before it awards Largest Army, so
+ * Blue shields nothing and can be robbed. The record clears once the robber
+ * moves, a declared position carries it, and nothing changes under the normal
+ * robber or when the knight takes no award from anyone.
+ */
+void test_friendly_robber_after_a_knight_takes_largest_army() {
+    const std::vector<Color> colors{Color::red, Color::blue};
+    const auto rules_with = [](bool friendly) {
+        GameRules rules = friendly_rules(2);
+        rules.friendly_robber = friendly;
+        return rules;
+    };
+    Game placed(colors, MapType::base, 37, rules_with(true));
+    std::mt19937_64 rng(37);
+    while (placed.is_initial_build_phase()) {
+        const auto& actions = placed.playable_actions();
+        placed.execute(actions[std::uniform_int_distribution<std::size_t>(0, actions.size() - 1)(rng)]);
+    }
+    std::vector<PlayerSetup> seats;
+    for (const auto& state : placed.players()) {
+        PlayerSetup seat;
+        seat.settlements = state.settlements;
+        seat.roads = state.roads;
+        seat.resources = {1, 1, 0, 0, 0};
+        seats.push_back(seat);
+    }
+    // Red to play its fourth knight; Blue holds Largest Army at 3 knights (or has none).
+    const auto before_knight = [&](bool friendly, int blue_knights) {
+        std::vector<PlayerSetup> players = seats;
+        players[0].played_development_cards = {3, 0, 0, 0, 0};
+        players[0].development_cards = {1, 0, 0, 0, 0};
+        players[1].played_development_cards = {blue_knights, 0, 0, 0, 0};
+        GameSetup setup;
+        setup.players = players;
+        setup.has_rolled = true;
+        if (blue_knights == 3) {
+            setup.largest_army = 1;
+        }
+        Game game(colors, MapType::base, 37, rules_with(friendly));
+        game.apply_setup(setup);
+        return game;
+    };
+    const auto robs = [](const Game& game, Color victim) {
+        for (const auto& action : game.playable_actions()) {
+            if (std::get<RobberMove>(action.value).victim == victim) {
+                return std::optional<cppanatron::Action>(action);
+            }
+        }
+        return std::optional<cppanatron::Action>();
+    };
+
+    Game game = before_knight(true, 3);
+    require(game.player(Color::blue).has_army && game.player(Color::blue).victory_points == 4,
+            "Blue holds Largest Army at 4 public points");
+    const std::vector<int> before = public_points(game);
+    game.execute(find_action(game, ActionType::play_knight_card));
+    require(game.current_prompt() == ActionPrompt::move_robber, "the knight's robber");
+    require(game.player(Color::red).has_army && game.player(Color::blue).victory_points == 2,
+            "the knight takes Largest Army: Blue shows 2 points");
+    require(game.largest_army_taken_from() == 1, "taken from Blue");
+    require(robber_tiles(game) == openhex_friendly_tiles(game, before), "OpenHex's rule, on the points before the award");
+    require(robber_tiles(game) == robber_candidates(game), "Blue shielded nothing at 4 points");
+    require(openhex_friendly_tiles(game) != robber_tiles(game), "the points after the award would shield Blue");
+    const auto rob_blue = robs(game, Color::blue);
+    require(rob_blue.has_value(), "Blue can be robbed");
+
+    // A declared copy of this prompt carries the record; without it the shields read the
+    // points as declared (as after a seven), and it is refused where no knight took the award.
+    std::vector<PlayerSetup> after = seats;
+    after[0].played_development_cards = {4, 0, 0, 0, 0};
+    after[1].played_development_cards = {3, 0, 0, 0, 0};
+    GameSetup declared;
+    declared.players = after;
+    declared.has_rolled = true;
+    declared.has_played_development_card = true;
+    declared.prompt = ActionPrompt::move_robber;
+    declared.largest_army_taken_from = 1;
+    Game copy(colors, MapType::base, 37, rules_with(true));
+    copy.apply_setup(declared);
+    require(copy.largest_army_taken_from() == 1 && copy.playable_actions() == game.playable_actions(),
+            "a declared position reproduces the knight's robber moves");
+    declared.largest_army_taken_from.reset();
+    Game seven(colors, MapType::base, 37, rules_with(true));
+    seven.apply_setup(declared);
+    require(robber_tiles(seven) == tiles_without(seven, robber_candidates(seven), Color::blue),
+            "unset, Blue at 2 points is shielded");
+    for (const auto& [taken, friendly] : std::vector<std::pair<int, bool>>{{0, true}, {1, false}}) {
+        declared.largest_army_taken_from = taken;
+        Game refused(colors, MapType::base, 37, rules_with(friendly));
+        bool threw = false;
+        try {
+            refused.apply_setup(declared);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        require(threw, "largest_army_taken_from is validated");
+    }
+
+    game.execute(*rob_blue);
+    require(!game.largest_army_taken_from().has_value() && game.current_prompt() == ActionPrompt::play_turn,
+            "the record clears once the robber moves");
+
+    Game normal = before_knight(false, 3);
+    normal.execute(find_action(normal, ActionType::play_knight_card));
+    require(normal.player(Color::red).has_army && !normal.largest_army_taken_from().has_value(),
+            "the normal robber keeps no record");
+    require(robber_tiles(normal) == robber_candidates(normal), "and shields nothing");
+
+    Game kept = before_knight(true, 0);
+    require(kept.player(Color::red).has_army, "Red already holds Largest Army");
+    kept.execute(find_action(kept, ActionType::play_knight_card));
+    require(!kept.largest_army_taken_from().has_value(), "no award changed hands");
+    require(robber_tiles(kept) == tiles_without(kept, robber_candidates(kept), Color::blue),
+            "Blue at 2 points is shielded");
+    require(!robs(kept, Color::blue).has_value(), "and cannot be robbed");
+}
+
+/**
  * Random 2-4 player games under the friendly robber: at every robber prompt
- * the legal tiles are OpenHex's, and re-dealing a seat's hidden development
+ * the legal tiles are OpenHex's (a knight's on the points before the knight),
+ * and re-dealing a seat's hidden development
  * cards (as many victory point cards as the unseen cards allow, or none)
  * leaves the legal moves as they were.
  */
@@ -741,11 +881,15 @@ void test_random_friendly_games_follow_openhex() {
             const std::vector<Color> colors(cppanatron::kColors.begin(), cppanatron::kColors.begin() + players);
             Game game(colors, MapType::base, seed, friendly_rules(players), cppanatron::NumberPlacement::random);
             std::mt19937_64 rng(seed + 100 * static_cast<std::uint64_t>(players));
+            std::optional<std::vector<int>> knight_points;  // the points before the knight just played
             for (int step = 0; step < 4000 && !game.winning_color().has_value(); ++step) {
                 const auto& actions = game.playable_actions();
                 if (game.current_prompt() == ActionPrompt::move_robber) {
                     ++prompts;
-                    require(robber_tiles(game) == openhex_friendly_tiles(game), "OpenHex's rule in play");
+                    require(robber_tiles(game) == (knight_points.has_value()
+                                                       ? openhex_friendly_tiles(game, *knight_points)
+                                                       : openhex_friendly_tiles(game)),
+                            "OpenHex's rule in play");
                     shielding += robber_tiles(game) != robber_candidates(game);
                     for (Color color : colors) {
                         const auto& hand = game.player(color).development_cards;
@@ -772,7 +916,13 @@ void test_random_friendly_games_follow_openhex() {
                         }
                     }
                 }
-                game.execute(actions[std::uniform_int_distribution<std::size_t>(0, actions.size() - 1)(rng)]);
+                const cppanatron::Action chosen =
+                    actions[std::uniform_int_distribution<std::size_t>(0, actions.size() - 1)(rng)];
+                knight_points.reset();
+                if (chosen.type == ActionType::play_knight_card) {
+                    knight_points = public_points(game);
+                }
+                game.execute(chosen);
             }
         }
     }
@@ -1323,6 +1473,7 @@ int main() {
         test_friendly_robber_spares_no_one_at_three_public_points();
         test_friendly_robber_ignores_hidden_victory_point_cards();
         test_friendly_robber_falls_back_when_every_tile_is_shielded();
+        test_friendly_robber_after_a_knight_takes_largest_army();
         test_random_friendly_games_follow_openhex();
         test_tournament_setup_differential_fixture();
         test_development_card_lifecycle_and_knight();

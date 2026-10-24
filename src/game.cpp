@@ -157,6 +157,7 @@ bool Game::search_equivalent(const Game& other) const noexcept {
            is_initial_build_phase_ == other.is_initial_build_phase_ &&
            is_discarding_ == other.is_discarding_ &&
            is_moving_knight_ == other.is_moving_knight_ &&
+           largest_army_taken_from_ == other.largest_army_taken_from_ &&
            is_road_building_ == other.is_road_building_ &&
            free_roads_available_ == other.free_roads_available_ &&
            is_resolving_trade_ == other.is_resolving_trade_ &&
@@ -314,7 +315,14 @@ std::vector<Action> Game::generate_playable_actions() const {
             // awards; never hidden victory point cards) has a building on
             // it. Shielded tiles are illegal unless every candidate tile is
             // shielded; then all are legal. Public points keep the legal
-            // set free of hidden information.
+            // set free of hidden information. A knight's robber is placed
+            // on the points before the knight's Largest Army award (OpenHex
+            // validates the knight's tile, then awards), so a seat the knight
+            // took the award from still counts its 2 points.
+            const auto public_points = [&](Color owner) {
+                const int points = player(owner).victory_points;
+                return largest_army_taken_from_ == player_index(owner) ? points + 2 : points;
+            };
             for (const Action& action : unfiltered) {
                 const RobberMove& move = std::get<RobberMove>(action.value);
                 const Tile& tile = board_.map().tile_at(move.coordinate);
@@ -325,7 +333,7 @@ std::vector<Action> Game::generate_playable_actions() const {
                         const auto building = board_.buildings().find(node);
                         return building != board_.buildings().end() &&
                                building->second.color != color &&
-                               player(building->second.color).victory_points <= 2;
+                               public_points(building->second.color) <= 2;
                     });
                 if (!shielded) {
                     result.push_back(action);
@@ -859,12 +867,23 @@ void Game::apply_move_robber(
     board_.move_robber(move.coordinate);
     current_prompt_ = ActionPrompt::play_turn;
     is_moving_knight_ = false;
+    largest_army_taken_from_.reset();
 }
 
 void Game::apply_play_knight(const Action& action) {
     consume_development_card(action.color, DevelopmentCard::knight);
     player(action.color).last_knight_completed_turn = completed_turns_;
+    std::optional<int> holder;
+    for (std::size_t i = 0; i < players_.size(); ++i) {
+        if (players_[i].has_army) {
+            holder = static_cast<int>(i);
+        }
+    }
     update_largest_army_award(action.color);
+    if (friendly_robber_ && holder.has_value() &&
+        !players_[static_cast<std::size_t>(*holder)].has_army) {
+        largest_army_taken_from_ = holder;  // read by the robber's shields (see there)
+    }
     current_prompt_ = ActionPrompt::move_robber;
     is_moving_knight_ = true;
 }

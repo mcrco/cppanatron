@@ -888,84 +888,11 @@ void HandTracker::observe_options(const Game& game, const std::vector<Action>& l
 }
 
 std::vector<TrackerEvent> HandTracker::option_events(
-    const Game& game, const std::vector<Action>& legal, int observer) {
-    std::vector<TrackerEvent> events;
-    if (!game.friendly_robber() || game.current_prompt() != ActionPrompt::move_robber ||
-        game.current_player_index() != observer) {
-        return events;
-    }
-    // The engine (like Catanatron) drops tiles with a building of another
-    // seat under 3 actual points, unless that would drop every tile.
-    const Color own = game.colors()[static_cast<std::size_t>(observer)];
-    std::set<Coordinate> allowed;
-    for (const Action& action : legal) {
-        if (action.type == ActionType::move_robber) {
-            allowed.insert(std::get<RobberMove>(action.value).coordinate);
-        }
-    }
-    std::vector<std::vector<int>> tiles;  // other seats' buildings per candidate tile
-    std::vector<bool> tile_allowed;
-    for (const auto& [coordinate, tile_index] : game.board().map().coordinate_to_tile()) {
-        const Tile& tile = game.board().map().tiles().at(static_cast<std::size_t>(tile_index));
-        if (tile.kind != TileKind::land || coordinate == game.board().robber_coordinate()) {
-            continue;
-        }
-        std::vector<int> owners;
-        for (int node : tile.nodes) {
-            const auto building = game.board().buildings().find(node);
-            if (building != game.board().buildings().end() && building->second.color != own) {
-                const int seat = seat_of(game, building->second.color);
-                if (std::find(owners.begin(), owners.end(), seat) == owners.end()) {
-                    owners.push_back(seat);
-                }
-            }
-        }
-        tiles.push_back(std::move(owners));
-        tile_allowed.push_back(allowed.contains(coordinate));
-    }
-    const bool all_allowed = std::all_of(tile_allowed.begin(), tile_allowed.end(), [](bool a) { return a; });
-    const bool some_unowned = std::any_of(
-        tiles.begin(), tiles.end(), [](const std::vector<int>& owners) { return owners.empty(); });
-    if (all_allowed && !some_unowned) {
-        return events;  // nothing dropped, or everything dropped and restored
-    }
-    const int n = static_cast<int>(game.colors().size());
-    std::vector<bool> at_least_three(static_cast<std::size_t>(n));
-    for (std::size_t t = 0; t < tiles.size(); ++t) {
-        if (tile_allowed[t]) {
-            for (int seat : tiles[t]) {
-                at_least_three[static_cast<std::size_t>(seat)] = true;
-            }
-        }
-    }
-    std::vector<bool> under_three(static_cast<std::size_t>(n));
-    for (std::size_t t = 0; t < tiles.size(); ++t) {
-        if (tile_allowed[t]) {
-            continue;
-        }
-        std::vector<int> candidates;
-        for (int seat : tiles[t]) {
-            if (!at_least_three[static_cast<std::size_t>(seat)]) {
-                candidates.push_back(seat);
-            }
-        }
-        if (candidates.size() == 1) {
-            under_three[static_cast<std::size_t>(candidates.front())] = true;
-        }
-    }
-    for (int seat = 0; seat < n; ++seat) {
-        const int points = game.players()[static_cast<std::size_t>(seat)].victory_points;
-        if (seat == observer || points >= 3) {
-            continue;
-        }
-        if (at_least_three[static_cast<std::size_t>(seat)]) {
-            events.push_back(
-                TrackerEvent::victory_point_cards(seat, 3 - points, std::numeric_limits<int>::max()));
-        } else if (under_three[static_cast<std::size_t>(seat)]) {
-            events.push_back(TrackerEvent::victory_point_cards(seat, 0, 2 - points));
-        }
-    }
-    return events;
+    const Game& /*game*/, const std::vector<Action>& /*legal*/, int /*observer*/) {
+    // The engine's legal actions follow public state and the mover's own
+    // cards only: the friendly robber reads public points (OpenHex's rule),
+    // so the robber options bound no hidden victory point cards.
+    return {};
 }
 
 namespace {

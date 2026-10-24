@@ -171,10 +171,12 @@ public:
         const Game& before, const Action& action, const Game& after, int observer);
     /**
      * What the observer's own legal actions in `game` (where it is to move)
-     * reveal. With the friendly robber, Catanatron protects tiles of seats
-     * under 3 actual points, so the robber options bound other seats'
-     * victory point cards. `legal` is the observer's legal action list (a
-     * view's game may not reproduce it); `game` supplies the public board.
+     * reveal about hidden cards: nothing, since the engine's legal actions
+     * follow public state and the mover's own cards (the friendly robber
+     * reads public points, OpenHex's rule; Catanatron's read actual points
+     * and leaked victory point cards). Kept as the hook for a rule whose
+     * options would. `legal` is the observer's legal action list (a view's
+     * game may not reproduce it); `game` supplies the public board.
      */
     [[nodiscard]] static std::vector<TrackerEvent> option_events(
         const Game& game, const std::vector<Action>& legal, int observer);

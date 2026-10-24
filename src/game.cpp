@@ -309,19 +309,25 @@ std::vector<Action> Game::generate_playable_actions() const {
             if (!friendly_robber_) {
                 return unfiltered;
             }
+            // OpenHex's friendly robber: a tile is shielded when an opponent
+            // of the mover with at most 2 public points (buildings and
+            // awards; never hidden victory point cards) has a building on
+            // it. Shielded tiles are illegal unless every candidate tile is
+            // shielded; then all are legal. Public points keep the legal
+            // set free of hidden information.
             for (const Action& action : unfiltered) {
                 const RobberMove& move = std::get<RobberMove>(action.value);
                 const Tile& tile = board_.map().tile_at(move.coordinate);
-                const bool blocks_low_vp_enemy = std::any_of(
+                const bool shielded = std::any_of(
                     tile.nodes.begin(),
                     tile.nodes.end(),
                     [&](int node) {
                         const auto building = board_.buildings().find(node);
                         return building != board_.buildings().end() &&
                                building->second.color != color &&
-                               player(building->second.color).actual_victory_points < 3;
+                               player(building->second.color).victory_points <= 2;
                     });
-                if (!blocks_low_vp_enemy) {
+                if (!shielded) {
                     result.push_back(action);
                 }
             }

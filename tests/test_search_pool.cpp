@@ -513,16 +513,16 @@ void test_edge_cases() {
 }  // namespace
 
 /**
- * Friendly robber: the root player's robber options depend on others' VP
- * cards. Determinized roots must offer exactly the real options, also when
- * the tracker is misled and no world can.
+ * Friendly robber (OpenHex's rule, public points): the root player's robber
+ * options do not depend on others' VP cards, so every determinized root
+ * offers exactly the real options, also when the tracker is misled.
  */
 void test_determinized_roots_offer_the_real_options() {
     GameRules rules;
     rules.friendly_robber = true;
     auto players = random_placements(4, 31);
     players[0].development_cards = {1, 0, 0, 0, 0};
-    players[1].development_cards = {0, 0, 0, 0, 1};  // 2 public points, 3 actual: robbable
+    players[1].development_cards = {0, 0, 0, 0, 1};  // 2 public points, 3 actual: shielded
     players[2].development_cards = {1, 0, 0, 0, 0};
     Game game(seats(4), MapType::base, 31, rules);
     GameSetup setup;
@@ -534,19 +534,23 @@ void test_determinized_roots_offer_the_real_options() {
 
     HandTracker informed(before, 0);
     informed.observe(before, knight, game);
-    // Misled: it believes seat 1 holds no VP card, so every world spares seat 1.
+    // Misled: it believes seat 1 holds no VP card.
     HandTracker misled(before, 0);
     for (const auto& event : HandTracker::events(before, knight, game, 0)) {
-        if (event.type != TrackerEventType::victory_point_cards) {
-            misled.apply(event);
-        }
+        misled.apply(event);
     }
     misled.apply(TrackerEvent::victory_point_cards(1, 0, 0));
 
     const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
     std::vector<std::uint8_t> legal(codec->size());
     codec->mask(game, legal);
+    std::mt19937_64 rng(3);
     for (const HandTracker* tracker : {&informed, &misled}) {
+        for (int i = 0; i < 20; ++i) {
+            std::vector<std::uint8_t> world_legal(codec->size());
+            codec->mask(sample_world(game, *tracker, rng), world_legal);
+            require(world_legal == legal, "every world offers exactly the real options");
+        }
         SearchConfig config;
         config.simulations = 64;
         config.max_players = 4;
@@ -642,6 +646,47 @@ void test_determinized_advance_refuses_monopoly() {
         require(pool.visits(id)[index] > 0, "the monopoly was searched");
         require(pool.advance(id, index) == (determinizations == 0),
                 "only the oracle re-roots through a monopoly");
+    }
+}
+
+/**
+ * Friendly robber (public points): Red's robber options after its knight are
+ * the same in every world, so a determinized search re-roots through the
+ * knight to Red's robber decision like through any own deterministic move.
+ */
+void test_determinized_advance_keeps_the_friendly_robber_prompt() {
+    GameRules rules;
+    rules.friendly_robber = true;
+    auto players = random_placements(4, 12);
+    players[0].development_cards = {1, 0, 0, 0, 0};
+    players[1].development_cards = {0, 0, 0, 0, 1};  // 2 public points, 3 actual
+    players[1].resources = {0, 0, 0, 1, 0};
+    Game game(seats(4), MapType::base, 12, rules);
+    GameSetup setup;
+    setup.players = players;
+    game.apply_setup(setup);
+    const HandTracker tracker(game, 0);
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const std::size_t index = codec->index(game, {Color::red, ActionType::play_knight_card, std::monostate{}});
+    SearchConfig config;
+    config.simulations = 240;
+    config.max_players = 4;
+    config.determinizations = 3;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    const auto id = search_favouring(pool, game, index, &tracker);
+    require(pool.visits(id)[index] > 0, "the knight was searched");
+    require(pool.advance(id, index), "the friendly robber prompt re-roots like any own decision");
+    game.execute({Color::red, ActionType::play_knight_card, std::monostate{}});
+    require(game.current_prompt() == ActionPrompt::move_robber, "Red moves the robber next");
+    std::vector<std::uint8_t> legal(codec->size());
+    codec->mask(game, legal);
+    run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_logits(leaf, logits);
+        std::fill(values.begin(), values.end(), 0.25F);
+    });
+    const auto visits = pool.visits(id);
+    for (std::size_t i = 0; i < visits.size(); ++i) {
+        require(visits[i] == 0 || legal[i] != 0, "the re-rooted search visits only real robber moves");
     }
 }
 
@@ -1152,6 +1197,7 @@ int main() {
         test_determinized_roots_offer_the_real_options();
         test_determinized_advance_refuses_drawn_outcomes();
         test_determinized_advance_refuses_monopoly();
+        test_determinized_advance_keeps_the_friendly_robber_prompt();
         test_failures_leave_the_pool_usable();
         test_searches_spread_over_threads();
         test_tracker_needs_determinizations();

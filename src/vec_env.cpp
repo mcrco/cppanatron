@@ -489,8 +489,8 @@ void VecEnv::play(Env& env, const Action action) {
 }
 
 void VecEnv::observe_options(Env& env) {
-    // What the seat to move learns from its own legal actions (the friendly
-    // robber spares seats under 3 points, bounding their victory point cards).
+    // What the seat to move learns from its own legal actions (nothing hidden
+    // under the engine's rules; see HandTracker::option_events).
     const Game& game = *env.game;
     const auto tracker = env.trackers.find(static_cast<std::size_t>(game.current_player_index()));
     if (tracker != env.trackers.end() && !game.winning_color().has_value()) {

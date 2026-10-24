@@ -1571,10 +1571,8 @@ struct SearchPool::Impl {
         if (search.determinized) {
             const Tree& first = search.worlds.front();
             const Game& reference = game_of(search.worlds.front(), children.front());
-            // Robber options under the friendly robber depend on hidden cards.
-            if (reference.friendly_robber() && reference.current_prompt() == ActionPrompt::move_robber) {
-                return false;
-            }
+            // (Robber options read public points, also under the friendly
+            // robber, so the worlds agree on them like on any option.)
             const Node& expected = first.nodes[children.front()];
             for (std::size_t w = 1; w < search.worlds.size(); ++w) {
                 Tree& tree = search.worlds[w];
@@ -1838,9 +1836,11 @@ std::int64_t SearchPool::add(
                 throw std::invalid_argument("the tracker must follow the player to move");
             }
             search->determinized = true;
-            // The root player knows its own options; they can depend on hidden
-            // cards (the friendly robber spares seats under 3 actual points).
-            // Prefer worlds that offer every real option, and search only those.
+            // The root player knows its own options. Under the engine's rules
+            // they follow public state and its own cards (the friendly robber
+            // reads public points), so every world offers them; should a rule
+            // make them depend on hidden cards, prefer worlds that offer every
+            // real option, and search only those.
             const auto mask_of = [&](const Game& world) {
                 std::vector<std::uint8_t> mask(impl_->codec->size());
                 impl_->codec->mask(world, mask);

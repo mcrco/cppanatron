@@ -541,10 +541,12 @@ void test_victory_point_cap_history() {
 }
 
 /**
- * Friendly robber: the observer's robber options reveal which seats are
- * under 3 actual points. Seat 1 shows 2 points but holds a VP card.
+ * Friendly robber (OpenHex's rule, public points): the observer's robber
+ * options reveal nothing. Seat 1 shows 2 points but holds a VP card; it is
+ * shielded like seat 2, which holds none, and no world the tracker deals
+ * moves the robber options.
  */
-void test_friendly_robber_options_bound_victory_point_cards() {
+void test_friendly_robber_options_reveal_no_victory_point_cards() {
     GameRules rules;
     rules.friendly_robber = true;
     Game game = positioned(4, 31, rules, [](std::vector<PlayerSetup>& players, GameSetup&) {
@@ -553,24 +555,26 @@ void test_friendly_robber_options_bound_victory_point_cards() {
         players[2].development_cards = {1, 0, 0, 0, 0};
     });
     HandTracker tracker(game, 0);
-    require(tracker.victory_point_card_floor(1) == 0, "nothing known before the robber moves");
     const Game before = game;
     const Action knight{Color::red, ActionType::play_knight_card, std::monostate{}};
     game.execute(knight);
+    require(game.current_prompt() == ActionPrompt::move_robber, "the knight moves the robber");
+    require(HandTracker::option_events(game, game.playable_actions(), 0).empty(), "the options reveal nothing");
     tracker.observe(before, knight, game);
-    require(tracker.consistent_with(game), "the bounds hold for the truth");
-    require(tracker.victory_point_card_floor(1) == 1, "seat 1 is robbable, so it holds a VP card");
-    require(tracker.victory_point_card_cap(2) == 0, "seat 2 is spared, so it holds none");
+    require(tracker.consistent_with(game), "the tracker holds the truth");
+    for (int seat = 1; seat < 4; ++seat) {
+        require(tracker.victory_point_card_floor(seat) == 0, "no floor from the robber options");
+    }
+    require(tracker.victory_point_card_cap(1) == tracker.victory_point_card_cap(2),
+            "seats 1 and 2 look alike");
     std::mt19937_64 rng(5);
+    int with_card = 0;
     for (int i = 0; i < 100; ++i) {
         const Game world = sample_world(game, tracker, rng);
-        require(world.players()[1].development_cards[4] == 1, "samples give seat 1 its VP card");
-        require(world.playable_actions() == game.playable_actions(), "samples offer the real robber moves");
+        with_card += world.players()[1].development_cards[4];
+        require(world.playable_actions() == game.playable_actions(), "every world offers the real robber moves");
     }
-    // A tracker started at the robber prompt reads the same options.
-    const HandTracker late(game, 0);
-    require(late.victory_point_card_floor(1) == 1 && late.victory_point_card_cap(2) == 0,
-            "a new tracker reads its options too");
+    require(with_card < 100, "worlds need not give seat 1 its VP card");
 }
 
 
@@ -969,7 +973,7 @@ int main() {
         test_steal_and_monopoly_events();
         test_self_confirmed_trade();
         test_victory_point_cap_history();
-        test_friendly_robber_options_bound_victory_point_cards();
+        test_friendly_robber_options_reveal_no_victory_point_cards();
         test_report_robbery_examples();
         test_report_knight_example();
         test_exact_belief_weights_steals_by_count();

@@ -18,7 +18,11 @@ Army, terminal scoring, the CatanRL flat action table, and the pinned
 `ValueFunctionPlayer` heuristic. `GameRules` sets the
 victory point target, discard limit, friendly robber, bank, development deck and
 pieces per player, e.g. the 5–6 player extension's bank of 24 per resource and
-34-card deck. The 5–6 player special building phase is not implemented.
+34-card deck. The friendly robber is OpenHex's (and differs from Catanatron's):
+a tile is shielded when an opponent of the mover with at most 2 public victory
+points (buildings and awards, never hidden victory point cards) has a building
+on it; shielded tiles are illegal unless every tile but the robber's is
+shielded, when all are legal. The 5–6 player special building phase is not implemented.
 
 The engine also includes a policy/value-guided stochastic PUCT implementation.
 It keeps cloned game states, tree traversal, exact dice/development-card/robber
@@ -121,7 +125,7 @@ counted as the seat's decision; `env.clear_action(e)` drops it.
 
 `trackers=True` keeps a `HandTracker` for every learner seat, fed every
 transition in the env (learner actions, forced moves, bot moves) and the
-seat's own friendly-robber options; `env.tracker(e, seat)` returns a copy for
+seat's own options; `env.tracker(e, seat)` returns a copy for
 `SearchPool.add` and `sample_world`, so determinized search and belief agents
 run on the threaded VecEnv.
 
@@ -157,8 +161,9 @@ bot), public events: `gain`, `lose`, `transfer`, `steal` (resource only if you
 were thief or victim), `monopoly`, `buy_development_card` (card only for
 yourself), `play_development_card`, `end_turn`, `public_victory_points` (after
 every step: victory point cards are capped by the fewest points a seat held
-without winning), and `observe_options(view, legal)` when you are to move (the
-friendly robber's options reveal who is under 3 points). `sample_world(game,
+without winning), and `observe_options(view, legal)` when you are to move (a
+hook: the engine's legal actions reveal nothing hidden, since the friendly
+robber reads public points). `sample_world(game,
 tracker, seed)` deals a full game consistent with that knowledge, never
 reading the hidden cards of `game`; `expected_resources(seat)` gives the mean
 hand.

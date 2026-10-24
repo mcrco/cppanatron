@@ -53,7 +53,7 @@ void bind_tracker(nb::module_& module) {
         .value(
             "VICTORY_POINT_CARDS", TrackerEventType::victory_point_cards,
             "``player`` holds between ``amounts[0]`` and ``amounts[1]`` victory point\n"
-            "cards (from the observer's friendly-robber options).");
+            "cards (a bound learned elsewhere: no engine transition or option implies one).");
 
     nb::class_<TrackerEvent>(
         module, "TrackerEvent",
@@ -168,9 +168,10 @@ void bind_tracker(nb::module_& module) {
         .def_static(
             "option_events", &HandTracker::option_events, nb::arg("game"), nb::arg("legal"),
             nb::arg("observer"),
-            "What the observer's legal actions ``legal`` reveal where it is to move in\n"
-            "``game`` (public board): with the friendly robber, which seats are under\n"
-            "3 actual points, i.e. bounds on their victory point cards.")
+            "What the observer's legal actions ``legal`` reveal about hidden cards where\n"
+            "it is to move in ``game``: nothing, since legal actions follow public state\n"
+            "and the mover's own cards (the friendly robber reads public points, OpenHex's\n"
+            "rule). Kept as the hook for a rule whose options would.")
         .def(
             "observe_options", &HandTracker::observe_options, nb::arg("game"), nb::arg("legal"),
             "Apply ``option_events(game, legal, observer)``; ``observe`` does this itself.\n"

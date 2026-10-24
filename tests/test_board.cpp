@@ -1,8 +1,11 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <numeric>
+#include <random>
+#include <set>
 #include <stdexcept>
 #include <memory>
 #include <string>
@@ -28,6 +31,11 @@ using cppanatron::Game;
 using cppanatron::FlatActionSpace;
 using cppanatron::GameRules;
 using cppanatron::MCTSSearch;
+using cppanatron::Coordinate;
+using cppanatron::GameSetup;
+using cppanatron::PlayerSetup;
+using cppanatron::RobberMove;
+using cppanatron::TileKind;
 
 void require(bool condition, const std::string& message) {
     if (!condition) {
@@ -476,34 +484,299 @@ void test_seven_discard_and_robber_transition() {
     require(game.player(Color::red).has_rolled, "rolling player remains marked rolled");
 }
 
-void test_friendly_robber_filters_low_score_opponents() {
-    Game game(
-        {Color::red, Color::blue},
-        MapType::tournament,
-        37,
-        7,
-        true);
-    while (game.is_initial_build_phase()) {
-        game.execute(game.playable_actions().front());
-    }
-    game.execute(find_action(game, ActionType::roll), Dice{3, 4});
-    require(
-        game.current_prompt() == ActionPrompt::move_robber,
-        "seven without discards moves the robber");
-    require(!game.playable_actions().empty(), "friendly robber has safe destinations");
+// ---- friendly robber (OpenHex's rule) ----------------------------------------
 
+/** The tiles the robber may move to now. */
+std::set<Coordinate> robber_tiles(const Game& game) {
+    std::set<Coordinate> tiles;
     for (const auto& action : game.playable_actions()) {
-        const auto& move = std::get<cppanatron::RobberMove>(action.value);
-        const auto& tile = game.board().map().tile_at(move.coordinate);
-        for (int node : tile.nodes) {
-            const auto building = game.board().buildings().find(node);
-            require(
-                building == game.board().buildings().end() ||
-                    building->second.color == Color::red ||
-                    game.player(building->second.color).actual_victory_points >= 3,
-                "friendly robber cannot block a low-score opponent");
+        require(action.type == ActionType::move_robber, "only robber moves at the robber prompt");
+        tiles.insert(std::get<RobberMove>(action.value).coordinate);
+    }
+    return tiles;
+}
+
+/** Every land tile but the robber's. */
+std::set<Coordinate> robber_candidates(const Game& game) {
+    std::set<Coordinate> tiles;
+    for (const auto& [coordinate, index] : game.board().map().coordinate_to_tile()) {
+        if (game.board().map().tiles().at(static_cast<std::size_t>(index)).kind == TileKind::land &&
+            coordinate != game.board().robber_coordinate()) {
+            tiles.insert(coordinate);
         }
     }
+    return tiles;
+}
+
+bool has_building_of(const Game& game, Coordinate coordinate, Color color) {
+    for (int node : game.board().map().tile_at(coordinate).nodes) {
+        const auto building = game.board().buildings().find(node);
+        if (building != game.board().buildings().end() && building->second.color == color) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * OpenHex's friendly robber from public state alone (open-hex
+ * engine.py _validate_robber_placement): a tile is shielded when an
+ * opponent of the mover with at most 2 public points has a building on it;
+ * shielded tiles are off limits unless every candidate is shielded.
+ */
+std::set<Coordinate> openhex_friendly_tiles(const Game& game) {
+    const Color mover = game.current_color();
+    std::set<Coordinate> candidates = robber_candidates(game);
+    std::set<Coordinate> allowed;
+    for (const Coordinate& coordinate : candidates) {
+        bool shielded = false;
+        for (Color color : game.colors()) {
+            shielded = shielded || (color != mover && game.player(color).victory_points <= 2 &&
+                                    has_building_of(game, coordinate, color));
+        }
+        if (!shielded) {
+            allowed.insert(coordinate);
+        }
+    }
+    return allowed.empty() ? candidates : allowed;
+}
+
+GameRules friendly_rules(int players) {
+    GameRules rules;
+    rules.friendly_robber = true;
+    if (players == 2) {  // OpenHex's 1v1
+        rules.victory_points_to_win = 15;
+        rules.discard_limit = 9;
+    }
+    return rules;
+}
+
+/**
+ * `players` seats placed by a seeded random initial phase, then Red at the
+ * robber prompt after a seven, with `edit` applied to the seats.
+ */
+Game at_friendly_robber(int players, std::uint64_t seed,
+                        const std::function<void(std::vector<PlayerSetup>&)>& edit) {
+    const std::vector<Color> colors(cppanatron::kColors.begin(), cppanatron::kColors.begin() + players);
+    Game placed(colors, MapType::base, seed, friendly_rules(players));
+    std::mt19937_64 rng(seed);
+    while (placed.is_initial_build_phase()) {
+        const auto& actions = placed.playable_actions();
+        placed.execute(actions[std::uniform_int_distribution<std::size_t>(0, actions.size() - 1)(rng)]);
+    }
+    std::vector<PlayerSetup> seats;
+    for (const auto& state : placed.players()) {
+        PlayerSetup seat;
+        seat.settlements = state.settlements;
+        seat.roads = state.roads;
+        seat.resources = {1, 1, 0, 0, 0};
+        seats.push_back(seat);
+    }
+    edit(seats);
+    GameSetup setup;
+    setup.players = seats;
+    setup.has_rolled = true;
+    setup.prompt = ActionPrompt::move_robber;
+    Game game(colors, MapType::base, seed, friendly_rules(players));
+    game.apply_setup(setup);
+    return game;
+}
+
+std::set<Coordinate> tiles_without(const Game& game, const std::set<Coordinate>& tiles, Color color) {
+    std::set<Coordinate> result;
+    for (const Coordinate& coordinate : tiles) {
+        if (!has_building_of(game, coordinate, color)) {
+            result.insert(coordinate);
+        }
+    }
+    return result;
+}
+
+/**
+ * Blue shows 2 points and holds a victory point card (3 actual points): its
+ * tiles are shielded, since the rule reads public points. Red's own tiles
+ * (Red also at 2 points) are never shielded for Red.
+ */
+void test_friendly_robber_shields_low_public_points() {
+    const Game game = at_friendly_robber(2, 37, [](std::vector<PlayerSetup>& seats) {
+        seats[1].development_cards = {0, 0, 0, 0, 1};
+    });
+    const auto& blue = game.player(Color::blue);
+    require(blue.victory_points == 2 && blue.actual_victory_points == 3, "2 public points, 3 actual");
+    const auto candidates = robber_candidates(game);
+    const auto legal = robber_tiles(game);
+    require(legal == tiles_without(game, candidates, Color::blue), "every tile but Blue's is open");
+    require(legal.size() < candidates.size(), "Blue's tiles are candidates");
+    require(legal == openhex_friendly_tiles(game), "OpenHex's rule");
+    bool own_tile = false;
+    for (const Coordinate& coordinate : legal) {
+        own_tile = own_tile || has_building_of(game, coordinate, Color::red);
+    }
+    require(own_tile, "the mover's own tiles stay open");
+    for (const auto& action : game.playable_actions()) {
+        require(std::get<RobberMove>(action.value).victim != Color::blue, "Blue cannot be robbed");
+    }
+}
+
+/** At 3 public points (a city, or an award) a seat is robbable. */
+void test_friendly_robber_spares_no_one_at_three_public_points() {
+    const Game city = at_friendly_robber(2, 37, [](std::vector<PlayerSetup>& seats) {
+        seats[1].cities = {seats[1].settlements.back()};
+        seats[1].settlements.pop_back();
+    });
+    require(city.player(Color::blue).victory_points == 3, "a city and a settlement show 3 points");
+    require(robber_tiles(city) == robber_candidates(city), "every tile is open at 3 public points");
+    bool robs_blue = false;
+    for (const auto& action : city.playable_actions()) {
+        robs_blue = robs_blue || std::get<RobberMove>(action.value).victim == Color::blue;
+    }
+    require(robs_blue, "Blue can be robbed");
+
+    const Game army = at_friendly_robber(2, 37, [](std::vector<PlayerSetup>& seats) {
+        seats[1].played_development_cards = {3, 0, 0, 0, 0};
+    });
+    require(army.player(Color::blue).has_army && army.player(Color::blue).victory_points == 4,
+            "Largest Army is public");
+    require(robber_tiles(army) == robber_candidates(army), "an award counts toward public points");
+}
+
+/** The legal set does not depend on anyone's hidden victory point cards. */
+void test_friendly_robber_ignores_hidden_victory_point_cards() {
+    const std::vector<std::array<int, 3>> deals{{0, 0, 0}, {1, 0, 0}, {0, 2, 1}, {2, 1, 2}, {1, 1, 1}};
+    std::vector<cppanatron::Action> first;
+    for (const auto& deal : deals) {
+        const Game game = at_friendly_robber(4, 52, [&](std::vector<PlayerSetup>& seats) {
+            for (std::size_t seat = 1; seat < 4; ++seat) {
+                seats[seat].development_cards = {1, 0, 0, 0, deal[seat - 1]};
+            }
+        });
+        require(robber_tiles(game) == openhex_friendly_tiles(game), "OpenHex's rule");
+        require(robber_tiles(game) != robber_candidates(game), "the seats at 2 points shield tiles");
+        if (first.empty()) {
+            first = game.playable_actions();
+        }
+        require(game.playable_actions() == first, "the same robber moves whatever the hidden cards");
+    }
+}
+
+/**
+ * Three land tiles (the desert holds the robber): Blue's one settlement
+ * where all three meet shields both candidates, so both are open; on a
+ * node off the wheat tile it shields the ore tile only.
+ */
+void test_friendly_robber_falls_back_when_every_tile_is_shielded() {
+    cppanatron::MapSpec spec;
+    const auto land = [&](Coordinate coordinate, std::optional<Resource> resource, std::optional<int> number) {
+        spec.tiles.push_back({.coordinate = coordinate, .kind = TileKind::land, .resource = resource,
+                              .number = number, .direction = std::nullopt, .port_resource = std::nullopt});
+    };
+    land({0, 0, 0}, std::nullopt, std::nullopt);
+    land({1, -1, 0}, Resource::ore, 8);
+    land({0, -1, 1}, Resource::wheat, 6);
+    const auto map = std::make_shared<const CatanMap>(CatanMap::from_spec(spec));
+    const auto nodes_of = [&](Coordinate coordinate) {
+        const auto& nodes = map->tile_at(coordinate).nodes;
+        return std::set<int>(nodes.begin(), nodes.end());
+    };
+    const auto desert = nodes_of({0, 0, 0});
+    const auto ore = nodes_of({1, -1, 0});
+    const auto wheat = nodes_of({0, -1, 1});
+    const auto far_from = [&](int node) {
+        for (int other : map->land_nodes()) {
+            const auto& near = map->neighbors(node);
+            if (other != node && std::find(near.begin(), near.end(), other) == near.end()) {
+                return other;
+            }
+        }
+        throw std::runtime_error("no node two steps away");
+    };
+    const auto position = [&](int blue_node) {
+        GameSetup setup;
+        setup.players.resize(2);
+        setup.players[0].settlements = {far_from(blue_node)};
+        setup.players[1].settlements = {blue_node};
+        setup.players[1].resources = {0, 0, 0, 1, 0};
+        setup.has_rolled = true;
+        setup.prompt = ActionPrompt::move_robber;
+        Game game({Color::red, Color::blue}, map, 5, friendly_rules(2));
+        game.apply_setup(setup);
+        return game;
+    };
+    int corner = -1;
+    int ore_only = -1;
+    for (int node : ore) {
+        if (desert.contains(node) && wheat.contains(node)) {
+            corner = node;
+        } else if (!wheat.contains(node) && !desert.contains(node)) {
+            ore_only = node;
+        }
+    }
+    require(corner >= 0 && ore_only >= 0, "the three tiles meet at a node");
+
+    const Game shielded = position(corner);
+    require(robber_candidates(shielded) == std::set<Coordinate>{{1, -1, 0}, {0, -1, 1}}, "two candidates");
+    require(robber_tiles(shielded) == robber_candidates(shielded), "every candidate shielded: all open");
+    require(robber_tiles(shielded) == openhex_friendly_tiles(shielded), "OpenHex's fallback");
+    for (const auto& action : shielded.playable_actions()) {
+        require(std::get<RobberMove>(action.value).victim == Color::blue, "and Blue is robbed");
+    }
+
+    const Game partial = position(ore_only);
+    require(robber_tiles(partial) == std::set<Coordinate>{{0, -1, 1}}, "the open tile only");
+    require(robber_tiles(partial) == openhex_friendly_tiles(partial), "OpenHex's rule");
+}
+
+/**
+ * Random 2-4 player games under the friendly robber: at every robber prompt
+ * the legal tiles are OpenHex's, and re-dealing a seat's hidden development
+ * cards (as many victory point cards as the unseen cards allow, or none)
+ * leaves the legal moves as they were.
+ */
+void test_random_friendly_games_follow_openhex() {
+    int prompts = 0;
+    int shielding = 0;
+    int redeals = 0;
+    for (int players = 2; players <= 4; ++players) {
+        for (std::uint64_t seed = 1; seed <= 6; ++seed) {
+            const std::vector<Color> colors(cppanatron::kColors.begin(), cppanatron::kColors.begin() + players);
+            Game game(colors, MapType::base, seed, friendly_rules(players), cppanatron::NumberPlacement::random);
+            std::mt19937_64 rng(seed + 100 * static_cast<std::uint64_t>(players));
+            for (int step = 0; step < 4000 && !game.winning_color().has_value(); ++step) {
+                const auto& actions = game.playable_actions();
+                if (game.current_prompt() == ActionPrompt::move_robber) {
+                    ++prompts;
+                    require(robber_tiles(game) == openhex_friendly_tiles(game), "OpenHex's rule in play");
+                    shielding += robber_tiles(game) != robber_candidates(game);
+                    for (Color color : colors) {
+                        const auto& hand = game.player(color).development_cards;
+                        const int size = std::accumulate(hand.begin(), hand.end(), 0);
+                        if (color == game.current_color() || size == 0) {
+                            continue;
+                        }
+                        std::array<int, 5> unseen = hand;
+                        for (auto card : game.development_deck()) {
+                            ++unseen[static_cast<std::size_t>(card)];
+                        }
+                        for (bool most : {true, false}) {
+                            std::array<int, 5> cards{};
+                            int left = size;
+                            for (std::size_t kind : most ? std::vector<std::size_t>{4, 0, 1, 2, 3}
+                                                         : std::vector<std::size_t>{0, 1, 2, 3, 4}) {
+                                cards[kind] = std::min(left, unseen[kind]);
+                                left -= cards[kind];
+                            }
+                            Game redealt = game;
+                            redealt.determinize_development_cards(color, cards, seed);
+                            require(redealt.playable_actions() == actions, "hidden cards do not move the legal set");
+                            ++redeals;
+                        }
+                    }
+                }
+                game.execute(actions[std::uniform_int_distribution<std::size_t>(0, actions.size() - 1)(rng)]);
+            }
+        }
+    }
+    require(prompts > 300 && shielding > 50 && redeals > 50, "the games exercise the rule");
 }
 
 void test_tournament_setup_differential_fixture() {
@@ -1046,7 +1319,11 @@ int main() {
         test_mcts_reuses_only_deterministic_subtrees();
         test_mcts_canonical_discard_prunes_infeasible_suffixes();
         test_seven_discard_and_robber_transition();
-        test_friendly_robber_filters_low_score_opponents();
+        test_friendly_robber_shields_low_public_points();
+        test_friendly_robber_spares_no_one_at_three_public_points();
+        test_friendly_robber_ignores_hidden_victory_point_cards();
+        test_friendly_robber_falls_back_when_every_tile_is_shielded();
+        test_random_friendly_games_follow_openhex();
         test_tournament_setup_differential_fixture();
         test_development_card_lifecycle_and_knight();
         test_year_of_plenty_and_monopoly();

@@ -41,6 +41,23 @@ void normalize_probabilities(std::vector<ChanceOutcome>& outcomes) {
 std::vector<ChanceOutcome> action_outcomes(const Game& game, const Action& action) {
     std::vector<ChanceOutcome> outcomes;
 
+    if (action.type == ActionType::roll && game.dice_mode() == DiceMode::balanced) {
+        // The deck's own odds; a total stands for the first card of it left
+        // (only totals matter), and totals it cannot roll are left out.
+        const auto roller = static_cast<int>(color_index(game, action.color));
+        const std::array<double, 11> probabilities = game.roll_probabilities(roller);
+        for (int total = 2; total <= 12; ++total) {
+            const double probability = probabilities[static_cast<std::size_t>(total - 2)];
+            if (probability <= 0.0) {
+                continue;
+            }
+            Game next = game;
+            next.execute(action, game.balanced_dice().card_for_total(total));
+            outcomes.push_back({std::move(next), probability});
+        }
+        return outcomes;
+    }
+
     if (action.type == ActionType::roll) {
         constexpr std::array<int, 11> multiplicities{1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1};
         for (int total = 2; total <= 12; ++total) {

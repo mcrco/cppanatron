@@ -2,9 +2,18 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <stdexcept>
 
 namespace cppanatron {
+
+/** How rolls are drawn. */
+enum class DiceMode : std::uint8_t {
+    /** Two independent fair dice per roll (the base game). */
+    random,
+    /** OpenHex's balanced dice (its 1v1 rules), see BalancedDice. */
+    balanced,
+};
 
 /**
  * Rule settings that vary between games. The defaults are the base game's;
@@ -25,6 +34,7 @@ struct GameRules {
     int roads_per_player{15};
     int settlements_per_player{5};
     int cities_per_player{4};
+    DiceMode dice_mode{DiceMode::random};
 
     auto operator<=>(const GameRules&) const = default;
 };
@@ -48,6 +58,9 @@ inline void validate_rules(const GameRules& rules) {
         rules.cities_per_player < 0) {
         throw std::invalid_argument(
             "players need at least two roads and two settlements, and no negative cities");
+    }
+    if (rules.dice_mode != DiceMode::random && rules.dice_mode != DiceMode::balanced) {
+        throw std::invalid_argument("unknown dice mode");
     }
 }
 

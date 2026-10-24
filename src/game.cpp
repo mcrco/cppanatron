@@ -79,6 +79,8 @@ Game::Game(
     if (colors_.empty() || colors_.size() > kColors.size()) {
         throw std::invalid_argument("game requires one to six colors");
     }
+    // A full deck and no history; drawing nothing from random_ keeps random dice as they were.
+    dice_ = BalancedDice::fresh(static_cast<int>(colors_.size()));
     auto unique_colors = colors_;
     std::sort(unique_colors.begin(), unique_colors.end());
     if (std::adjacent_find(unique_colors.begin(), unique_colors.end()) !=
@@ -144,7 +146,7 @@ bool Game::search_equivalent(const Game& other) const noexcept {
            board_.roads() == other.board_.roads() &&
            board_.robber_coordinate() == other.board_.robber_coordinate() &&
            board_.longest_road_color() == other.board_.longest_road_color() &&
-           random_ == other.random_ && rules_ == other.rules_ &&
+           random_ == other.random_ && rules_ == other.rules_ && dice_ == other.dice_ &&
            discard_limit_ == other.discard_limit_ &&
            friendly_robber_ == other.friendly_robber_ &&
            victory_points_to_win_ == other.victory_points_to_win_ &&
@@ -164,6 +166,29 @@ bool Game::search_equivalent(const Game& other) const noexcept {
            current_trade_ == other.current_trade_ && acceptees_ == other.acceptees_ &&
            discard_counts_ == other.discard_counts_ &&
            playable_actions_ == other.playable_actions_;
+}
+
+int Game::next_roller() const noexcept {
+    const auto turn = static_cast<std::size_t>(current_turn_index_);
+    if (!players_[turn].has_rolled) {
+        return current_turn_index_;
+    }
+    return (current_turn_index_ + 1) % static_cast<int>(players_.size());
+}
+
+std::array<double, 11> Game::roll_probabilities(int roller) const {
+    if (roller < 0 || roller >= static_cast<int>(players_.size())) {
+        throw std::invalid_argument("the roller is not a seat");
+    }
+    if (rules_.dice_mode == DiceMode::balanced) {
+        return dice_.sum_probabilities(roller);
+    }
+    std::array<double, 11> result{};
+    constexpr std::array<int, 11> ways{1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1};
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        result[i] = ways[i] / 36.0;
+    }
+    return result;
 }
 
 bool Game::can_afford(Color color, const std::array<int, 5>& cost) const {
@@ -669,6 +694,11 @@ void Game::apply_build_road(const Action& action) {
         } else if (num_buildings == 2 * num_players) {
             is_initial_build_phase_ = false;
             current_prompt_ = ActionPrompt::play_turn;
+            if (rules_.dice_mode == DiceMode::balanced) {
+                // OpenHex refills the deck when the main phase starts (only the
+                // deck: the window, the sevens and the streak carry over).
+                dice_.deck = BalancedDice::kFullDeck;
+            }
         } else {
             advance_turn(-1);
             current_prompt_ = ActionPrompt::build_initial_settlement;
@@ -770,9 +800,18 @@ void Game::yield_resources(int number) {
 }
 
 void Game::apply_roll(const Action& action, std::optional<Dice> replay_dice) {
-    const Dice dice = replay_dice.has_value()
-                          ? *replay_dice
-                          : Dice{random::between(random_, 1, 6), random::between(random_, 1, 6)};
+    Dice dice;
+    if (rules_.dice_mode == DiceMode::balanced) {
+        // A replayed roll updates the deck as if that card had been drawn
+        // (and is refused, changing nothing, if the deck no longer holds it).
+        const int roller = player_index(action.color);
+        dice = replay_dice.has_value() ? *replay_dice : dice_.draw(random_, roller);
+        dice_.apply(dice, roller);
+    } else {
+        dice = replay_dice.has_value()
+                   ? *replay_dice
+                   : Dice{random::between(random_, 1, 6), random::between(random_, 1, 6)};
+    }
     const int number = dice.first + dice.second;
     PlayerState& state = player(action.color);
     state.has_rolled = true;

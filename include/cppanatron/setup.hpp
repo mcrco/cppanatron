@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cppanatron/action.hpp"
+#include "cppanatron/dice.hpp"
 #include "cppanatron/types.hpp"
 
 namespace cppanatron {
@@ -104,6 +105,12 @@ struct GameSetup {
      * unset: the holder's cached length.
      */
     std::optional<int> longest_road_length;
+    /**
+     * The balanced dice (DiceMode::balanced only; its `seats` the game's);
+     * unset: a full deck and no history. Declared at an initial-placement
+     * prompt, its deck is refilled when the main phase starts.
+     */
+    std::optional<BalancedDice> dice;
     /**
      * Under the friendly robber, at move_robber after a knight that took
      * Largest Army: the seat it took the award from, whose tiles are then

@@ -8,6 +8,7 @@ add_library(cppanatron
     src/map.cpp
     src/board.cpp
     src/game.cpp
+    src/dice.cpp
     src/setup.cpp
     src/action_space.cpp
     src/graph_dims.cpp
@@ -59,6 +60,10 @@ if(CPPANATRON_BUILD_TESTS)
     add_executable(cppanatron_search_pool_tests tests/test_search_pool.cpp)
     target_link_libraries(cppanatron_search_pool_tests PRIVATE cppanatron::cppanatron)
     add_test(NAME cppanatron_search_pool_tests COMMAND cppanatron_search_pool_tests)
+
+    add_executable(cppanatron_dice_tests tests/test_dice.cpp)
+    target_link_libraries(cppanatron_dice_tests PRIVATE cppanatron::cppanatron)
+    add_test(NAME cppanatron_dice_tests COMMAND cppanatron_dice_tests)
 
     add_executable(cppanatron_random_tests tests/test_random.cpp)
     target_link_libraries(cppanatron_random_tests PRIVATE cppanatron::cppanatron)

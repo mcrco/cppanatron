@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 
+import numpy as np
 import pytest
 
 import cppanatron as cpp
@@ -279,6 +280,7 @@ catanatron = pytest.importorskip("catanatron")
 
 from map_shapes import SHAPES  # noqa: E402
 
+from cppanatron.catanatron import observation_layout  # noqa: E402
 from cppanatron.parity import CppanatronParityGame  # noqa: E402
 
 
@@ -323,6 +325,7 @@ def declare_everything(game: cpp.Game) -> tuple[list[cpp.PlayerSetup], dict]:
         free_roads=game.free_roads_available,
         longest_road_length=game.board.longest_road_length if road_holder >= 0 else None,
         largest_army_taken_from=game.largest_army_taken_from,
+        dice=game.balanced_dice,
     )
     return players, options
 
@@ -341,6 +344,9 @@ def state(game: cpp.Game) -> tuple:
           p.last_development_card_bought_completed_turn) for p in game.players],
         [game.board.road_components(color) for color in game.colors],
         game.largest_army_taken_from,
+        game.balanced_dice,
+        game.next_roller,
+        game.roll_probabilities(),
     )
 
 
@@ -356,7 +362,11 @@ def step_both(first: cpp.Game, second: cpp.Game, rng: random.Random) -> None:
     """The same random action on both games, with the same chance outcome."""
     action = rng.choice(first.playable_actions)
     forced = {}
-    if action.action_type == cpp.ActionType.ROLL:
+    if action.action_type == cpp.ActionType.ROLL and first.balanced_dice is not None:
+        # A card of the balanced deck: a total drawn with the deck's odds for the roller.
+        total = rng.choices(range(2, 13), weights=first.roll_probabilities())[0]
+        forced["dice"] = first.balanced_dice.card_for_total(total)
+    elif action.action_type == cpp.ActionType.ROLL:
         forced["dice"] = (rng.randint(1, 6), rng.randint(1, 6))
     elif action.action_type == cpp.ActionType.BUY_DEVELOPMENT_CARD:
         deck = deck_left(first)
@@ -369,25 +379,33 @@ def step_both(first: cpp.Game, second: cpp.Game, rng: random.Random) -> None:
     second.execute(action, **forced)
 
 
+#: OpenHex's 1v1 queue rules (catanrl's base-2p-fr): 15 points, discard above 9,
+#: the friendly robber and balanced dice.
+OPENHEX_1V1 = dict(vps_to_win=15, discard_limit=9, friendly_robber=True, dice_mode=cpp.DiceMode.BALANCED)
+
 GAMES = [
-    (2, "BASE", False), (3, "BASE", True), (4, "lake", False), (5, "extension", True),
-    (6, "extension", False), (3, "strip", True),
+    (2, "BASE", dict(friendly_robber=False)), (3, "BASE", dict(friendly_robber=True)),
+    (4, "lake", dict(friendly_robber=False)), (5, "extension", dict(friendly_robber=True)),
+    (6, "extension", dict(friendly_robber=False)), (3, "strip", dict(friendly_robber=True)),
+    (2, "BASE", OPENHEX_1V1), (3, "lake", dict(friendly_robber=True, dice_mode=cpp.DiceMode.BALANCED)),
 ]
 
 
-@pytest.mark.parametrize(("num_players", "map_name", "friendly_robber"), GAMES)
-def test_every_prompt_of_random_games_round_trips(num_players, map_name, friendly_robber):
+@pytest.mark.parametrize(("num_players", "map_name", "rules_kwargs"), GAMES)
+def test_every_prompt_of_random_games_round_trips(num_players, map_name, rules_kwargs):
     """Declaring a game's whole state at any prompt reproduces it exactly
-    (playable actions included), and the two games stay equal when played on
-    with the same actions and chance outcomes."""
+    (playable actions and the balanced dice included), and the two games stay
+    equal when played on with the same actions and chance outcomes."""
     catan_map = (cpp.CatanMap.build(cpp.MapType.BASE, num_players) if map_name == "BASE"
                  else cpp.CatanMap.from_spec(SHAPES[map_name][0](num_players)))
     rules = cpp.GameRules(
-        friendly_robber=friendly_robber, vps_to_win=12,
+        **{"vps_to_win": 12, **rules_kwargs},
         **({"resource_bank": (24,) * 5, "development_deck": (20, 3, 3, 3, 5)}
            if num_players > 4 else {}))
-    rng = random.Random(num_players * 31 + len(map_name))
+    balanced = rules.dice_mode == cpp.DiceMode.BALANCED
+    rng = random.Random(num_players * 31 + len(map_name) + (7 if balanced else 0))
     prompts = set()
+    drawn_decks = 0
     for game_index in range(2):
         game = cpp.Game(num_players, map=catan_map, seed=game_index, rules=rules)
         for step in range(2_500):
@@ -399,6 +417,7 @@ def test_every_prompt_of_random_games_round_trips(num_players, map_name, friendl
                 declared.apply_setup(players, **options)
                 assert state(declared) == state(game), (step, game.current_prompt)
                 prompts.add(game.current_prompt)
+                drawn_decks += balanced and game.balanced_dice.remaining < 36
                 if rng.random() < 0.1:
                     original = game.copy()
                     for _ in range(25):
@@ -409,6 +428,112 @@ def test_every_prompt_of_random_games_round_trips(num_players, map_name, friendl
             game.execute(rng.choice(game.playable_actions))
     assert prompts >= {cpp.ActionPrompt.BUILD_INITIAL_SETTLEMENT, cpp.ActionPrompt.BUILD_INITIAL_ROAD,
                        cpp.ActionPrompt.PLAY_TURN, cpp.ActionPrompt.MOVE_ROBBER}
+    assert drawn_decks > 20 if balanced else drawn_decks == 0
+
+
+def openhex_robber_tiles(game: cpp.Game, points: list[int]) -> set[tuple]:
+    """OpenHex's friendly robber from public state alone (open-hex engine.py
+    _validate_robber_placement): a tile is shielded when an opponent of the mover
+    with at most 2 of ``points`` has a building on it; shielded tiles are off
+    limits unless every tile but the robber's is shielded."""
+    owner = {node: seat for seat, player in enumerate(game.players)
+             for node in [*player.settlements, *player.cities]}
+    mover = game.current_player_index
+    tiles = game.board.map.land_tiles
+    candidates = {c for c in tiles if c != game.board.robber_coordinate}
+    open_tiles = {c for c in candidates
+                  if not any(owner.get(node, mover) != mover and points[owner[node]] <= 2
+                             for node in tiles[c].nodes)}
+    return open_tiles or candidates
+
+
+def robber_tiles(game: cpp.Game) -> set[tuple]:
+    return {a.value[0] for a in game.playable_actions if a.action_type == cpp.ActionType.MOVE_ROBBER}
+
+
+def test_openhex_1v1_a_knight_takes_largest_army_on_balanced_dice():
+    """Both of OpenHex's 1v1 rules at once. Red plays its fourth knight and takes
+    Largest Army from Blue, who shows its two settlements and the award: 4 public
+    points before the award, 2 after. OpenHex validates the knight's tile on the
+    points before the award, so Blue shields nothing. The knight leaves the
+    balanced deck as it was; a declared copy (dice and the record), a world dealt
+    from Red's tracker and searches at the prompt all keep both states."""
+    rules = cpp.GameRules(**OPENHEX_1V1)
+    placed = cpp.Game(2, seed=37, rules=rules)
+    rng = random.Random(37)
+    while placed.is_initial_build_phase:
+        placed.execute(rng.choice(placed.playable_actions))
+    dice = cpp.BalancedDice.fresh(2)
+    for seat, card in [(0, (3, 4)), (1, (2, 2)), (0, (6, 1)), (1, (5, 3))]:
+        dice = dice.apply(card, seat)
+
+    def seat(player: cpp.PlayerState, played: int, held: int) -> cpp.PlayerSetup:
+        return cpp.PlayerSetup(settlements=list(player.settlements), roads=list(player.roads),
+                               resources=(1, 1, 0, 0, 0), played_development_cards=(played, 0, 0, 0, 0),
+                               development_cards=(held, 0, 0, 0, 0))
+
+    game = cpp.Game(2, seed=37, rules=rules)
+    game.apply_setup([seat(placed.player(0), 3, 1), seat(placed.player(1), 3, 0)],
+                     has_rolled=True, largest_army=1, completed_turns=4, dice=dice)
+    assert game.player(1).has_army and game.player(1).victory_points == 4
+    assert game.balanced_dice == dice and game.roll_probabilities() == dice.sum_probabilities(game.next_roller)
+    before = [player.victory_points for player in game.players]
+    tracker = cpp.HandTracker(game, 0)
+    knight = cpp.Action(game.current_color, cpp.ActionType.PLAY_KNIGHT_CARD, None)
+    previous = game.copy()
+    game.execute(knight)
+    tracker.observe(previous, knight, game)
+    now = [player.victory_points for player in game.players]
+    assert game.current_prompt == cpp.ActionPrompt.MOVE_ROBBER
+    assert game.player(0).has_army and now[1] == 2 and game.largest_army_taken_from == 1
+    assert game.balanced_dice == dice
+    tiles = robber_tiles(game)
+    assert tiles == openhex_robber_tiles(game, before), "on the points before the award"
+    opened = tiles - openhex_robber_tiles(game, now)
+    assert opened, "the points after the award would shield Blue's tiles"
+
+    # A declared copy carries both states; without the record, the shields read the
+    # points as declared (as after a seven).
+    players, options = declare_everything(game)
+    declared = cpp.Game(2, seed=99, rules=rules)
+    declared.apply_setup(players, **options)
+    assert state(declared) == state(game)
+    seven = cpp.Game(2, seed=99, rules=rules)
+    seven.apply_setup(players, **{**options, "largest_army_taken_from": None})
+    assert robber_tiles(seven) == openhex_robber_tiles(seven, now) == tiles - opened
+    assert seven.balanced_dice == dice
+
+    world = cpp.sample_world(game, tracker, seed=3)
+    assert world.largest_army_taken_from == 1 and world.balanced_dice == dice
+    assert world.playable_actions == game.playable_actions
+
+    # Searches at the prompt: a move only the record opens is searched, every visit
+    # is legal, every leaf plays both rules, and a search repeats exactly.
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    target = codec.index(game, next(a for a in game.playable_actions if a.value[0] in opened))
+    legal = codec.mask(game).astype(bool)
+
+    def search(config: cpp.SearchConfig) -> np.ndarray:
+        pool = cpp.SearchPool(codec, encoder, config)
+        search_id = pool.add(game, 5, tracker) if config.determinizations else pool.add(game, 5)
+        observations = np.zeros((8, pool.observation_size), dtype=np.float32)
+        ids = np.zeros(8, dtype=np.int64)
+        while n := pool.collect(observations, ids):
+            for row in range(n):
+                assert pool.pending_game(row).rules == rules
+            logits = np.zeros((n, pool.action_size), dtype=np.float32)
+            logits[:, target] = 4.0
+            pool.apply(logits, np.full((n, 2), 0.5, dtype=np.float32))
+        return pool.visits(search_id)
+
+    for config in [
+        cpp.SearchConfig(simulations=64, max_players=2, root=cpp.RootSelection.GUMBEL, determinizations=2),
+        cpp.SearchConfig(simulations=64, max_players=2, transpositions=True, max_pending=4),
+    ]:
+        visits = search(config)
+        assert visits.sum() == 64 and not visits[~legal].any() and visits[target] > 0
+        np.testing.assert_array_equal(search(config), visits)
 
 
 def test_road_building_and_discard_prompts_round_trip():

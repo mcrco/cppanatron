@@ -9,6 +9,7 @@
 
 #include "cppanatron/action.hpp"
 #include "cppanatron/board.hpp"
+#include "cppanatron/dice.hpp"
 #include "cppanatron/rules.hpp"
 #include "cppanatron/setup.hpp"
 
@@ -131,6 +132,23 @@ public:
     [[nodiscard]] int discard_limit() const noexcept { return discard_limit_; }
     [[nodiscard]] bool friendly_robber() const noexcept { return friendly_robber_; }
     [[nodiscard]] const GameRules& rules() const noexcept { return rules_; }
+    [[nodiscard]] DiceMode dice_mode() const noexcept { return rules_.dice_mode; }
+    /**
+     * The balanced dice between two rolls (DiceMode::balanced). Under random
+     * dice it stays a fresh deck and plays no part.
+     */
+    [[nodiscard]] const BalancedDice& balanced_dice() const noexcept { return dice_; }
+    /**
+     * The seat that rolls next: the turn owner until it has rolled, then the
+     * next seat in turn order.
+     */
+    [[nodiscard]] int next_roller() const noexcept;
+    /**
+     * P(next total = 2..12) when the seat `roller` rolls: 2d6 under random
+     * dice, the balanced dice's distribution otherwise. Search chance nodes
+     * use exactly these.
+     */
+    [[nodiscard]] std::array<double, 11> roll_probabilities(int roller) const;
 
     /**
      * Scenario setup: overwrite a player's resource hand.
@@ -239,6 +257,8 @@ private:
     Board board_;
     std::mt19937_64 random_;
     GameRules rules_;
+    /** Public balanced-dice state; changes only under DiceMode::balanced. */
+    BalancedDice dice_;
     int discard_limit_{};
     bool friendly_robber_{};
     int victory_points_to_win_{};

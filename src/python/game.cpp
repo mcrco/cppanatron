@@ -103,6 +103,25 @@ Vector<bool> action_mask(const FlatActionSpace& space, const Game& game) {
     return Vector<bool>(legal, {space.size()}, owner);
 }
 
+nb::tuple card_to_python(Dice dice) { return nb::make_tuple(dice.first, dice.second); }
+
+Dice card_from_python(const std::array<int, 2>& card) { return Dice{card[0], card[1]}; }
+
+nb::list cards_to_python(std::uint64_t cards) {
+    nb::list result;
+    for (int bit = 0; bit < 36; ++bit) {
+        if ((cards >> static_cast<unsigned>(bit) & 1U) != 0) {
+            result.append(card_to_python(BalancedDice::card_of_bit(bit)));
+        }
+    }
+    return result;
+}
+
+int seat_of(const Game& game, Color color) {
+    const auto& colors = game.colors();
+    return static_cast<int>(std::find(colors.begin(), colors.end(), color) - colors.begin());
+}
+
 }  // namespace
 
 GameRules resolve_rules(
@@ -125,6 +144,177 @@ GameRules resolve_rules(
 }
 
 void bind_game(nb::module_& module) {
+    nb::enum_<DiceMode>(
+        module, "DiceMode",
+        "How rolls are drawn: RANDOM, two fair dice (the base game), or BALANCED,\n"
+        "OpenHex's balanced dice (its 1v1 rules, see BalancedDice).")
+        .value("RANDOM", DiceMode::random)
+        .value("BALANCED", DiceMode::balanced);
+
+    nb::class_<BalancedDice>(
+        module, "BalancedDice",
+        "OpenHex's balanced dice between two rolls; all of it is public.\n\n"
+        "A 36-card deck of (die1, die2) pairs, refilled before a draw when at most 13\n"
+        "cards remain (only the deck resets). Total k weighs (cards of k left) *\n"
+        "max(0, 1 - 0.34 * its appearances among the last five totals); with two or\n"
+        "more seats the 7's weight is multiplied by clamp(imbalance + streak, 0, 2):\n"
+        "streak 0.4 per 7 in the current run of 7s, negative if the roller owns it;\n"
+        "imbalance 1 + (1/n - share of the 7s the roller rolled) * n once the 7s so\n"
+        "far reach the n seats, else 1. The card is uniform within its total.\n"
+        "Seats index turn order; a roller of None applies no seven balancing.")
+        .def(
+            "__init__",
+            [](BalancedDice* self, const std::vector<int>& sevens,
+               std::optional<std::vector<std::array<int, 2>>> deck, const std::vector<int>& recent,
+               std::optional<int> streak_player, int streak_count) {
+                if (sevens.empty() || sevens.size() > static_cast<std::size_t>(BalancedDice::kMaxSeats)) {
+                    throw std::invalid_argument("sevens needs one count per seat, one to six seats");
+                }
+                if (recent.size() > static_cast<std::size_t>(BalancedDice::kWindow)) {
+                    throw std::invalid_argument("balanced dice remember at most five totals");
+                }
+                BalancedDice dice;
+                dice.seats = static_cast<int>(sevens.size());
+                std::copy(sevens.begin(), sevens.end(), dice.sevens.begin());
+                if (deck.has_value()) {
+                    dice.deck = 0;
+                    for (const auto& card : *deck) {
+                        const std::uint64_t bit = std::uint64_t{1}
+                            << static_cast<unsigned>(BalancedDice::card_bit(card_from_python(card)));
+                        if ((dice.deck & bit) != 0) {
+                            throw std::invalid_argument("the deck holds each card once");
+                        }
+                        dice.deck |= bit;
+                    }
+                }
+                for (int total : recent) {
+                    if (total < 2 || total > 12) {
+                        throw std::invalid_argument("balanced dice recent totals must be in [2, 12]");
+                    }
+                    dice.recent[static_cast<std::size_t>(dice.recent_count++)] =
+                        static_cast<std::int8_t>(total);
+                }
+                dice.streak_player = streak_player.value_or(-1);
+                dice.streak_count = streak_count;
+                dice.validate();
+                new (self) BalancedDice(dice);
+            },
+            nb::kw_only(), nb::arg("sevens") = std::vector<int>{0, 0}, nb::arg("deck") = nb::none(),
+            nb::arg("recent") = std::vector<int>{}, nb::arg("streak_player") = nb::none(),
+            nb::arg("streak_count") = 0,
+            "``sevens``: 7s rolled per seat (one entry per seat). ``deck``: the (die1,\n"
+            "die2) cards left (default all 36). ``recent``: the last five totals or\n"
+            "fewer, oldest first. ``streak_player``/``streak_count``: the seat owning\n"
+            "the current run of 7s and its length (None and 0 for none).")
+        .def_static(
+            "fresh", &BalancedDice::fresh, nb::arg("seats"),
+            "The state at the start of the main phase: a full deck, no history.")
+        .def_ro("seats", &BalancedDice::seats)
+        .def_prop_ro(
+            "deck", [](const BalancedDice& dice) { return cards_to_python(dice.deck); },
+            "The cards left, as sorted (die1, die2) pairs (before any refill).")
+        .def_prop_ro("remaining", &BalancedDice::remaining, "Cards left (before any refill).")
+        .def_prop_ro(
+            "drawable", [](const BalancedDice& dice) { return cards_to_python(dice.drawable()); },
+            "The cards the next draw takes from: all 36 when it refills first.")
+        .def_prop_ro(
+            "counts", [](const BalancedDice& dice) { return to_tuple(dice.counts()); },
+            "Cards per total 2..12 in ``drawable``.")
+        .def_prop_ro(
+            "recent",
+            [](const BalancedDice& dice) {
+                nb::list totals;
+                for (int i = 0; i < dice.recent_count; ++i) {
+                    totals.append(static_cast<int>(dice.recent[static_cast<std::size_t>(i)]));
+                }
+                return nb::tuple(totals);
+            },
+            "The last five totals or fewer, oldest first.")
+        .def_prop_ro(
+            "sevens",
+            [](const BalancedDice& dice) {
+                nb::list counts;
+                for (int seat = 0; seat < dice.seats; ++seat) {
+                    counts.append(dice.sevens[static_cast<std::size_t>(seat)]);
+                }
+                return nb::tuple(counts);
+            },
+            "7s rolled per seat.")
+        .def_prop_ro(
+            "streak_player",
+            [](const BalancedDice& dice) {
+                return dice.streak_player < 0 ? std::nullopt : std::optional<int>(dice.streak_player);
+            })
+        .def_ro("streak_count", &BalancedDice::streak_count)
+        .def(
+            "seven_multiplier",
+            [](const BalancedDice& dice, std::optional<int> roller) {
+                const auto [numerator, denominator] = dice.seven_multiplier(roller.value_or(-1));
+                return nb::make_tuple(numerator, denominator);
+            },
+            nb::arg("roller") = nb::none(),
+            "The factor on the 7's weight when ``roller`` rolls, as an exact fraction\n"
+            "``(numerator, denominator)``.")
+        .def(
+            "sum_weights",
+            [](const BalancedDice& dice, std::optional<int> roller) {
+                return to_tuple(dice.sum_weights(roller.value_or(-1)));
+            },
+            nb::arg("roller") = nb::none(),
+            "Integer weights of totals 2..12, proportional to their probabilities.")
+        .def(
+            "sum_probabilities",
+            [](const BalancedDice& dice, std::optional<int> roller) {
+                return to_tuple(dice.sum_probabilities(roller.value_or(-1)));
+            },
+            nb::arg("roller") = nb::none(), "P(next total = 2..12) when ``roller`` rolls.")
+        .def(
+            "can_draw",
+            [](const BalancedDice& dice, const std::array<int, 2>& card) {
+                return dice.can_draw(card_from_python(card));
+            },
+            nb::arg("dice"), "Whether the next draw can be this (die1, die2) card.")
+        .def(
+            "card_for_total",
+            [](const BalancedDice& dice, int total) { return card_to_python(dice.card_for_total(total)); },
+            nb::arg("total"),
+            "The first card of ``total`` left to draw (faces ascending): the card a\n"
+            "search outcome coded by its total draws.")
+        .def(
+            "apply",
+            [](const BalancedDice& dice, const std::array<int, 2>& card, std::optional<int> roller) {
+                BalancedDice next = dice;
+                next.apply(card_from_python(card), roller.value_or(-1));
+                return next;
+            },
+            nb::arg("dice"), nb::arg("roller") = nb::none(),
+            "The state after ``roller`` draws the (die1, die2) card; this one is\n"
+            "unchanged. Raises ValueError for a card no longer in the deck.")
+        .def("copy", [](const BalancedDice& dice) { return BalancedDice(dice); })
+        .def("__copy__", [](const BalancedDice& dice) { return BalancedDice(dice); })
+        .def("__deepcopy__", [](const BalancedDice& dice, nb::handle) { return BalancedDice(dice); },
+             nb::arg("memo"))
+        .def(
+            "__eq__", [](const BalancedDice& lhs, const BalancedDice& rhs) { return lhs == rhs; },
+            nb::is_operator())
+        .def("__repr__", [](const BalancedDice& dice) {
+            nb::list sevens;
+            nb::list recent;
+            for (int seat = 0; seat < dice.seats; ++seat) {
+                sevens.append(dice.sevens[static_cast<std::size_t>(seat)]);
+            }
+            for (int i = 0; i < dice.recent_count; ++i) {
+                recent.append(static_cast<int>(dice.recent[static_cast<std::size_t>(i)]));
+            }
+            return nb::str(
+                       "BalancedDice(remaining={}, recent={}, sevens={}, streak_player={}, "
+                       "streak_count={})")
+                .format(
+                    dice.remaining(), nb::tuple(recent), nb::tuple(sevens),
+                    dice.streak_player < 0 ? nb::object(nb::none()) : nb::object(nb::int_(dice.streak_player)),
+                    dice.streak_count);
+        });
+
     const GameRules defaults;
     nb::class_<GameRules>(
         module, "GameRules",
@@ -134,7 +324,8 @@ void bind_game(nb::module_& module) {
             "__init__",
             [](GameRules* self, int vps_to_win, int discard_limit, bool friendly_robber,
                const std::array<int, 5>& resource_bank, const std::array<int, 5>& development_deck,
-               int roads_per_player, int settlements_per_player, int cities_per_player) {
+               int roads_per_player, int settlements_per_player, int cities_per_player,
+               DiceMode dice_mode) {
                 GameRules rules;
                 rules.victory_points_to_win = vps_to_win;
                 rules.discard_limit = discard_limit;
@@ -144,6 +335,7 @@ void bind_game(nb::module_& module) {
                 rules.roads_per_player = roads_per_player;
                 rules.settlements_per_player = settlements_per_player;
                 rules.cities_per_player = cities_per_player;
+                rules.dice_mode = dice_mode;
                 validate_rules(rules);
                 new (self) GameRules(rules);
             },
@@ -154,7 +346,8 @@ void bind_game(nb::module_& module) {
             nb::arg("development_deck") = defaults.development_deck,
             nb::arg("roads_per_player") = defaults.roads_per_player,
             nb::arg("settlements_per_player") = defaults.settlements_per_player,
-            nb::arg("cities_per_player") = defaults.cities_per_player)
+            nb::arg("cities_per_player") = defaults.cities_per_player,
+            nb::arg("dice_mode") = defaults.dice_mode)
         .def_ro("vps_to_win", &GameRules::victory_points_to_win)
         .def_ro("discard_limit", &GameRules::discard_limit)
         .def_ro("friendly_robber", &GameRules::friendly_robber)
@@ -168,19 +361,22 @@ void bind_game(nb::module_& module) {
         .def_ro("roads_per_player", &GameRules::roads_per_player)
         .def_ro("settlements_per_player", &GameRules::settlements_per_player)
         .def_ro("cities_per_player", &GameRules::cities_per_player)
+        .def_ro("dice_mode", &GameRules::dice_mode)
         .def(
             "__eq__", [](const GameRules& lhs, const GameRules& rhs) { return lhs == rhs; },
             nb::is_operator())
         .def("__repr__", [](const GameRules& rules) {
+            // Random dice (the default) stay out, so the repr reads as it always did.
             return nb::str(
                        "GameRules(vps_to_win={}, discard_limit={}, friendly_robber={}, "
                        "resource_bank={}, development_deck={}, roads_per_player={}, "
-                       "settlements_per_player={}, cities_per_player={})")
+                       "settlements_per_player={}, cities_per_player={}{})")
                 .format(
                     rules.victory_points_to_win, rules.discard_limit, rules.friendly_robber,
                     to_tuple(rules.resource_bank), to_tuple(rules.development_deck),
                     rules.roads_per_player, rules.settlements_per_player,
-                    rules.cities_per_player);
+                    rules.cities_per_player,
+                    rules.dice_mode == DiceMode::random ? "" : ", dice_mode=BALANCED");
         });
 
     nb::class_<HiddenHand>(
@@ -484,6 +680,29 @@ void bind_game(nb::module_& module) {
         .def_prop_ro("discard_limit", &Game::discard_limit)
         .def_prop_ro("friendly_robber", &Game::friendly_robber)
         .def_prop_ro("rules", &Game::rules, nb::rv_policy::copy)
+        .def_prop_ro("dice_mode", &Game::dice_mode)
+        .def_prop_ro(
+            "balanced_dice",
+            [](const Game& game) {
+                return game.dice_mode() == DiceMode::balanced ? std::optional<BalancedDice>(game.balanced_dice())
+                                                              : std::nullopt;
+            },
+            "A copy of the balanced dice state (BALANCED dice), None under RANDOM dice.")
+        .def_prop_ro(
+            "next_roller", &Game::next_roller,
+            "The seat that rolls next: the turn owner until it has rolled, then the\n"
+            "next seat.")
+        .def(
+            "roll_probabilities",
+            [](const Game& game, std::optional<PlayerRef> roller) {
+                const int seat =
+                    roller.has_value() ? seat_of(game, resolve_color(game, *roller)) : game.next_roller();
+                return to_tuple(game.roll_probabilities(seat));
+            },
+            nb::arg("roller") = nb::none(),
+            "P(next total = 2..12) when ``roller`` (seat index or Color; default\n"
+            "``next_roller``) rolls: 2d6 under RANDOM dice, the balanced dice state's\n"
+            "odds under BALANCED. Search chance nodes use exactly these.")
         .def_prop_ro(
             "resource_bank", [](const Game& game) { return to_tuple(game.resource_bank()); })
         .def_prop_ro("development_cards_remaining", &Game::development_cards_remaining)
@@ -535,6 +754,8 @@ void bind_game(nb::module_& module) {
             nb::arg("development_card") = nb::none(), nb::arg("stolen_resource") = nb::none(),
             "Apply an action. Chance outcomes (dice, drawn card, stolen resource)\n"
             "come from the game's RNG unless given, as when replaying a record.\n"
+            "Under BALANCED dice given dice draw that card from the deck, and a card\n"
+            "the deck no longer holds raises ValueError, changing nothing.\n"
             "Raises ValueError for actions that are not currently playable.")
         .def(
             "search_equivalent", &Game::search_equivalent, nb::arg("other"),
@@ -561,7 +782,7 @@ void bind_game(nb::module_& module) {
                bool has_played_development_card, int completed_turns,
                std::optional<int> longest_road, std::optional<int> largest_army,
                ActionPrompt prompt, std::optional<int> acting_player, int free_roads,
-               std::optional<int> longest_road_length) {
+               std::optional<int> longest_road_length, std::optional<BalancedDice> dice) {
                 GameSetup setup;
                 setup.players = players;
                 if (robber.has_value()) {
@@ -577,6 +798,7 @@ void bind_game(nb::module_& module) {
                 setup.acting_player = acting_player;
                 setup.free_roads = free_roads;
                 setup.longest_road_length = longest_road_length;
+                setup.dice = dice;
                 game.apply_setup(setup);
             },
             nb::arg("players"), nb::kw_only(), nb::arg("robber") = nb::none(),
@@ -585,6 +807,7 @@ void bind_game(nb::module_& module) {
             nb::arg("longest_road") = nb::none(), nb::arg("largest_army") = nb::none(),
             nb::arg("prompt") = ActionPrompt::play_turn, nb::arg("acting_player") = nb::none(),
             nb::arg("free_roads") = 0, nb::arg("longest_road_length") = nb::none(),
+            nb::arg("dice") = nb::none(),
             "Scenario setup: put a freshly created game into an exact position.\n\n"
             "``players`` holds one PlayerSetup per seat. The bank and deck are the\n"
             "rules' starting counts minus every hand and played card, and the deck\n"
@@ -598,8 +821,9 @@ void bind_game(nb::module_& module) {
             "placement (BUILD_INITIAL_SETTLEMENT/ROAD, its progress read from the\n"
             "pieces in snake order, each seat's newest settlement last).\n"
             "``longest_road_length`` is the length Longest Road was won with\n"
-            "(Catanatron's board.road_length; default the holder's). Raises ValueError\n"
-            "for positions the rules cannot produce.")
+            "(Catanatron's board.road_length; default the holder's). ``dice`` is the\n"
+            "BalancedDice state under BALANCED dice (default: a full deck, no history).\n"
+            "Raises ValueError for positions the rules cannot produce.")
         .def(
             "determinize_development_cards",
             [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,

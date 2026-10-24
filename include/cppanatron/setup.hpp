@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cppanatron/action.hpp"
+#include "cppanatron/dice.hpp"
 #include "cppanatron/types.hpp"
 
 namespace cppanatron {
@@ -103,6 +104,11 @@ struct GameSetup {
      * unset: the holder's cached length.
      */
     std::optional<int> longest_road_length;
+    /**
+     * The balanced dice (DiceMode::balanced only; its `seats` the game's);
+     * unset: a full deck and no history.
+     */
+    std::optional<BalancedDice> dice;
 };
 
 }  // namespace cppanatron

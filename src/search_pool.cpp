@@ -169,7 +169,18 @@ struct Outcome {
  */
 std::vector<Outcome> chance_outcomes(const Game& game, const Action& action) {
     std::vector<Outcome> outcomes;
-    if (action.type == ActionType::roll) {
+    if (action.type == ActionType::roll && game.dice_mode() == DiceMode::balanced) {
+        // The deck's own odds for this roller; totals it cannot roll get no outcome.
+        const auto& colors = game.colors();
+        const auto roller = static_cast<int>(
+            std::find(colors.begin(), colors.end(), action.color) - colors.begin());
+        const std::array<double, 11> probabilities = game.roll_probabilities(roller);
+        for (std::uint32_t total = 2; total <= 12; ++total) {
+            if (probabilities[total - 2] > 0.0) {
+                outcomes.push_back({total, probabilities[total - 2]});
+            }
+        }
+    } else if (action.type == ActionType::roll) {
         constexpr std::array<int, 11> ways{1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1};
         for (std::uint32_t total = 2; total <= 12; ++total) {
             outcomes.push_back({total, ways[total - 2] / 36.0});
@@ -208,8 +219,13 @@ void execute_outcome(Game& game, const Action& action, std::optional<std::uint32
     }
     switch (action.type) {
         case ActionType::roll: {
+            // Balanced dice: a card of that total the deck still holds (which
+            // one does not matter, only totals do).
             const int total = static_cast<int>(*code);
-            game.execute(action, total <= 7 ? Dice{1, total - 1} : Dice{6, total - 6});
+            game.execute(
+                action, game.dice_mode() == DiceMode::balanced
+                            ? game.balanced_dice().card_for_total(total)
+                            : (total <= 7 ? Dice{1, total - 1} : Dice{6, total - 6}));
             return;
         }
         case ActionType::buy_development_card:
@@ -299,7 +315,9 @@ struct Tree {
 
 /**
  * What can differ between the outcomes of one chance action from one
- * position: hands, scores, the bank, the deck and whose prompt it is.
+ * position: hands, scores, the bank, the deck and whose prompt it is, and
+ * with balanced dice their state (two totals that pay the same leave
+ * different decks). Random dice leave the hash as it always was.
  */
 std::uint64_t outcome_fingerprint(const Game& game) {
     std::uint64_t hash = 1469598103934665603ULL;
@@ -322,6 +340,19 @@ std::uint64_t outcome_fingerprint(const Game& game) {
     mix(static_cast<std::uint64_t>(game.current_player_index()));
     mix(static_cast<std::uint64_t>(game.current_prompt()));
     mix(static_cast<std::uint64_t>(game.is_road_building()));
+    if (game.dice_mode() == DiceMode::balanced) {
+        const BalancedDice& dice = game.balanced_dice();
+        mix(dice.deck);
+        for (int i = 0; i < dice.recent_count; ++i) {
+            mix(static_cast<std::uint64_t>(dice.recent[static_cast<std::size_t>(i)]));
+        }
+        mix(static_cast<std::uint64_t>(dice.recent_count));
+        for (int seat = 0; seat < dice.seats; ++seat) {
+            mix(static_cast<std::uint64_t>(dice.sevens[static_cast<std::size_t>(seat)]));
+        }
+        mix(static_cast<std::uint64_t>(dice.streak_player + 1));
+        mix(static_cast<std::uint64_t>(dice.streak_count));
+    }
     return hash;
 }
 
@@ -475,7 +506,8 @@ bool same_public_state(const Game& lhs, const Game& rhs, int observer) {
     if (lhs.resource_bank() != rhs.resource_bank() ||
         lhs.development_cards_remaining() != rhs.development_cards_remaining() ||
         lhs.current_player_index() != rhs.current_player_index() ||
-        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns()) {
+        lhs.current_prompt() != rhs.current_prompt() || lhs.num_turns() != rhs.num_turns() ||
+        lhs.balanced_dice() != rhs.balanced_dice()) {
         return false;
     }
     for (std::size_t seat = 0; seat < lhs.players().size(); ++seat) {

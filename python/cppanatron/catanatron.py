@@ -231,6 +231,8 @@ def reference_game(
     if [player.color for player in players] != colors:
         raise ValueError("players must follow the native game's seating order")
     rules = game.rules
+    if rules.dice_mode != _core.DiceMode.RANDOM:
+        raise ValueError("Catanatron rolls two fair dice: a balanced-dice game has no Catanatron counterpart")
     reference = CatanatronGame(
         players,
         seed=seed,

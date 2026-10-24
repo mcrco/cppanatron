@@ -96,6 +96,15 @@ void Game::apply_setup(const GameSetup& setup) {
         (setup.free_roads > 0 && prompt != ActionPrompt::play_turn)) {
         throw std::invalid_argument("free roads are 0, 1 or 2, and only at play_turn");
     }
+    if (setup.dice.has_value()) {
+        if (rules_.dice_mode != DiceMode::balanced) {
+            throw std::invalid_argument("a dice state needs balanced dice (GameRules.dice_mode)");
+        }
+        setup.dice->validate();
+        if (setup.dice->seats != n) {
+            throw std::invalid_argument("the dice state must have one sevens count per seat");
+        }
+    }
 
     std::map<int, BuildingState> buildings;
     std::map<Edge, Color> roads;
@@ -321,6 +330,9 @@ void Game::apply_setup(const GameSetup& setup) {
     }
     random::shuffle(development_deck_.begin(), development_deck_.end(), random_);
 
+    if (setup.dice.has_value()) {
+        dice_ = *setup.dice;
+    }
     is_initial_build_phase_ = initial;
     current_prompt_ = prompt;
     current_player_index_ = acting;

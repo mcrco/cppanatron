@@ -220,7 +220,8 @@ void bind_vec_env(nb::module_& module) {
             [](PyVecEnv* self, std::vector<Scenario> scenarios, int num_envs,
                std::optional<EncoderDims> dims, InfoLevel level, std::uint64_t seed,
                int num_threads, float vp_reward, bool encode_waiting, bool auto_reset,
-               std::optional<InfoLevel> critic_level, bool trackers, TrackerMode tracker_mode) {
+               std::optional<InfoLevel> critic_level, bool trackers, TrackerMode tracker_mode,
+               bool dice_odds) {
                 VecEnvConfig config;
                 if (!dims.has_value()) {
                     std::vector<std::shared_ptr<const CatanMap>> maps;
@@ -245,6 +246,7 @@ void bind_vec_env(nb::module_& module) {
                 config.encode_waiting = encode_waiting;
                 config.auto_reset = auto_reset;
                 config.critic_level = critic_level;
+                config.dice_odds = dice_odds;
                 config.trackers = trackers;
                 config.tracker_mode = tracker_mode;
                 new (self) PyVecEnv(std::move(config));
@@ -254,7 +256,7 @@ void bind_vec_env(nb::module_& module) {
             nb::arg("seed") = 0, nb::arg("num_threads") = 1, nb::arg("vp_reward") = 0.0F,
             nb::arg("encode_waiting") = false, nb::arg("auto_reset") = true,
             nb::arg("critic_level") = nb::none(), nb::arg("trackers") = false,
-            nb::arg("tracker_mode") = TrackerMode::pool,
+            nb::arg("tracker_mode") = TrackerMode::pool, nb::arg("dice_odds") = false,
             "``dims`` defaults to the smallest covering every scenario's maps and\n"
             "players. ``vp_reward`` > 0 adds that much per victory point to win\n"
             "gained as shaping. ``encode_waiting`` also encodes learner rows that\n"
@@ -270,7 +272,9 @@ void bind_vec_env(nb::module_& module) {
             "transition in the env (learner, forced and bot moves) and the seat's own\n"
             "options, for determinized search and belief agents (``tracker(e, seat)``);\n"
             "``tracker_mode`` is theirs (``TrackerMode.EXACT`` keeps the posterior\n"
-            "over hidden steals; an exact tracker can still deal the pool).")
+            "over hidden steals; an exact tracker can still deal the pool).\n\n"
+            "``dice_odds=True`` adds each seat's next-roll odds to every row's global\n"
+            "block (GraphEncoder's ``dice_odds``).")
         .def_prop_ro("num_envs", [](const PyVecEnv& self) { return self.env.num_envs(); })
         .def_prop_ro("max_players", [](const PyVecEnv& self) { return self.env.max_players(); })
         .def_prop_ro("num_rows", [](const PyVecEnv& self) { return self.env.num_rows(); })
@@ -283,6 +287,8 @@ void bind_vec_env(nb::module_& module) {
         .def_prop_ro("level", [](const PyVecEnv& self) { return self.env.config().level; })
         .def_prop_ro(
             "critic_level", [](const PyVecEnv& self) { return self.env.config().critic_level; })
+        .def_prop_ro(
+            "dice_odds", [](const PyVecEnv& self) { return self.env.config().dice_odds; })
         .def(
             "layout",
             [](const PyVecEnv& self) {

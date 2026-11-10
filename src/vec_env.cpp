@@ -324,11 +324,12 @@ private:
 
 VecEnv::VecEnv(VecEnvConfig config)
     : config_((validate(config), std::move(config))),
-      encoder_(config_.dims, config_.level),
+      encoder_(config_.dims, config_.level, config_.dice_odds),
       critic_encoder_(
           config_.critic_level.has_value()
               ? std::optional<ActorCriticEncoder>(
-                    std::in_place, config_.dims, config_.level, *config_.critic_level)
+                    std::in_place, config_.dims, config_.level, *config_.critic_level,
+                    config_.dice_odds)
               : std::nullopt),
       envs_(static_cast<std::size_t>(config_.num_envs)),
       pool_(std::make_unique<ThreadPool>(std::min(config_.num_threads, config_.num_envs))) {}

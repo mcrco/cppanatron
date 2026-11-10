@@ -42,7 +42,7 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  * in the spirit of Canopy's Nexus-v3 encoder as ported in catanrl v1. Pips
  * are a number's dice weight, 6 - |7 - number| (5 for 6 and 8).
  *
- * global (G = 23 + P):
+ * global (G = 23 + P, and 11 P more with dice_odds):
  *   prompt_*[7]           one-hot ActionPrompt of the seat to act
  *   road_building         free roads from a road-building card are pending
  *   bank_<R>[5]           bank count / the rules' starting bank of R
@@ -53,6 +53,11 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  *   friendly_robber       the friendly-robber rule is on
  *   players_<n>[P]        one-hot number of seats (n = 1..P)
  *   board_pips_<R>[5]     pips of all R tiles on the map / 30
+ *   dice_odds_<k>_<t>[P x 11]  only with dice_odds (off by default): P(next total
+ *                         = t) for t = 2..12 when relative seat k rolls,
+ *                         Game::roll_probabilities of that seat; 0 for absent
+ *                         slots. The balanced dice state is public. Under
+ *                         random dice it is the fair 2d6 odds for every seat.
  *
  * players (Fp = 46), for the slot's seat; all zero for absent slots:
  *   present               the slot has a seat
@@ -123,7 +128,8 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  * once the game is won).
  *
  * Information levels only change the seat-private features marked above,
- * which read 0 when hidden. The mask is the observer's own.
+ * which read 0 when hidden. The mask is the observer's own. Without
+ * dice_odds a row is exactly what it was before the option existed.
  */
 class GraphEncoder final : public ObservationEncoder {
 public:
@@ -133,7 +139,8 @@ public:
         std::vector<std::size_t> shape;
     };
 
-    GraphEncoder(EncoderDims dims, InfoLevel level);
+    /** `dice_odds` appends each seat's next-roll odds to the global block (see above). */
+    GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds = false);
 
     [[nodiscard]] std::size_t size() const noexcept override { return size_; }
     /** Throws std::invalid_argument if the game exceeds the dims or `out` is not size(). */
@@ -141,6 +148,7 @@ public:
 
     [[nodiscard]] const EncoderDims& dims() const noexcept { return dims_; }
     [[nodiscard]] InfoLevel level() const noexcept { return level_; }
+    [[nodiscard]] bool dice_odds() const noexcept { return dice_odds_; }
     [[nodiscard]] const GraphActionSpace& action_space() const noexcept { return action_space_; }
     /** Blocks in row order: global, players, tiles, nodes, edges, edge_nodes, tile_nodes,
      * action_mask. */
@@ -174,6 +182,7 @@ private:
     struct MapCache;
     /** Positions of the features written per call, within their slot. */
     struct Offsets {
+        std::size_t global_board_pips{};
         std::size_t tile_robber{};
         std::size_t tile_buildings{};
         std::size_t node_settlement{};
@@ -194,6 +203,7 @@ private:
 
     EncoderDims dims_;
     InfoLevel level_;
+    bool dice_odds_{};
     GraphActionSpace action_space_;
     std::vector<std::string> global_names_;
     std::vector<std::string> player_names_;
@@ -220,7 +230,10 @@ private:
  */
 class ActorCriticEncoder final : public ObservationEncoder {
 public:
-    ActorCriticEncoder(EncoderDims dims, InfoLevel level, InfoLevel critic_level);
+    /** `dice_odds` as GraphEncoder's (the actor row's global block; the critic block is
+     * the players block, which it does not change). */
+    ActorCriticEncoder(EncoderDims dims, InfoLevel level, InfoLevel critic_level,
+                       bool dice_odds = false);
 
     [[nodiscard]] std::size_t size() const noexcept override {
         return actor_.size() + critic_.players_size();

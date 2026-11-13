@@ -472,3 +472,115 @@ def test_search_pool_deals_exact_worlds():
     with pytest.raises(ValueError):
         pool.add(game, 3, cpp.HandTracker(game, game.current_player_index), deal=cpp.TrackerMode.EXACT)
     assert len(pool) == 0
+
+
+def hashed(observations: np.ndarray, actions: int, players: int):
+    """Logits and values that depend on the row (the position), not on the batch."""
+    total = observations.sum(axis=1, dtype=np.float32)
+    logits = np.sin(total[:, None] * np.linspace(0.01, 0.3, actions, dtype=np.float32)).astype(np.float32)
+    values = np.full((len(observations), players), 0.0, dtype=np.float32)
+    values[:, 0] = 0.5 + 0.3 * np.sin(total * 0.37)
+    values[:, 1:] = (1.0 - values[:, :1]) / (players - 1)
+    return logits, values
+
+
+def run_hashed(pool: cpp.SearchPool, players: int, batch: int = 32, check_rows=None) -> int:
+    observations = np.zeros((batch, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(batch, dtype=np.int64)
+    total = 0
+    while n := pool.collect(observations, ids):
+        if check_rows is not None:
+            check_rows(ids[:n])
+        pool.apply(*hashed(observations[:n], pool.action_size, players))
+        total += n
+    return total
+
+
+def test_search_options_and_reroot():
+    """A search's own budget, leaves per round and noise; reroot's visit cap; the
+    clean root priors."""
+    game, _ = random_game(2, 8, 60)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    noise = dict(dirichlet_alpha=0.3, dirichlet_fraction=0.25)
+
+    def alone(simulations, max_pending, alpha):
+        pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(
+            simulations=simulations, max_pending=max_pending, max_players=2,
+            dirichlet_alpha=alpha, dirichlet_fraction=0.25))
+        search = pool.add(game, 4)
+        run_hashed(pool, 2)
+        return pool.visits(search)
+
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=120, max_pending=6, max_players=2, **noise))
+    full = pool.add(game, 4)
+    fast = pool.add(game, 4, simulations=30, max_pending=2, dirichlet_alpha=0.0)
+
+    def check_rows(ids):
+        assert (ids == full).sum() <= 6 and (ids == fast).sum() <= 2
+
+    run_hashed(pool, 2, check_rows=check_rows)
+    np.testing.assert_array_equal(pool.visits(full), alone(120, 6, 0.3))
+    np.testing.assert_array_equal(pool.visits(fast), alone(30, 2, 0.0))
+    assert pool.stats(full).simulations == 120 and pool.stats(fast).simulations == 30
+    for bad in (dict(simulations=0), dict(max_pending=0), dict(dirichlet_alpha=float("nan"))):
+        with pytest.raises(ValueError):
+            pool.add(game, 4, **bad)
+    assert len(pool) == 2
+
+    # The priors of the tree are the network's, with or without noise in the search.
+    legal = codec.mask(game).astype(bool)
+    logits, _ = hashed(encoder.encode(game, game.current_player_index)[None], codec.size, 2)
+    clean = np.where(legal, np.exp(logits[0].astype(np.float64)), 0.0)
+    clean /= clean.sum()
+    for search in (full, fast):
+        priors = pool.root_priors(search)
+        assert priors.dtype == np.float32 and priors.shape == (1, codec.size)
+        np.testing.assert_allclose(priors[0], clean, atol=1e-6)
+
+    # Re-root both along the full search's most visited building action.
+    visits = pool.visits(full)
+    chosen = None
+    for index in np.argsort(-visits.astype(np.int64), kind="stable"):
+        kind = codec.decode(game, int(index)).action_type
+        if visits[index] and pool.visits(fast)[index] and kind not in (
+                cpp.ActionType.ROLL, cpp.ActionType.BUY_DEVELOPMENT_CARD, cpp.ActionType.MOVE_ROBBER,
+                cpp.ActionType.END_TURN):
+            chosen = int(index)
+            break
+    if chosen is None:
+        pytest.skip("no building action was visited by both searches")
+    assert not pool.reroot(full, int(np.flatnonzero(~legal)[0]), simulations=50)
+    with pytest.raises(ValueError):
+        pool.reroot(full, chosen, simulations=0)
+    np.testing.assert_array_equal(pool.visits(full), visits)
+    assert pool.reroot(full, chosen, simulations=1)
+    carried = int(pool.visits(full).sum())
+    assert carried >= 1 and pool.done(full) and pool.stats(full).simulations == 0
+    assert pool.reroot(fast, chosen, simulations=carried + 40, max_pending=3, dirichlet_alpha=0.3)
+    before = int(pool.visits(fast).sum())
+    assert not pool.done(fast)
+
+    def only_fast(ids):
+        assert (ids == fast).all() and len(ids) <= 3
+
+    run_hashed(pool, 2, check_rows=only_fast)
+    assert pool.done(fast) and pool.visits(fast).sum() == carried + 40
+    assert pool.stats(fast).simulations == carried + 40 - before
+    after = game.copy()
+    after.execute(codec.decode(game, chosen))
+    legal = codec.mask(after).astype(bool)
+    logits, _ = hashed(encoder.encode(after, after.current_player_index)[None], codec.size, 2)
+    clean = np.where(legal, np.exp(logits[0].astype(np.float64)), 0.0)
+    clean /= clean.sum()
+    for search in (full, fast):
+        np.testing.assert_allclose(pool.root_priors(search)[0], clean, atol=1e-6)
+        assert pool.policy_target(search).sum() == pytest.approx(1.0)
+        assert legal[pool.select(search)]
+
+    gumbel = cpp.SearchPool(codec, encoder, cpp.SearchConfig(
+        simulations=32, max_players=2, root=cpp.RootSelection.GUMBEL))
+    search = gumbel.add(game, 4)
+    run_hashed(gumbel, 2)
+    with pytest.raises(ValueError):
+        gumbel.reroot(search, chosen)

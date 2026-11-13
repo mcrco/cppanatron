@@ -213,11 +213,16 @@ void bind_search_pool(nb::module_& module) {
         .def(
             "add",
             [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker,
-               bool ignore_tracker, std::optional<TrackerMode> deal) {
-                return pool.add(game, seed, tracker, ignore_tracker, deal);
+               bool ignore_tracker, std::optional<TrackerMode> deal, std::optional<int> simulations,
+               std::optional<int> max_pending, std::optional<double> dirichlet_alpha) {
+                return pool.add(
+                    game, seed, SearchOptions{simulations, max_pending, dirichlet_alpha}, tracker,
+                    ignore_tracker, deal);
             },
             nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(), nb::kw_only(),
             nb::arg("ignore_tracker") = false, nb::arg("deal") = nb::none(),
+            nb::arg("simulations") = nb::none(), nb::arg("max_pending") = nb::none(),
+            nb::arg("dirichlet_alpha") = nb::none(),
             "Start a search for ``game``'s player to move; returns its id. With\n"
             "determinizations the root worlds are sampled from ``tracker``, which\n"
             "must follow that player, and the root offers exactly ``game``'s legal\n"
@@ -226,7 +231,9 @@ void bind_search_pool(nb::module_& module) {
             "worlds' resource hands as ``sample_world`` does (the tracker's own mode\n"
             "by default). Without determinizations the search reads ``game`` as is,\n"
             "hidden cards included (an oracle), so a ``tracker`` raises ValueError\n"
-            "unless ``ignore_tracker=True``. A finished game's search is done at once.")
+            "unless ``ignore_tracker=True``. A finished game's search is done at once.\n"
+            "``simulations``, ``max_pending`` and ``dirichlet_alpha`` are this search's\n"
+            "own in place of the pool's config (None: the config's).")
         .def(
             "collect",
             [](SearchPool& pool, OutputMatrix<float> observations, OutputVector<std::int64_t> ids) {
@@ -291,6 +298,21 @@ void bind_search_pool(nb::module_& module) {
             "value", [](const SearchPool& pool, std::int64_t id) { return to_numpy(pool.value(id)); },
             nb::arg("id"), "Mean root value per seat, seat-relative to the root player (float32 [P]).")
         .def(
+            "root_priors",
+            [](const SearchPool& pool, std::int64_t id) {
+                auto* owned = new std::vector<float>(pool.root_priors(id));
+                nb::capsule deleter(owned, [](void* pointer) noexcept {
+                    delete static_cast<std::vector<float>*>(pointer);
+                });
+                const std::size_t actions = pool.action_size();
+                return nb::ndarray<nb::numpy, float, nb::ndim<2>>(
+                    owned->data(), {owned->size() / actions, actions}, deleter);
+            },
+            nb::arg("id"),
+            "The root's priors as the network gave them, without the search's\n"
+            "Dirichlet noise (float32 [worlds, action_size], zero off the root's\n"
+            "actions; all zero until the roots are evaluated).")
+        .def(
             "select", &SearchPool::select, nb::arg("id"), nb::arg("temperature") = 0.0,
             "The action index to play: most visits (PUCT) or the Sequential Halving\n"
             "winner (Gumbel) at temperature 0, else a sample from\n"
@@ -303,6 +325,20 @@ void bind_search_pool(nb::module_& module) {
             "through a drawn outcome, an action revealing hidden cards (a monopoly), or\n"
             "worlds disagreeing on the new root's public state or options. On False,\n"
             "add() a new search from the real position with the updated tracker.")
+        .def(
+            "reroot",
+            [](SearchPool& pool, std::int64_t id, std::size_t action_index, std::optional<int> simulations,
+               std::optional<int> max_pending, std::optional<double> dirichlet_alpha) {
+                return pool.reroot(id, action_index, SearchOptions{simulations, max_pending, dirichlet_alpha});
+            },
+            nb::arg("id"), nb::arg("action_index"), nb::kw_only(), nb::arg("simulations") = nb::none(),
+            nb::arg("max_pending") = nb::none(), nb::arg("dirichlet_alpha") = nb::none(),
+            "``advance`` under a visit cap: the visits the new root already has\n"
+            "(``visits(id).sum()``) count towards ``simulations``, so the search only\n"
+            "tops the root up to them and is done at once when it has as many or more.\n"
+            "The three settings are the search's own from here on (None: the pool's\n"
+            "config), and a PUCT root with noise draws fresh Dirichlet noise. False\n"
+            "where ``advance`` is; ValueError on a Gumbel root.")
         .def("remove", &SearchPool::remove, nb::arg("id"))
         .def("stats", &SearchPool::stats, nb::arg("id"));
 }

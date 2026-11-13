@@ -1180,8 +1180,415 @@ void test_discard_chain_is_a_lattice() {
             "without the table the chain outgrows the lattice: " + std::to_string(without));
 }
 
+/**
+ * The most visited root action that keeps the turn and leads to no chance
+ * node (a re-rootable one whose child is a decision of several options);
+ * codec.size() when there is none.
+ */
+std::size_t most_visited_build(const SearchPool& pool, std::int64_t id, const ActionCodec& codec, const Game& position) {
+    const auto visits = pool.visits(id);
+    std::size_t chosen = codec.size();
+    for (std::size_t i = 0; i < visits.size(); ++i) {
+        if (visits[i] == 0 || (chosen < codec.size() && visits[i] <= visits[chosen])) {
+            continue;
+        }
+        const ActionType type = codec.decode(position, i).type;
+        if (type != ActionType::roll && type != ActionType::buy_development_card &&
+            type != ActionType::move_robber && type != ActionType::end_turn) {
+            chosen = i;
+        }
+    }
+    return chosen;
+}
+
+std::uint32_t total(const std::vector<std::uint32_t>& visits) {
+    return std::accumulate(visits.begin(), visits.end(), 0U);
+}
+
+/**
+ * add's options are the search's own settings: a search given a budget,
+ * leaves per round and noise runs exactly as in a pool configured with
+ * them, beside a search that keeps the pool's.
+ */
+void test_search_options_are_per_search() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const auto alone = [&](int simulations, int pending, double alpha) {
+        SearchConfig config;
+        config.simulations = simulations;
+        config.max_pending = pending;
+        config.dirichlet_alpha = alpha;
+        config.max_players = 4;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 7);
+        run(pool, hashed_evaluator(4));
+        return std::pair{pool.visits(id), pool.q(id)};
+    };
+    const auto same = [](const std::pair<std::vector<std::uint32_t>, std::vector<double>>& a,
+                         const std::pair<std::vector<std::uint32_t>, std::vector<double>>& b) {
+        bool equal = a.first == b.first;
+        for (std::size_t i = 0; equal && i < a.second.size(); ++i) {
+            equal = (std::isnan(a.second[i]) && std::isnan(b.second[i])) || a.second[i] == b.second[i];
+        }
+        return equal;
+    };
+    const auto full = alone(256, 8, 0.3);
+    const auto fast = alone(48, 2, 0.0);
+    require(!same(alone(256, 8, 0.0), full), "the noise must matter for the test to say anything");
+    for (const bool noisy_pool : {true, false}) {
+        SearchConfig config;
+        config.simulations = noisy_pool ? 256 : 48;
+        config.max_pending = noisy_pool ? 8 : 2;
+        config.dirichlet_alpha = noisy_pool ? 0.3 : 0.0;
+        config.max_players = 4;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        // One search with the pool's settings, one with the other pool's.
+        const auto a = pool.add(game, 7, noisy_pool ? SearchOptions{} : SearchOptions{256, 8, 0.3});
+        const auto b = pool.add(game, 7, noisy_pool ? SearchOptions{48, 2, 0.0} : SearchOptions{});
+        // Leaves per round are each search's own.
+        std::vector<float> observations(64 * pool.observation_size());
+        std::vector<std::int64_t> ids(64);
+        const std::size_t width = pool.action_size();
+        const Evaluator evaluate = hashed_evaluator(4);
+        bool reached = false;
+        while (true) {
+            const std::size_t rows = pool.collect(observations, ids);
+            if (rows == 0) {
+                break;
+            }
+            const auto of_a = std::count(ids.begin(), ids.begin() + static_cast<std::ptrdiff_t>(rows), a);
+            const auto of_b = std::count(ids.begin(), ids.begin() + static_cast<std::ptrdiff_t>(rows), b);
+            require(of_a <= 8 && of_b <= 2, "a search issues at most its own max_pending leaves a round");
+            reached = reached || (of_a == 8 && of_b == 2);
+            std::vector<float> logits(rows * width);
+            std::vector<float> values(rows * 4);
+            for (std::size_t row = 0; row < rows; ++row) {
+                evaluate(
+                    pool.pending_game(row), std::span<float>(logits).subspan(row * width, width),
+                    std::span<float>(values).subspan(row * 4, 4));
+            }
+            pool.apply(logits, values);
+        }
+        require(reached, "both searches fill their own rounds");
+        require(same({pool.visits(a), pool.q(a)}, full), "options must equal a pool configured with them (full)");
+        require(same({pool.visits(b), pool.q(b)}, fast), "options must equal a pool configured with them (fast)");
+        require(pool.stats(a).simulations == 256 && pool.stats(b).simulations == 48, "each search runs its own budget");
+    }
+    SearchConfig config;
+    config.max_players = 4;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    for (const SearchOptions& bad : {SearchOptions{0, {}, {}}, SearchOptions{{}, 0, {}},
+                                     SearchOptions{{}, {}, std::numeric_limits<double>::quiet_NaN()}}) {
+        bool threw = false;
+        try {
+            pool.add(game, 1, bad);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        require(threw && pool.size() == 0, "invalid options are refused before a search exists");
+    }
+}
+
+/**
+ * reroot is advance under a visit cap: the new root's visits count towards
+ * the budget, the search tops the root up to exactly the cap, and a root
+ * that already has the cap runs no simulation at all.
+ */
+void test_reroot_counts_the_carried_visits() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    for (const bool transpositions : {false, true}) {
+        SearchConfig config;
+        config.simulations = 256;
+        config.max_pending = 8;
+        config.max_players = 4;
+        config.transpositions = transpositions;
+        const auto searched = [&](SearchPool& pool) {
+            const auto id = pool.add(game, 3);
+            run(pool, hashed_evaluator(4));
+            require(total(pool.visits(id)) == 256, "a fresh search runs its simulations");
+            return id;
+        };
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = searched(pool);
+        const std::size_t chosen = most_visited_build(pool, id, *codec, game);
+        require(chosen < codec->size(), "a building action was visited");
+        const std::uint32_t child = pool.visits(id)[chosen];
+        const int cap = static_cast<int>(child) + 40;
+        Game next = game;
+        next.execute(codec->decode(game, chosen));
+
+        // A cap above what the root carries: topped up to exactly the cap,
+        // with a per-search max_pending.
+        require(pool.reroot(id, chosen, SearchOptions{cap, 4, {}}), "re-rooting at a visited deterministic child");
+        const std::uint32_t carried = total(pool.visits(id));
+        require(carried > 0 && carried < child,
+                "the new root carries the child's visits (less its own evaluation, and with "
+                "transpositions those that came through other parents)");
+        require(!pool.done(id) && pool.stats(id).simulations == 0, "the top-up is still to run");
+        std::vector<float> observations(64 * pool.observation_size());
+        std::vector<std::int64_t> ids(64);
+        const Evaluator evaluate = hashed_evaluator(4);
+        while (const std::size_t rows = pool.collect(observations, ids)) {
+            require(rows <= 4, "the re-rooted search issues its own max_pending");
+            std::vector<float> logits(rows * codec->size());
+            std::vector<float> values(rows * 4);
+            for (std::size_t row = 0; row < rows; ++row) {
+                evaluate(
+                    pool.pending_game(row), std::span<float>(logits).subspan(row * codec->size(), codec->size()),
+                    std::span<float>(values).subspan(row * 4, 4));
+            }
+            pool.apply(logits, values);
+        }
+        require(pool.done(id) && total(pool.visits(id)) == static_cast<std::uint32_t>(cap), "the root is topped up to the cap");
+        require(pool.stats(id).simulations == static_cast<std::uint32_t>(cap) - carried, "only the missing visits are simulated");
+
+        // advance is reroot with a cap of the carried visits plus the budget.
+        SearchPool twin(codec, std::make_shared<ToyEncoder>(), config);
+        const auto other = searched(twin);
+        require(twin.advance(other, chosen), "advance re-roots where reroot does");
+        require(total(twin.visits(other)) == carried, "both keep the same subtree");
+        run(twin, hashed_evaluator(4));
+        SearchPool same(codec, std::make_shared<ToyEncoder>(), config);
+        const auto second = searched(same);
+        require(same.reroot(second, chosen, SearchOptions{static_cast<int>(carried) + 256, {}, {}}),
+                "re-rooting with the budget advance gives");
+        run(same, hashed_evaluator(4));
+        require(same.visits(second) == twin.visits(other) && same.stats(second).nodes == twin.stats(other).nodes,
+                "reroot with advance's budget must search as advance does");
+
+        // The settings are the search's: the pool's own do not matter.
+        SearchConfig rest_config = config;
+        rest_config.simulations = 7;
+        rest_config.max_pending = 3;
+        SearchPool rest(codec, std::make_shared<ToyEncoder>(), rest_config);
+        const auto third = rest.add(game, 3, SearchOptions{256, 8, {}});
+        run(rest, hashed_evaluator(4));
+        require(rest.reroot(third, chosen, SearchOptions{cap, 4, {}}), "re-rooting in a pool of other settings");
+        run(rest, hashed_evaluator(4));
+        require(rest.visits(third) == pool.visits(id), "reroot must not depend on the pool's config");
+
+        // A cap the root already has: no simulation, results from the tree.
+        SearchPool capped(codec, std::make_shared<ToyEncoder>(), config);
+        const auto fourth = searched(capped);
+        require(capped.reroot(fourth, chosen, SearchOptions{static_cast<int>(carried), {}, {}}),
+                "re-rooting at the cap");
+        require(capped.done(fourth), "a root with its visits is done at once");
+        require(capped.collect(observations, ids) == 0, "no leaf is issued");
+        require(total(capped.visits(fourth)) == carried && capped.stats(fourth).simulations == 0,
+                "no simulation runs");
+        const auto target = capped.policy_target(fourth);
+        require(std::abs(std::accumulate(target.begin(), target.end(), 0.0) - 1.0) < 1e-5,
+                "the carried visits are the policy target");
+        std::vector<std::uint8_t> legal(codec->size());
+        codec->mask(next, legal);
+        require(legal[capped.select(fourth, 0.0)] != 0, "the move is chosen from the carried visits");
+        SearchPool below(codec, std::make_shared<ToyEncoder>(), config);
+        const auto fifth = searched(below);
+        require(below.reroot(fifth, chosen, SearchOptions{1, {}, {}}) && below.done(fifth) &&
+                    total(below.visits(fifth)) == carried,
+                "a cap below the carried visits keeps them all");
+        // The next reroot gives the search a budget again.
+        const std::size_t again = most_visited_build(below, fifth, *codec, next);
+        if (again < codec->size() && below.reroot(fifth, again, SearchOptions{64, {}, {}})) {
+            const std::uint32_t kept = total(below.visits(fifth));
+            run(below, hashed_evaluator(4));
+            require(below.done(fifth) && total(below.visits(fifth)) == std::max<std::uint32_t>(kept, 64),
+                    "a later search of the tree has its own cap");
+        }
+    }
+}
+
+/**
+ * Every search with noise draws it anew at its own root, also a re-rooted
+ * one; the tree keeps the network's priors (root_priors), which the next
+ * root starts from, so noise reaches a later search only through visits.
+ */
+void test_reroot_noise_is_per_search() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const auto clean = [&](const Game& position) {
+        std::vector<float> logits(codec->size());
+        hashed_logits(position, logits);
+        std::vector<std::uint8_t> legal(codec->size());
+        codec->mask(position, legal);
+        double sum = 0.0;
+        for (std::size_t i = 0; i < logits.size(); ++i) {
+            sum += legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) : 0.0;
+        }
+        std::vector<double> priors(codec->size(), 0.0);
+        for (std::size_t i = 0; i < logits.size(); ++i) {
+            priors[i] = legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) / sum : 0.0;
+        }
+        return priors;
+    };
+    const auto close = [](const std::vector<float>& actual, const std::vector<double>& expected) {
+        bool equal = actual.size() == expected.size();
+        for (std::size_t i = 0; equal && i < actual.size(); ++i) {
+            equal = std::abs(actual[i] - expected[i]) < 1e-6;
+        }
+        return equal;
+    };
+    SearchConfig config;
+    config.simulations = 256;
+    config.max_players = 4;
+    config.dirichlet_alpha = 0.3;
+    config.dirichlet_fraction = 0.25;
+    SearchConfig quiet_config = config;
+    quiet_config.dirichlet_alpha = 0.0;
+    SearchPool quiet(codec, std::make_shared<ToyEncoder>(), quiet_config);
+    const auto reference = quiet.add(game, 5);
+    require(close(quiet.root_priors(reference), std::vector<double>(codec->size(), 0.0)),
+            "no priors before the root is evaluated");
+    run(quiet, hashed_evaluator(4));
+    require(close(quiet.root_priors(reference), clean(game)), "an un-noised root reports its priors");
+
+    // Three trees searched alike with noise, then re-rooted with new noise,
+    // with other noise (another seed would be another tree: the alpha), and
+    // with none.
+    std::vector<std::vector<std::uint32_t>> results;
+    std::size_t chosen = 0;
+    Game next = game;
+    for (const double alpha : {0.3, 1.0, 0.0}) {
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 5);
+        run(pool, hashed_evaluator(4));
+        require(pool.visits(id) != quiet.visits(reference), "the fresh search ran with noise");
+        require(close(pool.root_priors(id), clean(game)), "root_priors are the priors before the noise");
+        if (results.empty()) {
+            chosen = most_visited_build(pool, id, *codec, game);
+            require(chosen < codec->size(), "a building action was visited");
+            next.execute(codec->decode(game, chosen));
+        }
+        require(pool.reroot(id, chosen, SearchOptions{256, {}, alpha}), "re-rooting a noised search");
+        require(close(pool.root_priors(id), clean(next)),
+                "the new root starts from the network's priors, whatever noise the old root had");
+        run(pool, hashed_evaluator(4));
+        require(total(pool.visits(id)) == 256, "the re-rooted search fills its cap");
+        require(close(pool.root_priors(id), clean(next)), "the noise never reaches root_priors");
+        results.push_back(pool.visits(id));
+    }
+    require(results[0] != results[2] && results[1] != results[2] && results[0] != results[1],
+            "a re-rooted root is searched under the noise it is given, and under none without");
+}
+
+/** reroot refuses what advance refuses, and what a visit cap cannot mean. */
+void test_reroot_refusals() {
+    const Game game = hand_position({1, 1, 1, 1, 1});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    SearchConfig config;
+    config.simulations = 128;
+    config.max_players = 4;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    const auto id = pool.add(game, 2);
+    require(!pool.reroot(id, 0), "no re-rooting before the root is evaluated");
+    run(pool, hashed_evaluator(4));
+    const auto visits = pool.visits(id);
+    std::vector<std::uint8_t> legal(codec->size());
+    codec->mask(game, legal);
+    bool chance = false;
+    for (std::size_t i = 0; i < codec->size(); ++i) {
+        if (legal[i] == 0) {
+            continue;
+        }
+        if (codec->decode(game, i).type == ActionType::buy_development_card) {
+            chance = true;
+            require(!pool.reroot(id, i, SearchOptions{16, {}, {}}), "a chance action is never re-rooted through");
+        } else if (visits[i] == 0) {
+            require(!pool.reroot(id, i, SearchOptions{16, {}, {}}), "an unvisited child is refused");
+        }
+    }
+    require(chance, "the position must offer a chance action");
+    for (std::size_t i = 0; i < codec->size(); ++i) {
+        if (legal[i] == 0) {
+            require(!pool.reroot(id, i), "an action the root does not have is refused");
+            break;
+        }
+    }
+    require(pool.done(id) && pool.visits(id) == visits && pool.stats(id).simulations == 128,
+            "a refused reroot leaves the search as it was");
+    const std::size_t chosen = most_visited_build(pool, id, *codec, game);
+    require(chosen < codec->size(), "a building action was visited");
+    bool threw = false;
+    try {
+        pool.reroot(id, chosen, SearchOptions{0, {}, {}});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw && pool.visits(id) == visits, "invalid options are refused before anything changes");
+    // The refused settings were not taken: advance still starts the pool's budget.
+    require(pool.advance(id, chosen), "the search is still re-rootable");
+    std::vector<float> observations(64 * pool.observation_size());
+    std::vector<std::int64_t> ids(64);
+    require(pool.collect(observations, ids) > 0, "leaves are issued");
+    threw = false;
+    try {
+        pool.reroot(id, 0);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw, "no re-rooting while leaves await apply");
+    pool.cancel();
+    run(pool, hashed_evaluator(4));
+    require(pool.stats(id).simulations == 128, "the search still runs the pool's budget");
+
+    SearchConfig gumbel_config = config;
+    gumbel_config.root = RootSelection::gumbel;
+    SearchPool gumbel(codec, std::make_shared<ToyEncoder>(), gumbel_config);
+    const auto other = gumbel.add(game, 2);
+    run(gumbel, hashed_evaluator(4));
+    const std::size_t played = most_visited_build(gumbel, other, *codec, game);
+    require(played < codec->size(), "a building action was visited (Gumbel)");
+    threw = false;
+    try {
+        gumbel.reroot(other, played);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "a Gumbel root has no visit cap");
+    require(gumbel.advance(other, played), "advance still re-roots a Gumbel search");
+}
+
+/** With determinizations the cap counts the root's visits over all worlds. */
+void test_reroot_determinized() {
+    GameRules rules;
+    rules.friendly_robber = true;
+    auto players = random_placements(4, 12);
+    players[0].development_cards = {1, 0, 0, 0, 0};
+    players[1].resources = {0, 0, 0, 1, 0};
+    Game game(seats(4), MapType::base, 12, rules);
+    GameSetup setup;
+    setup.players = players;
+    game.apply_setup(setup);
+    const HandTracker tracker(game, 0);
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const std::size_t index = codec->index(game, {Color::red, ActionType::play_knight_card, std::monostate{}});
+    SearchConfig config;
+    config.simulations = 240;
+    config.max_players = 4;
+    config.determinizations = 3;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    const auto id = search_favouring(pool, game, index, &tracker);
+    require(pool.reroot(id, index, SearchOptions{300, {}, {}}), "an own decision re-roots under determinization");
+    const std::uint32_t carried = total(pool.visits(id));
+    require(carried > 0 && carried < 300, "the worlds' visits are carried");
+    run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_logits(leaf, logits);
+        std::fill(values.begin(), values.end(), 0.25F);
+    });
+    require(pool.done(id) && total(pool.visits(id)) == 300 && pool.stats(id).simulations == 300 - carried,
+            "the worlds together are topped up to the cap");
+    require(pool.root_priors(id).size() == pool.stats(id).worlds * codec->size(), "priors per world");
+}
+
+
 int main() {
     try {
+        test_search_options_are_per_search();
+        test_reroot_counts_the_carried_visits();
+        test_reroot_noise_is_per_search();
+        test_reroot_refusals();
+        test_reroot_determinized();
         test_transpositions_merge_reordered_actions();
         test_transpositions_are_deterministic();
         test_transpositions_off_is_bitwise_today();

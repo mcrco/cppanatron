@@ -210,6 +210,18 @@ outcomes, monopolies and anything the worlds disagree on, and the caller then
 adds a new search from the real position with the updated tracker.
 Determinized roots offer exactly the real game's legal actions.
 
+A search can have its own budget, leaves per round and root noise instead of
+the pool's: `add(..., simulations=, max_pending=, dirichlet_alpha=)`, so
+searches of different sizes share a pool. `reroot(id, action, simulations=,
+...)` is `advance` under a visit cap: the visits the new root already has
+count towards `simulations`, the search only tops the root up to them, and it
+is done at once (no simulation) when the root has as many or more. The
+settings given to `reroot` are the search's from then on, so one tree can
+serve a game's consecutive searches of different budgets; a PUCT root with
+noise draws fresh Dirichlet noise at every root, and `root_priors(id)` returns
+the root's priors without it (the tree keeps the network's). `reroot` is for
+PUCT roots: Sequential Halving plans its visits from an empty root.
+
 `SearchConfig(transpositions=True)` makes each world a graph: a position that
 another order of actions already reached (two roads built either way round,
 one discarder's kinds in any order, a bank trade before or after a build)

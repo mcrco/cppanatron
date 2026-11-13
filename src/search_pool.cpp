@@ -445,6 +445,15 @@ struct Search {
     /** World of each simulation, cyclically; merged samples appear repeatedly. */
     std::vector<std::uint32_t> schedule;
     int budget{};
+    /** The search's own settings (SearchOptions over the pool's config). */
+    int cap{};
+    int max_pending{};
+    double dirichlet_alpha{};
+    /**
+     * Each world's root priors as they were before Dirichlet noise was mixed
+     * into the edges; empty while the edges are as the network gave them.
+     */
+    std::vector<std::vector<float>> clean_priors;
     int started{};
     int completed{};
     int pending{};
@@ -584,6 +593,24 @@ struct SearchPool::Impl {
             ? static_cast<int>(std::max(1U, std::thread::hardware_concurrency()))
             : config.threads;
         workers = std::make_unique<WorkerPool>(threads);
+    }
+
+    /** Refuse settings a search cannot run with (as the constructor does). */
+    static void check(const SearchOptions& options) {
+        if ((options.simulations.has_value() && *options.simulations < 1) ||
+            (options.max_pending.has_value() && *options.max_pending < 1)) {
+            throw std::invalid_argument("simulations and max_pending must be positive");
+        }
+        if (options.dirichlet_alpha.has_value() && !std::isfinite(*options.dirichlet_alpha)) {
+            throw std::invalid_argument("Dirichlet alpha must be finite");
+        }
+    }
+
+    /** Give a search its settings: the options, else the pool's. */
+    void configure(Search& search, const SearchOptions& options) const {
+        search.cap = options.simulations.value_or(config.simulations);
+        search.max_pending = options.max_pending.value_or(config.max_pending);
+        search.dirichlet_alpha = options.dirichlet_alpha.value_or(config.dirichlet_alpha);
     }
 
     std::shared_ptr<const ActionCodec> codec;
@@ -1104,11 +1131,12 @@ struct SearchPool::Impl {
             search.done = true;
             return;
         }
-        if (config.root == RootSelection::puct && config.dirichlet_alpha > 0.0 &&
+        search.clean_priors.clear();
+        if (config.root == RootSelection::puct && search.dirichlet_alpha > 0.0 &&
             config.dirichlet_fraction > 0.0) {
             std::vector<double> noise(count);
             for (double& value : noise) {
-                value = random::gamma(search.rng, config.dirichlet_alpha);
+                value = random::gamma(search.rng, search.dirichlet_alpha);
             }
             double total = std::accumulate(noise.begin(), noise.end(), 0.0);
             if (total <= kTiny) {
@@ -1117,8 +1145,10 @@ struct SearchPool::Impl {
             }
             for (Tree& tree : search.worlds) {
                 const Node& world_root = tree.nodes.front();
+                std::vector<float>& clean = search.clean_priors.emplace_back(count);
                 for (std::size_t i = 0; i < count; ++i) {
                     TreeEdge& edge = tree.edges[world_root.first_edge + i];
+                    clean[i] = edge.prior;
                     edge.prior = static_cast<float>(
                         (1.0 - config.dirichlet_fraction) * edge.prior +
                         config.dirichlet_fraction * noise[i] / total);
@@ -1180,7 +1210,7 @@ struct SearchPool::Impl {
             }
             return roots;
         }
-        return std::max(0, std::min(config.max_pending - search.pending, search.budget - search.started));
+        return std::max(0, std::min(search.max_pending - search.pending, search.budget - search.started));
     }
 
     void finish_if_done(Search& search) const {
@@ -1564,7 +1594,20 @@ struct SearchPool::Impl {
         return result;
     }
 
-    bool advance(Search& search, std::size_t action) {
+    /**
+     * Re-root at a root action's child. Without `options` the search starts
+     * its full budget again (advance); with them they become its settings
+     * and the new root's visits count towards the budget (reroot).
+     */
+    bool advance(Search& search, std::size_t action, const SearchOptions* options = nullptr) {
+        if (options != nullptr) {
+            if (config.root != RootSelection::puct) {
+                throw std::invalid_argument(
+                    "reroot counts the root's visits towards a PUCT search's budget; Sequential "
+                    "Halving plans its visits from an empty root (use advance)");
+            }
+            check(*options);
+        }
         if (search.pending > 0) {
             throw std::logic_error("cannot advance a search with leaves awaiting apply");
         }
@@ -1634,12 +1677,28 @@ struct SearchPool::Impl {
         search.started = 0;
         search.completed = 0;
         search.done = false;
-        search.budget = config.simulations;
+        search.budget = search.cap;
+        if (options != nullptr) {
+            configure(search, *options);
+            std::uint64_t carried = 0;
+            for (const Tree& tree : search.worlds) {
+                const Node& root = tree.nodes.front();
+                for (std::uint32_t e = root.first_edge; e < root.first_edge + root.num_edges; ++e) {
+                    carried += edge_visits(tree, tree.edges[e]);
+                }
+            }
+            search.budget = static_cast<int>(
+                static_cast<std::uint64_t>(search.cap) - std::min<std::uint64_t>(carried, search.cap));
+        }
         search.simulations = 0;
         search.evaluations = 0;
         search.depth_sum = 0;
         search.max_depth = 0;
         prepare_root(search, std::nullopt);
+        if (options != nullptr) {
+            // A root that already has its visits runs no simulation.
+            finish_if_done(search);
+        }
         return true;
     }
 
@@ -1717,6 +1776,24 @@ struct SearchPool::Impl {
             for (int slot = 0; slot < search.players; ++slot) {
                 result[static_cast<std::size_t>(slot)] = static_cast<float>(
                     sums[static_cast<std::size_t>((search.root_player + slot) % search.players)] / visits);
+            }
+        }
+        return result;
+    }
+
+    std::vector<float> root_priors(const Search& search) const {
+        const std::size_t actions = codec->size();
+        std::vector<float> result(search.worlds.size() * actions, 0.0F);
+        if (!search.roots_ready) {
+            return result;
+        }
+        for (std::size_t w = 0; w < search.worlds.size(); ++w) {
+            const Tree& tree = search.worlds[w];
+            const Node& root = tree.nodes.front();
+            for (std::uint32_t i = 0; i < root.num_edges; ++i) {
+                const TreeEdge& edge = tree.edges[root.first_edge + i];
+                result[w * actions + edge.action] =
+                    search.clean_priors.empty() ? edge.prior : search.clean_priors[w][i];
             }
         }
         return result;
@@ -1835,6 +1912,13 @@ int SearchPool::max_players() const noexcept { return impl_->config.max_players;
 std::int64_t SearchPool::add(
     const Game& game, std::uint64_t seed, const HandTracker* tracker, bool ignore_tracker,
     std::optional<TrackerMode> deal) {
+    return add(game, seed, SearchOptions{}, tracker, ignore_tracker, deal);
+}
+
+std::int64_t SearchPool::add(
+    const Game& game, std::uint64_t seed, const SearchOptions& options, const HandTracker* tracker,
+    bool ignore_tracker, std::optional<TrackerMode> deal) {
+    Impl::check(options);
     const int players = static_cast<int>(game.colors().size());
     if (players > impl_->config.max_players) {
         throw std::invalid_argument("the game has more seats than max_players");
@@ -1861,7 +1945,8 @@ std::int64_t SearchPool::add(
     search->rng.seed(seed);
     search->players = players;
     search->root_player = game.current_player_index();
-    search->budget = impl_->config.simulations;
+    impl_->configure(*search, options);
+    search->budget = search->cap;
     if (game.winning_color().has_value()) {
         search->done = true;
     } else {
@@ -1975,12 +2060,20 @@ std::vector<float> SearchPool::value(std::int64_t id) const {
     return impl_->value(impl_->find(id));
 }
 
+std::vector<float> SearchPool::root_priors(std::int64_t id) const {
+    return impl_->root_priors(impl_->find(id));
+}
+
 std::size_t SearchPool::select(std::int64_t id, double temperature) {
     return impl_->select(impl_->find(id), temperature);
 }
 
 bool SearchPool::advance(std::int64_t id, std::size_t action_index) {
     return impl_->advance(impl_->find(id), action_index);
+}
+
+bool SearchPool::reroot(std::int64_t id, std::size_t action_index, const SearchOptions& options) {
+    return impl_->advance(impl_->find(id), action_index, &options);
 }
 
 void SearchPool::remove(std::int64_t id) {

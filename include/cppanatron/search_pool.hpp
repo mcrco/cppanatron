@@ -83,6 +83,21 @@ struct SearchConfig {
     bool transpositions{false};
 };
 
+/**
+ * One search's own settings in place of the pool's, for add and reroot: an
+ * unset field takes its SearchConfig value. They let searches of different
+ * budgets share a pool (and a tree its consecutive searches), e.g. the full
+ * and fast searches of playout cap randomization.
+ */
+struct SearchOptions {
+    /** SearchConfig::simulations (reroot: the root visit cap). */
+    std::optional<int> simulations;
+    /** SearchConfig::max_pending. */
+    std::optional<int> max_pending;
+    /** SearchConfig::dirichlet_alpha (PUCT roots; <= 0: no noise). */
+    std::optional<double> dirichlet_alpha;
+};
+
 struct SearchStats {
     std::uint64_t simulations{};
     std::uint64_t evaluations{};
@@ -168,6 +183,14 @@ public:
     std::int64_t add(
         const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
         bool ignore_tracker = false, std::optional<TrackerMode> deal = std::nullopt);
+    /**
+     * add with the search's own budget, leaves per round and root noise
+     * (SearchOptions), which it keeps until a reroot gives it others.
+     */
+    std::int64_t add(
+        const Game& game, std::uint64_t seed, const SearchOptions& options,
+        const HandTracker* tracker = nullptr, bool ignore_tracker = false,
+        std::optional<TrackerMode> deal = std::nullopt);
 
     /**
      * Advance every unfinished search to its next leaves (roots first) and
@@ -213,6 +236,14 @@ public:
     /** Mean root value per seat, seat-relative to the root player. */
     [[nodiscard]] std::vector<float> value(std::int64_t id) const;
     /**
+     * The root's priors as the network gave them, without the Dirichlet
+     * noise the search mixed in: action_size() floats per root world, world
+     * after world, zero off the root's actions. They are what the tree
+     * stores (float32), so a re-rooted root has them as a fresh one does.
+     * All zero until every root world is expanded.
+     */
+    [[nodiscard]] std::vector<float> root_priors(std::int64_t id) const;
+    /**
      * The action to play. Temperature 0: most visits (PUCT) or the
      * Sequential Halving winner (Gumbel: the best noise + logits + sigma
      * among the final survivors, which are re-ranked after every phase);
@@ -221,9 +252,11 @@ public:
     [[nodiscard]] std::size_t select(std::int64_t id, double temperature = 0.0);
     /**
      * Re-root every world at the child of a deterministic root action and
-     * start a fresh simulation budget, keeping the subtree; with
-     * transpositions the new root's children count only visits that passed
-     * through the new root (SearchConfig::transpositions). Returns false
+     * start a fresh simulation budget (the search's own, see SearchOptions),
+     * keeping the subtree; a PUCT root with noise draws new Dirichlet noise
+     * for the new root's priors, which the old root's noise never touched.
+     * With transpositions the new root's children count only visits that
+     * passed through the new root (SearchConfig::transpositions). Returns false
      * (and changes the search no further) when the action leads to a chance
      * node, a finished game or an unvisited child, and, with
      * determinizations, when the child is another player's decision, was
@@ -235,6 +268,19 @@ public:
      * the root player learns could contradict them.
      */
     bool advance(std::int64_t id, std::size_t action_index);
+    /**
+     * advance under a visit cap (KataGo's tree reuse): the visits the new
+     * root already has (the sum of visits(), over worlds) count towards the
+     * search's simulations, so the search only tops the root up to them,
+     * and is done at once, with no simulation, when the root has as many
+     * or more. `options` are the search's settings from here on (unset
+     * fields: the pool's), so consecutive searches of one tree can differ
+     * in budget, leaves per round and noise. Refuses what advance refuses,
+     * leaving the search and its settings as they were. PUCT roots only
+     * (std::invalid_argument on a Gumbel root: Sequential Halving plans its
+     * visits from an empty root).
+     */
+    bool reroot(std::int64_t id, std::size_t action_index, const SearchOptions& options = {});
     void remove(std::int64_t id);
     [[nodiscard]] SearchStats stats(std::int64_t id) const;
 

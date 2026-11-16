@@ -178,6 +178,27 @@ struct EpisodeStats {
         /** Truncated episodes that ended with no playable action (crowded maps). */
         std::uint64_t stuck{};
         std::array<std::uint64_t, 6> seat_wins{};
+        /**
+         * How the games were played, for logging (the style, not the strength).
+         * Over the episodes with a winner (a truncated game has none): the
+         * winner's final victory points, every seat's together, and the mean
+         * over the seats that lost; hidden cards counted.
+         */
+        std::uint64_t winner_points{};
+        std::uint64_t total_points{};
+        double loser_points{};
+        /** Development cards bought, and episodes that ended with the deck empty. */
+        std::uint64_t development_cards_bought{};
+        std::uint64_t development_deck_empty{};
+        /**
+         * Times Largest Army and Longest Road passed from one seat to another
+         * (the first award of each is not one), and episodes that ended with
+         * a seat holding each.
+         */
+        std::uint64_t army_changes{};
+        std::uint64_t road_changes{};
+        std::uint64_t army_awarded{};
+        std::uint64_t road_awarded{};
 
         void add(const Bucket& other);
     };
@@ -313,6 +334,7 @@ private:
     void step_env(int env_index);
     void start_game(Env& env);
     void play(Env& env, Action action);
+    void count_awards(Env& env);
     void observe_options(Env& env);
     void begin_game(
         Env& env, int scenario, std::shared_ptr<const CatanMap> map, std::uint64_t game_seed,

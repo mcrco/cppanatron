@@ -158,6 +158,15 @@ void EpisodeStats::Bucket::add(const Bucket& other) {
     for (std::size_t seat = 0; seat < seat_wins.size(); ++seat) {
         seat_wins[seat] += other.seat_wins[seat];
     }
+    winner_points += other.winner_points;
+    total_points += other.total_points;
+    loser_points += other.loser_points;
+    development_cards_bought += other.development_cards_bought;
+    development_deck_empty += other.development_deck_empty;
+    army_changes += other.army_changes;
+    road_changes += other.road_changes;
+    army_awarded += other.army_awarded;
+    road_awarded += other.road_awarded;
 }
 
 struct VecEnv::Env {
@@ -192,6 +201,18 @@ struct VecEnv::Env {
     std::vector<bool> waiting_written;
     /** Games finished in a row without a learner decision. */
     int games_without_learner{};
+    /**
+     * The current game's style counters (EpisodeStats), kept here on the
+     * moves the env plays and not in the Game, which search copies into every
+     * node: the seat that held each award last (-1 before the first award),
+     * how often an award passed to another seat, and the size of the deck
+     * the game began with.
+     */
+    int army_holder{-1};
+    int road_holder{-1};
+    std::uint64_t army_changes{};
+    std::uint64_t road_changes{};
+    std::size_t development_deck{};
     /** The last finished game. */
     GameOutcome outcome;
     /** The acting row's decoded action, or why it cannot be played. */
@@ -463,6 +484,11 @@ void VecEnv::begin_game(
     env.victory_points.assign(env.seats.size(), 0);
     env.seat_decisions.assign(env.seats.size(), 0);
     env.decisions = 0;
+    env.army_holder = -1;
+    env.road_holder = -1;
+    env.army_changes = 0;
+    env.road_changes = 0;
+    env.development_deck = env.game->development_cards_remaining();
     env.trackers.clear();
     if (config_.trackers) {
         for (std::size_t seat = 0; seat < env.seats.size(); ++seat) {
@@ -480,15 +506,35 @@ void VecEnv::begin_game(
 void VecEnv::play(Env& env, const Action action) {
     if (env.trackers.empty()) {
         env.game->execute(action);
+        count_awards(env);
         return;
     }
     const Game before = *env.game;
     env.game->execute(action);
+    count_awards(env);
     for (auto& [seat, tracker] : env.trackers) {
         (void)seat;
         tracker.observe(before, action, *env.game);
     }
     observe_options(env);
+}
+
+// After every move the env plays: two flags read per seat. A change of
+// hands is a seat holding an award that another seat held last; the first
+// award is not one.
+void VecEnv::count_awards(Env& env) {
+    const auto& players = env.game->players();
+    for (int seat = 0; seat < static_cast<int>(players.size()); ++seat) {
+        const PlayerState& player = players[static_cast<std::size_t>(seat)];
+        if (player.has_army && seat != env.army_holder) {
+            env.army_changes += env.army_holder >= 0 ? 1 : 0;
+            env.army_holder = seat;
+        }
+        if (player.has_road && seat != env.road_holder) {
+            env.road_changes += env.road_holder >= 0 ? 1 : 0;
+            env.road_holder = seat;
+        }
+    }
 }
 
 void VecEnv::observe_options(Env& env) {
@@ -524,6 +570,23 @@ void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
         reward = std::min(reward + 1.0F, 1.0F);
         episode.seat_wins[winner] = 1;
         episode.learner_wins = env.seats[winner] == SeatKind::learner ? 1 : 0;
+        for (const PlayerState& player : game.players()) {
+            episode.total_points += static_cast<std::uint64_t>(player.actual_victory_points);
+        }
+        episode.winner_points =
+            static_cast<std::uint64_t>(game.players()[winner].actual_victory_points);
+        episode.loser_points =
+            static_cast<double>(episode.total_points - episode.winner_points) /
+            static_cast<double>(env.seats.size() - 1);
+    }
+    const std::size_t deck = game.development_cards_remaining();
+    episode.development_cards_bought = env.development_deck - deck;
+    episode.development_deck_empty = deck == 0 ? 1 : 0;
+    episode.army_changes = env.army_changes;
+    episode.road_changes = env.road_changes;
+    for (const PlayerState& player : game.players()) {
+        episode.army_awarded += player.has_army ? 1 : 0;
+        episode.road_awarded += player.has_road ? 1 : 0;
     }
     for (int seat = 0; seat < max_players(); ++seat) {
         const std::size_t index = row(env_index, seat);

@@ -1077,3 +1077,40 @@ def test_f_responders_reject_every_injected_offer():
     (finished,) = env.pop_finished()
     assert finished["decisions"] == driver.decisions[0]
     assert finished["decisions"][1:] == [0, 0]
+
+
+def test_last_outcome_is_the_game_an_env_finished_last():
+    """Each seat's victory points at the end (hidden cards counted), the turns played, whether
+    the game was cut, and how many games the env has finished; num_turns is the current game's."""
+    env = cpp.VecEnv([cpp.Scenario(num_players=3, rules=cpp.GameRules(vps_to_win=5),
+                                   turn_limit=150)], num_envs=3, seed=9)
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(1)
+    assert all(env.last_outcome(e)["games"] == 0 for e in range(3))
+    finished = [0, 0, 0]
+    won = cut = 0
+    for _ in range(4_000):
+        sample_actions(env, buffers, rng)
+        before = [env.num_turns(e) for e in range(3)]
+        assert before == [env.game(e).num_turns for e in range(3)]
+        env.step()
+        for e in range(3):
+            last = env.last_outcome(e)
+            if not buffers["terminals"][e * 3]:
+                assert last["games"] == finished[e]
+                continue
+            finished[e] += 1
+            points = last["victory_points"]
+            assert last["games"] == finished[e] and last["vps_to_win"] == 5 and len(points) == 3
+            assert last["truncated"] == bool(buffers["truncations"][e * 3]) and last["turns"] >= before[e]
+            rewards = buffers["rewards"][e * 3: e * 3 + 3]
+            if last["truncated"]:
+                assert last["turns"] == 150 and max(points) < 5
+                cut += 1
+            else:
+                winner = int(np.argmax(rewards))  # the winner's seat, as the rewards have it
+                assert rewards[winner] == 1.0 and last["turns"] < 150
+                assert [p >= 5 for p in points] == [seat == winner for seat in range(3)]
+                won += 1
+    assert won >= 5 and cut >= 1

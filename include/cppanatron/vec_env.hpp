@@ -129,6 +129,21 @@ struct FinishedGame {
 };
 
 /**
+ * How an env's last finished game ended. Auto-reset starts the next game in
+ * the step that ends one, so the finished game itself is gone by the time the
+ * caller sees its terminal rows; this is what remains of it.
+ */
+struct GameOutcome {
+    /** Games the env has finished since the VecEnv was built; 0: none yet. */
+    std::uint64_t games{};
+    int turns{};
+    bool truncated{};
+    int victory_points_to_win{};
+    /** Each seat's victory points at the end, hidden cards counted. */
+    std::vector<int> victory_points;
+};
+
+/**
  * Caller-owned buffers, rows = num_envs x max_players, row = env x
  * max_players + seat (absolute seat index; seats past the game's player
  * count are padding). Callers read but do not write the observations: the
@@ -279,6 +294,8 @@ public:
     [[nodiscard]] const HandTracker& tracker(int env_index, int seat) const;
 
     [[nodiscard]] const Game& game(int env_index) const;
+    /** How the env's last finished game ended (games 0 before any). */
+    [[nodiscard]] const GameOutcome& last_outcome(int env_index) const;
     [[nodiscard]] int scenario_index(int env_index) const;
     [[nodiscard]] const std::vector<SeatKind>& seat_kinds(int env_index) const;
     /** Seeds of an env's current (or last) game: dice, cards and steals, and bots. */

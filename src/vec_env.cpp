@@ -192,6 +192,8 @@ struct VecEnv::Env {
     std::vector<bool> waiting_written;
     /** Games finished in a row without a learner decision. */
     int games_without_learner{};
+    /** The last finished game. */
+    GameOutcome outcome;
     /** The acting row's decoded action, or why it cannot be played. */
     Action pending;
     std::string refusal;
@@ -534,6 +536,15 @@ void VecEnv::finish_game(int env_index, bool truncated, bool stuck) {
         env.stats.scenarios.resize(config_.scenarios.size());
     }
     env.stats.scenarios[static_cast<std::size_t>(env.scenario)].add(episode);
+
+    env.outcome.games += 1;
+    env.outcome.turns = game.num_turns();
+    env.outcome.truncated = truncated;
+    env.outcome.victory_points_to_win = game.victory_points_to_win();
+    env.outcome.victory_points.clear();
+    for (std::size_t seat = 0; seat < env.seats.size(); ++seat) {
+        env.outcome.victory_points.push_back(game.players()[seat].actual_victory_points);
+    }
 
     if (!config_.auto_reset) {
         FinishedGame finished;
@@ -923,6 +934,10 @@ const Game& VecEnv::game(int env_index) const {
         throw std::logic_error("env " + std::to_string(env_index) + " holds no game");
     }
     return *env.game;
+}
+
+const GameOutcome& VecEnv::last_outcome(int env_index) const {
+    return envs_.at(static_cast<std::size_t>(env_index)).outcome;
 }
 
 int VecEnv::scenario_index(int env_index) const {

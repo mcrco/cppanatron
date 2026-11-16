@@ -463,6 +463,28 @@ void bind_vec_env(nb::module_& module) {
             "game", [](const PyVecEnv& self, int env_index) { return Game(self.env.game(env_index)); },
             nb::arg("env_index"), "A copy of an env's current game.")
         .def(
+            "num_turns",
+            [](const PyVecEnv& self, int env_index) { return self.env.game(env_index).num_turns(); },
+            nb::arg("env_index"), "The turn count of an env's current game.")
+        .def(
+            "last_outcome",
+            [](const PyVecEnv& self, int env_index) {
+                const GameOutcome& outcome = self.env.last_outcome(env_index);
+                nb::dict result;
+                result["games"] = outcome.games;
+                result["turns"] = outcome.turns;
+                result["truncated"] = outcome.truncated;
+                result["vps_to_win"] = outcome.victory_points_to_win;
+                result["victory_points"] = nb::cast(outcome.victory_points);
+                return result;
+            },
+            nb::arg("env_index"),
+            "How an env's last finished game ended: ``games`` (the games the env has\n"
+            "finished since the VecEnv was built; 0 and nothing else to read before any),\n"
+            "``turns``, ``truncated``, ``vps_to_win`` and ``victory_points`` (each\n"
+            "seat's at the end, hidden cards counted). Auto-reset starts the next game\n"
+            "in the step that ends one, so ``game`` no longer shows the finished one.")
+        .def(
             "scenario_index",
             [](const PyVecEnv& self, int env_index) { return self.env.scenario_index(env_index); },
             nb::arg("env_index"))

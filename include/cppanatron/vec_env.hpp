@@ -58,8 +58,8 @@ struct VecEnvConfig {
      * a private actor. Unset: rows are the actor's encoding only.
      */
     std::optional<InfoLevel> critic_level;
-    /** Rows carry each seat's next-roll odds (GraphEncoder's dice_odds); off by default. */
-    bool dice_odds{false};
+    /** Rows carry the dice state (GraphEncoder's dice_state); off by default. */
+    bool dice_state{false};
     std::uint64_t seed{0};
     int num_threads{1};
     /**

@@ -689,20 +689,21 @@ def test_actor_critic_encoder_writes_vec_env_rows_and_search_leaves():
 
 
 @pytest.mark.parametrize("critic", [False, True])
-def test_dice_odds_rows_and_search_leaves_carry_each_seats_next_roll_odds(critic):
-    """VecEnv(dice_odds=True) writes the dice-odds encoder's rows (with a critic block too), on
+def test_dice_state_rows_and_search_leaves_carry_the_dice_state(critic):
+    """VecEnv(dice_state=True) writes the dice-state encoder's rows (with a critic block too), on
     balanced dice, and SearchPool leaves from that encoder are the same rows."""
     balanced = cpp.GameRules(dice_mode=cpp.DiceMode.BALANCED)
     options = {"critic_level": cpp.InfoLevel.FULL} if critic else {}
     env = cpp.VecEnv([cpp.Scenario(num_players=2, rules=balanced)], num_envs=3, seed=6,
-                     level=cpp.InfoLevel.PUBLIC, dice_odds=True, **options)
+                     level=cpp.InfoLevel.PUBLIC, dice_state=True, **options)
     plain = cpp.VecEnv([cpp.Scenario(num_players=2, rules=balanced)], num_envs=1,
                        level=cpp.InfoLevel.PUBLIC, **options)
-    assert env.dice_odds and not plain.dice_odds and env.encoder.dice_odds
-    encoder = (cpp.ActorCriticEncoder(env.dims, cpp.InfoLevel.PUBLIC, cpp.InfoLevel.FULL, dice_odds=True)
-               if critic else cpp.GraphEncoder(env.dims, cpp.InfoLevel.PUBLIC, dice_odds=True))
-    assert type(env.row_encoder) is type(encoder) and env.row_encoder.dice_odds
-    assert encoder.layout() == env.layout() and env.observation_size == plain.observation_size + 22
+    assert env.dice_state and not plain.dice_state and env.encoder.dice_state
+    encoder = (cpp.ActorCriticEncoder(env.dims, cpp.InfoLevel.PUBLIC, cpp.InfoLevel.FULL, dice_state=True)
+               if critic else cpp.GraphEncoder(env.dims, cpp.InfoLevel.PUBLIC, dice_state=True))
+    assert type(env.row_encoder) is type(encoder) and env.row_encoder.dice_state
+    assert encoder.layout() == env.layout()
+    assert env.observation_size == plain.observation_size + (14 * 2 + 23) + 19 * (2 + 2)
     buffers = env.allocate()
     env.reset()
     rng = np.random.default_rng(7)

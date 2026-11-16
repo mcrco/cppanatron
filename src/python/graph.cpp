@@ -154,16 +154,18 @@ void bind_graph(nb::module_& module) {
         "action_mask]; layout() gives every block's (offset, shape) and\n"
         "feature_names(block) the per-slot features. The mask block is the\n"
         "action space's mask for the seat to act and the no-op for the others.\n"
-        "``dice_odds=True`` appends each seat's next-roll odds (``dice_odds_<k>_<t>``,\n"
-        "Game.roll_probabilities of relative seat k for totals 2..12) to the\n"
-        "global block; off, rows are as they always were.")
+        "``dice_state=True`` appends the balanced dice state (the ``dice_*`` features:\n"
+        "each seat's next-roll odds, the deck, the window of recent totals, the\n"
+        "draws before the refill, the sevens and their streak) to the global block\n"
+        "and each tile's view of its own number to the tiles block; under RANDOM\n"
+        "dice they are a fresh state's. Off, rows are as they always were.")
         .def(nb::init<EncoderDims, InfoLevel, bool>(), nb::arg("dims"),
-             nb::arg("level") = InfoLevel::private_, nb::arg("dice_odds") = false)
+             nb::arg("level") = InfoLevel::private_, nb::arg("dice_state") = false)
         .def_prop_ro("size", &GraphEncoder::size)
         .def("__len__", &GraphEncoder::size)
         .def_prop_ro("dims", &GraphEncoder::dims)
         .def_prop_ro("level", &GraphEncoder::level)
-        .def_prop_ro("dice_odds", &GraphEncoder::dice_odds)
+        .def_prop_ro("dice_state", &GraphEncoder::dice_state)
         .def_prop_ro(
             "action_space", [](const GraphEncoder& encoder) { return encoder.action_space(); },
             "The GraphActionSpace whose mask ends each row.")
@@ -230,13 +232,13 @@ void bind_graph(nb::module_& module) {
         "world's sampled hidden cards (perfect-information Monte Carlo).")
         .def(nb::init<EncoderDims, InfoLevel, InfoLevel, bool>(), nb::arg("dims"),
              nb::arg("level") = InfoLevel::private_, nb::arg("critic_level") = InfoLevel::full,
-             nb::arg("dice_odds") = false)
+             nb::arg("dice_state") = false)
         .def_prop_ro("size", &ActorCriticEncoder::size)
         .def("__len__", &ActorCriticEncoder::size)
         .def_prop_ro("dims", [](const ActorCriticEncoder& encoder) { return encoder.actor().dims(); })
         .def_prop_ro("level", [](const ActorCriticEncoder& encoder) { return encoder.actor().level(); })
         .def_prop_ro(
-            "dice_odds", [](const ActorCriticEncoder& encoder) { return encoder.actor().dice_odds(); })
+            "dice_state", [](const ActorCriticEncoder& encoder) { return encoder.actor().dice_state(); })
         .def_prop_ro(
             "critic_level", [](const ActorCriticEncoder& encoder) { return encoder.critic().level(); })
         .def_prop_ro(

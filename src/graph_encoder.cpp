@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <stdexcept>
+
+#include "cppanatron/dice.hpp"
 
 namespace cppanatron {
 namespace {
@@ -27,6 +30,29 @@ float ratio(double value, double denominator) {
 
 float capped(double value, double denominator) {
     return std::min(ratio(value, denominator), 1.0F);
+}
+
+// Scales of the dice state's features (the header documents them).
+constexpr double kOddsScale = 6.0;            // the fair 7 reads 1
+constexpr double kTileOddsScale = 36.0 / 5.0; // a fair number reads its pips / 5
+constexpr double kWindowCap = 3.0;            // three in the window zero a total's weight
+constexpr double kSevensCap = 10.0;
+constexpr double kStreakCap = 5.0;            // 0.4 a seven: five span the multiplier's [0, 2]
+
+/** The dice state the features describe: the game's, or a fresh one under random dice. */
+BalancedDice dice_view(const Game& game) {
+    return game.dice_mode() == DiceMode::balanced
+               ? game.balanced_dice()
+               : BalancedDice::fresh(static_cast<int>(game.colors().size()));
+}
+
+/** Times `total` is among the window's totals. */
+int recent_count(const BalancedDice& dice, int total) {
+    int count = 0;
+    for (int i = 0; i < dice.recent_count; ++i) {
+        count += static_cast<int>(dice.recent[static_cast<std::size_t>(i)] == total);
+    }
+    return count;
 }
 
 void add_resources(std::vector<std::string>& names, const std::string& prefix) {
@@ -74,8 +100,8 @@ void expect(const Cursor& cursor, const float* slot, std::size_t size, const cha
 
 }  // namespace
 
-GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds)
-    : dims_(dims), level_(level), dice_odds_(dice_odds), action_space_(dims) {
+GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_state)
+    : dims_(dims), level_(level), dice_state_(dice_state), action_space_(dims) {
     const int seats = dims_.max_players;
 
     for (const char* prompt : kPromptNames) {
@@ -90,13 +116,21 @@ GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds)
         global_names_.push_back("players_" + std::to_string(count));
     }
     add_resources(global_names_, "board_pips_");
-    if (dice_odds_) {
-        for (int k = 0; k < seats; ++k) {
+    if (dice_state_) {
+        const auto add_totals = [&](const std::string& prefix) {
             for (int total = 2; total <= 12; ++total) {
-                global_names_.push_back(
-                    "dice_odds_" + std::to_string(k) + "_" + std::to_string(total));
+                global_names_.push_back(prefix + std::to_string(total));
             }
+        };
+        for (int k = 0; k < seats; ++k) {
+            add_totals("dice_odds_" + std::to_string(k) + "_");
         }
+        add_totals("dice_deck_");
+        add_totals("dice_recent_");
+        global_names_.push_back("dice_draws_left");
+        add_seats(global_names_, "dice_sevens_", seats);
+        add_seats(global_names_, "dice_seven_share_", seats);
+        add_seats(global_names_, "dice_streak_", seats);
     }
 
     for (const char* name : {"present", "acting", "turn_owner", "public_vps", "actual_vps"}) {
@@ -132,6 +166,11 @@ GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds)
     tile_names_.push_back("pips");
     tile_names_.push_back("robber");
     add_seats(tile_names_, "buildings_", seats);
+    if (dice_state_) {
+        add_seats(tile_names_, "dice_odds_", seats);
+        tile_names_.push_back("dice_deck");
+        tile_names_.push_back("dice_recent");
+    }
 
     node_names_.push_back("valid");
     add_seats(node_names_, "settlement_", seats);
@@ -176,6 +215,7 @@ GraphEncoder::GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds)
         .global_board_pips = at(global_names_, "board_pips_wood"),
         .tile_robber = at(tile_names_, "robber"),
         .tile_buildings = at(tile_names_, "buildings_0"),
+        .tile_dice = at(tile_names_, "dice_odds_0"),
         .node_settlement = at(node_names_, "settlement_0"),
         .node_city = at(node_names_, "city_0"),
         .node_pips = at(node_names_, "pips_wood"),
@@ -212,14 +252,14 @@ const std::vector<std::string>& GraphEncoder::feature_names(const std::string& b
  * Map-only data, in slots: adjacency for the per-call passes and the row with
  * every feature that depends on the map alone already written (validity,
  * terrain, numbers, ports, tile counts, board pips, topology), so encode
- * starts from a copy of it. Built per thread, per live map, dims and dice_odds.
+ * starts from a copy of it. Built per thread, per live map, dims and dice_state.
  */
 struct GraphEncoder::MapCache {
     const CatanMap* address{};
     std::weak_ptr<const CatanMap> map;
     EncoderDims dims;
-    /** The row's shape follows dice_odds too (its global block). */
-    bool dice_odds{};
+    /** The row's shape follows dice_state too (its global and tile blocks). */
+    bool dice_state{};
     std::vector<float> base;
     /** Per node slot: up to 3 neighbor node slots and adjacent land tile slots (-1 pads). */
     std::vector<std::array<int, 3>> neighbors;
@@ -230,6 +270,8 @@ struct GraphEncoder::MapCache {
     std::vector<std::array<int, 6>> corners;
     std::vector<int> tile_resource;
     std::vector<int> tile_pips;
+    /** Per land tile slot: its number, 0 for the desert. */
+    std::vector<int> tile_number;
     /** Per land tile index (tiles()): its land tile slot, or -1. */
     std::vector<int> tile_slot;
 };
@@ -243,7 +285,7 @@ const GraphEncoder::MapCache& GraphEncoder::map_cache(
     for (std::size_t i = 0; i < kRecent; ++i) {
         const auto& entry = recent[i];
         if (entry != nullptr && entry->address == map.get() && entry->dims == dims_ &&
-            entry->dice_odds == dice_odds_ && !entry->map.expired()) {
+            entry->dice_state == dice_state_ && !entry->map.expired()) {
             std::rotate(recent.begin(), recent.begin() + static_cast<std::ptrdiff_t>(i),
                         recent.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             return *recent.front();
@@ -254,7 +296,7 @@ const GraphEncoder::MapCache& GraphEncoder::map_cache(
     cache->address = map.get();
     cache->map = map;
     cache->dims = dims_;
-    cache->dice_odds = dice_odds_;
+    cache->dice_state = dice_state_;
     const auto& nodes = map->land_node_list();
     const auto& land_tiles = map->land_tile_indices();
     const auto& edges = map->land_edges();
@@ -270,6 +312,7 @@ const GraphEncoder::MapCache& GraphEncoder::map_cache(
         cache->tile_resource.push_back(
             tile.resource.has_value() ? static_cast<int>(*tile.resource) : -1);
         cache->tile_pips.push_back(tile.resource.has_value() ? pips(*tile.number) : 0);
+        cache->tile_number.push_back(tile.resource.has_value() ? *tile.number : 0);
     }
     for (int node : nodes) {
         std::array<int, 3> neighbors{-1, -1, -1};
@@ -325,6 +368,9 @@ const GraphEncoder::MapCache& GraphEncoder::map_cache(
         }
         cursor.put(ratio(cache->tile_pips[slot], 5.0));
         cursor.skip(1 + static_cast<std::size_t>(dims_.max_players));  // robber, buildings
+        if (dice_state_) {
+            cursor.skip(static_cast<std::size_t>(dims_.max_players) + 2);  // the tile's dice
+        }
         expect(cursor, begin, tile_names_.size(), "tile");
     }
     for (std::size_t slot = 0; slot < nodes.size(); ++slot) {
@@ -507,6 +553,11 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
     const auto players = static_cast<std::size_t>(dims_.max_players);
     const std::size_t num_nodes = map.land_node_list().size();
 
+    // The dice state's view, filled by the global block and read again by the tiles.
+    BalancedDice dice;
+    std::array<std::array<double, 11>, BalancedDice::kMaxSeats> seat_odds{};
+    std::array<int, 11> window{};
+
     // ---- global (the board pips are the map's)
     {
         Cursor cursor(block(0));
@@ -526,16 +577,51 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
             cursor.put(count == num_players);
         }
         cursor.skip(kResources.size());
-        if (dice_odds_) {
-            // Each seat's next-roll odds, seats relative to the observer; absent slots 0.
+        if (dice_state_) {
+            // The dice state, seats relative to the observer; absent slots 0 (see the header).
+            dice = dice_view(game);
             for (int slot = 0; slot < dims_.max_players; ++slot) {
                 if (slot < num_players) {
-                    for (double p : game.roll_probabilities(seat_of_slot(slot))) {
-                        cursor.put(static_cast<float>(p));
+                    seat_odds[static_cast<std::size_t>(slot)] =
+                        game.roll_probabilities(seat_of_slot(slot));
+                    for (double p : seat_odds[static_cast<std::size_t>(slot)]) {
+                        cursor.put(static_cast<float>(p * kOddsScale));
                     }
                 } else {
                     cursor.skip(11);
                 }
+            }
+            const std::array<int, 11> deck = dice.counts();
+            for (int total = 2; total <= 12; ++total) {
+                cursor.put(ratio(deck[static_cast<std::size_t>(total - 2)], pips(total)));
+            }
+            for (int total = 2; total <= 12; ++total) {
+                const int count = recent_count(dice, total);
+                window[static_cast<std::size_t>(total - 2)] = count;
+                cursor.put(capped(count, kWindowCap));
+            }
+            cursor.put(ratio(std::popcount(dice.drawable()) - BalancedDice::kReshuffleAt,
+                             36 - BalancedDice::kReshuffleAt));
+            int sevens = 0;
+            for (int seat = 0; seat < num_players; ++seat) {
+                sevens += dice.sevens[static_cast<std::size_t>(seat)];
+            }
+            for (int slot = 0; slot < dims_.max_players; ++slot) {
+                cursor.put(slot < num_players
+                               ? capped(dice.sevens[static_cast<std::size_t>(seat_of_slot(slot))],
+                                        kSevensCap)
+                               : 0.0F);
+            }
+            for (int slot = 0; slot < dims_.max_players; ++slot) {
+                cursor.put(slot < num_players
+                               ? ratio(dice.sevens[static_cast<std::size_t>(seat_of_slot(slot))],
+                                       sevens)
+                               : 0.0F);
+            }
+            for (int slot = 0; slot < dims_.max_players; ++slot) {
+                cursor.put(slot < num_players && dice.streak_player == seat_of_slot(slot)
+                               ? capped(dice.streak_count, kStreakCap)
+                               : 0.0F);
             }
         }
         expect(cursor, block(0), global_names_.size(), "global");
@@ -591,6 +677,24 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
         }
     }
     tile_block[static_cast<std::size_t>(robber_slot) * tile_width + offsets_.tile_robber] = 1.0F;
+    if (dice_state_) {
+        // Each numbered tile's own total: its odds per roller, cards left and window count.
+        const std::array<int, 11> deck = dice.counts();
+        for (std::size_t tile = 0; tile < map.land_tile_indices().size(); ++tile) {
+            const int number = cache.tile_number[tile];
+            if (number == 0) {
+                continue;
+            }
+            const auto index = static_cast<std::size_t>(number - 2);
+            float* const begin = tile_block + tile * tile_width + offsets_.tile_dice;
+            for (int slot = 0; slot < num_players; ++slot) {
+                begin[slot] = static_cast<float>(
+                    seat_odds[static_cast<std::size_t>(slot)][index] * kTileOddsScale);
+            }
+            begin[players] = ratio(deck[index], pips(number));
+            begin[players + 1] = capped(window[index], kWindowCap);
+        }
+    }
 
     // ---- nodes: the robber's pips, openness, buildability, network distances
     for (int node_slot : cache.corners[static_cast<std::size_t>(robber_slot)]) {
@@ -717,8 +821,8 @@ void GraphEncoder::encode(const Game& game, int observer, std::span<float> out) 
 }
 
 ActorCriticEncoder::ActorCriticEncoder(
-    EncoderDims dims, InfoLevel level, InfoLevel critic_level, bool dice_odds)
-    : actor_(dims, level, dice_odds), critic_(dims, critic_level, dice_odds),
+    EncoderDims dims, InfoLevel level, InfoLevel critic_level, bool dice_state)
+    : actor_(dims, level, dice_state), critic_(dims, critic_level, dice_state),
       layout_(actor_.layout()) {
     layout_.push_back(
         {"critic_players", actor_.size(),

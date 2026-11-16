@@ -324,10 +324,12 @@ def test_hidden_information_never_reaches_rows_that_may_not_see_it(num_players):
     assert checked_hands > 20 and checked_cards > 5
 
 
-# ---------------------------------------------------------------- dice_odds
+# ---------------------------------------------------------------- dice_state
 
 BALANCED = cpp.GameRules(dice_mode=cpp.DiceMode.BALANCED)
 FAIR = np.array([1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1], dtype=np.float64) / 36.0
+WAYS = [6 - abs(7 - total) for total in range(2, 13)]
+TOTALS = range(2, 13)
 
 
 def balanced_game(num_players: int, seed: int, steps: int) -> cpp.Game:
@@ -340,62 +342,162 @@ def balanced_game(num_players: int, seed: int, steps: int) -> cpp.Game:
     return game
 
 
-def dice_block(encoder: cpp.GraphEncoder, row: np.ndarray) -> np.ndarray:
-    names = encoder.feature_names("global")
-    first = names.index("dice_odds_0_2")
-    globals_ = blocks(encoder, row)["global"]
-    return globals_[first:first + 11 * encoder.dims.max_players].reshape(encoder.dims.max_players, 11)
+def dice_global_names(seats: int) -> list[str]:
+    return ([f"dice_odds_{k}_{t}" for k in range(seats) for t in TOTALS]
+            + [f"dice_deck_{t}" for t in TOTALS] + [f"dice_recent_{t}" for t in TOTALS]
+            + ["dice_draws_left"] + [f"dice_sevens_{k}" for k in range(seats)]
+            + [f"dice_seven_share_{k}" for k in range(seats)] + [f"dice_streak_{k}" for k in range(seats)])
 
 
-def test_dice_odds_names_follow_the_board_pips_per_relative_seat():
+def dice_tile_names(seats: int) -> list[str]:
+    return [f"dice_odds_{k}" for k in range(seats)] + ["dice_deck", "dice_recent"]
+
+
+def expected_dice(game: cpp.Game, observer: int, seats: int) -> tuple[dict, dict]:
+    """The dice features by name, from the game's BalancedDice (a fresh one under random
+    dice) with the header's formulas: the global block's, and per total 2..12 a tile's."""
+    n = game.num_players
+    dice = game.balanced_dice if game.balanced_dice is not None else cpp.BalancedDice.fresh(n)
+    f32 = np.float32
+    counts, recent = dice.counts, list(dice.recent)
+    sevens, total_sevens = list(dice.sevens), sum(dice.sevens)
+    glob, tiles = {}, {t: {} for t in TOTALS}
+    for k in range(seats):
+        seat = (observer + k) % n
+        odds = game.roll_probabilities(seat) if k < n else [0.0] * 11
+        for i, t in enumerate(TOTALS):
+            glob[f"dice_odds_{k}_{t}"] = f32(odds[i] * 6.0)
+            tiles[t][f"dice_odds_{k}"] = f32(odds[i] * (36.0 / 5.0))
+        glob[f"dice_sevens_{k}"] = f32(min(sevens[seat] / 10.0, 1.0)) if k < n else f32(0)
+        glob[f"dice_seven_share_{k}"] = f32(sevens[seat] / total_sevens) if k < n and total_sevens else f32(0)
+        owner = k < n and dice.streak_player == seat
+        glob[f"dice_streak_{k}"] = min(f32(dice.streak_count / 5.0), f32(1)) if owner else f32(0)
+    for i, t in enumerate(TOTALS):
+        glob[f"dice_deck_{t}"] = tiles[t]["dice_deck"] = f32(counts[i] / WAYS[i])
+        glob[f"dice_recent_{t}"] = tiles[t]["dice_recent"] = min(f32(recent.count(t) / 3.0), f32(1))
+    glob["dice_draws_left"] = f32((len(dice.drawable) - 13) / 23.0)
+    return glob, tiles
+
+
+def tile_numbers(encoder: cpp.GraphEncoder, row: np.ndarray) -> list[int]:
+    """Each tile slot's number from its one-hot features (0: the desert or a padded slot)."""
+    names = encoder.feature_names("tiles")
+    numbers = [(int(name.removeprefix("number_")), i) for i, name in enumerate(names) if name.startswith("number_")]
+    return [next((n for n, i in numbers if tile[i]), 0) for tile in blocks(encoder, row)["tiles"]]
+
+
+def test_dice_state_names_end_the_global_block_and_each_tile():
     plain = cpp.GraphEncoder(DIMS, cpp.InfoLevel.FULL)
-    dice = cpp.GraphEncoder(DIMS, cpp.InfoLevel.FULL, dice_odds=True)
-    assert not plain.dice_odds and dice.dice_odds
-    assert dice.feature_names("global") == plain.feature_names("global") + [
-        f"dice_odds_{k}_{t}" for k in range(6) for t in range(2, 13)]
-    assert dice.size == plain.size + 6 * 11
-    for block in ("players", "tiles", "nodes", "edges"):
+    dice = cpp.GraphEncoder(DIMS, cpp.InfoLevel.FULL, dice_state=True)
+    assert not plain.dice_state and dice.dice_state
+    assert dice.feature_names("global") == plain.feature_names("global") + dice_global_names(6)
+    assert dice.feature_names("tiles") == plain.feature_names("tiles") + dice_tile_names(6)
+    assert len(dice_global_names(6)) == 14 * 6 + 23 and len(dice_tile_names(6)) == 6 + 2
+    assert dice.size == plain.size + 14 * 6 + 23 + DIMS.max_tiles * 8
+    for block in ("players", "nodes", "edges"):
         assert dice.feature_names(block) == plain.feature_names(block)
-    shifted = {name: (offset - 66 if name != "global" else offset, shape)
-               for name, (offset, shape) in dice.layout().items()}
-    assert {**shifted, "global": plain.layout()["global"]} == plain.layout()
-    critic = cpp.ActorCriticEncoder(DIMS, cpp.InfoLevel.PRIVATE, cpp.InfoLevel.FULL, dice_odds=True)
-    assert critic.dice_odds and critic.actor.dice_odds and critic.size == critic.actor.size + 6 * 46
+    assert list(dice.layout()) == list(plain.layout())
+    for name, (_, shape) in dice.layout().items():
+        if name not in ("global", "tiles"):
+            assert shape == plain.layout()[name][1]
+    assert not any(name.startswith("dice_") for block in ("global", "players", "tiles", "nodes", "edges")
+                   for name in plain.feature_names(block))
+    critic = cpp.ActorCriticEncoder(DIMS, cpp.InfoLevel.PRIVATE, cpp.InfoLevel.FULL, dice_state=True)
+    assert critic.dice_state and critic.actor.dice_state and critic.size == critic.actor.size + 6 * 46
 
 
 @pytest.mark.parametrize("num_players", [2, 3, 4])
 @pytest.mark.parametrize("balanced", [True, False])
-def test_dice_odds_are_each_relative_seats_roll_probabilities(num_players, balanced):
-    """Slot k holds Game.roll_probabilities of seat (observer + k) mod n, as float32; absent
-    slots are 0. Fair dice give 2d6 for every seat; balanced dice give the state's odds."""
-    encoder = cpp.GraphEncoder(DIMS, cpp.InfoLevel.PRIVATE, dice_odds=True)
-    moved = 0
-    for seed in range(4):
-        game = balanced_game(num_players, seed, 150 + 60 * seed) if balanced else random_game(
-            num_players, seed, 150 + 60 * seed)
-        for observer in range(num_players):
-            odds = dice_block(encoder, encoder.encode(game, observer))
-            for k in range(6):
-                if k < num_players:
-                    want = np.array(game.roll_probabilities((observer + k) % num_players), dtype=np.float32)
-                    assert np.array_equal(odds[k], want)
-                    moved += not np.allclose(want, FAIR)
-                    if not balanced:
-                        assert np.array_equal(odds[k], FAIR.astype(np.float32))
-                else:
-                    assert not odds[k].any()
-    assert (moved > 0) == balanced
+def test_dice_state_features_are_the_balanced_dice_as_the_header_says(num_players, balanced):
+    """Every dice feature, global and per tile, against the game's BalancedDice read through
+    its binding, float32 for float32; seats relative to the observer, absent slots 0, the
+    desert 0. Random dice give a fresh state's features at every roll."""
+    encoder = cpp.GraphEncoder(DIMS, cpp.InfoLevel.PRIVATE, dice_state=True)
+    global_names, tile_names = encoder.feature_names("global"), encoder.feature_names("tiles")
+    seen = {"moved": 0, "streak": 0, "window2": 0, "refill": 0, "aged": 0, "sevens": 0, "tiles": 0}
+    constant = None
+    for seed in range(6):
+        game = cpp.Game(num_players, rules=BALANCED, seed=seed) if balanced else cpp.Game(num_players, seed=seed)
+        rng = random.Random(seed)
+        for step in range(400):
+            if game.winning_color is not None:
+                break
+            game.execute(rng.choice(game.playable_actions))
+            if step % 7:
+                continue
+            for observer in range(num_players):
+                row = encoder.encode(game, observer)
+                parts = blocks(encoder, row)
+                glob, tiles = expected_dice(game, observer, 6)
+                got = dict(zip(global_names, parts["global"]))
+                for name, want in glob.items():
+                    assert got[name] == want, (name, got[name], want)
+                for number, tile in zip(tile_numbers(encoder, row), parts["tiles"]):
+                    got = dict(zip(tile_names, tile))
+                    for name in dice_tile_names(6):
+                        want = tiles[number][name] if number else np.float32(0)
+                        assert got[name] == want, (number, name, got[name], want)
+                    if number and not balanced:
+                        assert all(got[f"dice_odds_{k}"] == got["pips"] for k in range(num_players))
+                    seen["tiles"] += bool(number)
+                dice_row = np.concatenate([parts["global"][len(global_names) - 107:], parts["tiles"][:, -8:].ravel()])
+                if not balanced:
+                    constant = dice_row if constant is None else constant
+                    if observer == 0 and seed == 0:
+                        assert np.array_equal(parts["global"][-107:-107 + 11], (FAIR * 6.0).astype(np.float32))
+            dice = game.balanced_dice
+            if dice is not None:
+                seen["moved"] += not np.allclose(game.roll_probabilities(0), FAIR)
+                seen["streak"] += dice.streak_count >= 2
+                seen["window2"] += max(list(dice.recent).count(t) for t in TOTALS) >= 2 if dice.recent else 0
+                seen["refill"] += dice.remaining <= 13
+                seen["aged"] += 13 < dice.remaining < 36
+                seen["sevens"] += sum(dice.sevens) > 0
+    assert seen["tiles"] > 1000
+    if balanced:
+        assert all(seen[key] > 0 for key in ("moved", "window2", "aged", "sevens")), seen
+    else:
+        assert constant is not None and not any(seen[key] for key in ("moved", "streak", "aged", "sevens"))
+
+
+def test_dice_state_under_random_dice_is_one_constant_per_board_and_seat_count():
+    """Random dice: the global dice features never change in a game, whoever looks, and the
+    tiles' follow the numbers alone (their odds the pips feature)."""
+    encoder = cpp.GraphEncoder(DIMS, cpp.InfoLevel.PRIVATE, dice_state=True)
+    for num_players in (2, 4):
+        game = random_game(num_players, 3, 0)
+        first = None
+        rng = random.Random(1)
+        for step in range(300):
+            if game.winning_color is not None:
+                break
+            game.execute(rng.choice(game.playable_actions))
+            for observer in range(num_players):
+                parts = blocks(encoder, encoder.encode(game, observer))
+                dice_row = np.concatenate([parts["global"][-107:], parts["tiles"][:, -8:].ravel()])
+                first = dice_row if first is None else first
+                assert np.array_equal(dice_row, first)
+        glob = dict(zip(encoder.feature_names("global")[-107:], first[:107]))
+        for k in range(6):
+            for i, t in enumerate(TOTALS):
+                assert glob[f"dice_odds_{k}_{t}"] == (np.float32(FAIR[i] * 6.0) if k < num_players else 0)
+            assert glob[f"dice_sevens_{k}"] == glob[f"dice_seven_share_{k}"] == glob[f"dice_streak_{k}"] == 0
+        assert all(glob[f"dice_deck_{t}"] == 1 and glob[f"dice_recent_{t}"] == 0 for t in TOTALS)
+        assert glob["dice_draws_left"] == 1
 
 
 @pytest.mark.parametrize("num_players", [2, 4])
-def test_dice_odds_off_is_the_plain_row_and_on_only_adds_the_odds(num_players):
-    """Off: the default encoder. On: every block but global as it is off, the global block
-    the plain one plus the odds, even when both encoders share a thread's per-map cache."""
+def test_dice_state_off_is_the_plain_row_and_on_only_adds_the_dice_features(num_players):
+    """Off: the default encoder. On: every block but global and tiles as it is off, those two
+    the plain ones plus the dice features at their ends, even when both encoders share a
+    thread's per-map cache."""
     dims = cpp.EncoderDims(max_players=num_players, max_tiles=19, max_nodes=54, max_edges=72)
     default = cpp.GraphEncoder(dims, cpp.InfoLevel.PUBLIC)
-    plain = cpp.GraphEncoder(dims, cpp.InfoLevel.PUBLIC, dice_odds=False)
-    dice = cpp.GraphEncoder(dims, cpp.InfoLevel.PUBLIC, dice_odds=True)
+    plain = cpp.GraphEncoder(dims, cpp.InfoLevel.PUBLIC, dice_state=False)
+    dice = cpp.GraphEncoder(dims, cpp.InfoLevel.PUBLIC, dice_state=True)
     width = len(default.feature_names("global"))
+    tile_width = len(default.feature_names("tiles"))
+    assert dice.size == default.size + 14 * num_players + 23 + 19 * (num_players + 2)
     for seed in range(3):
         game = balanced_game(num_players, 10 + seed, 200)
         for observer in range(num_players):
@@ -404,7 +506,8 @@ def test_dice_odds_off_is_the_plain_row_and_on_only_adds_the_odds(num_players):
             on = blocks(dice, dice.encode(game, observer))
             off = blocks(default, row)
             assert np.array_equal(on["global"][:width], off["global"])
+            assert np.array_equal(on["tiles"][:, :tile_width], off["tiles"])
             for name in off:
-                if name != "global":
+                if name not in ("global", "tiles"):
                     assert np.array_equal(on[name], off[name]), name
             assert np.array_equal(default.encode(game, observer), row)  # after the dice row: cache intact

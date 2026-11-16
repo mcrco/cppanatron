@@ -42,7 +42,7 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  * in the spirit of Canopy's Nexus-v3 encoder as ported in catanrl v1. Pips
  * are a number's dice weight, 6 - |7 - number| (5 for 6 and 8).
  *
- * global (G = 23 + P, and 11 P more with dice_odds):
+ * global (G = 23 + P, and 14 P + 23 more with dice_state):
  *   prompt_*[7]           one-hot ActionPrompt of the seat to act
  *   road_building         free roads from a road-building card are pending
  *   bank_<R>[5]           bank count / the rules' starting bank of R
@@ -53,11 +53,25 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  *   friendly_robber       the friendly-robber rule is on
  *   players_<n>[P]        one-hot number of seats (n = 1..P)
  *   board_pips_<R>[5]     pips of all R tiles on the map / 30
- *   dice_odds_<k>_<t>[P x 11]  only with dice_odds (off by default): P(next total
- *                         = t) for t = 2..12 when relative seat k rolls,
- *                         Game::roll_probabilities of that seat; 0 for absent
- *                         slots. The balanced dice state is public. Under
- *                         random dice it is the fair 2d6 odds for every seat.
+ *  only with dice_state (off by default), the balanced dice between two rolls
+ *  (BalancedDice; all of it is public), seats relative to the observer and 0
+ *  for absent slots:
+ *   dice_odds_<k>_<t>[P x 11]  6 x P(next total = t), t = 2..12, when seat k
+ *                         rolls (Game::roll_probabilities): the fair 7 reads 1
+ *   dice_deck_<t>[11]     cards of total t in the deck the next draw takes
+ *                         from (drawable(): the full deck when a refill is
+ *                         due) / the full deck's cards of t
+ *   dice_recent_<t>[11]   min(times t is among the last five totals / 3, 1)
+ *                         (three zero its weight)
+ *   dice_draws_left       (cards in drawable() - 13) / 23: the draws before
+ *                         the next refill, 1 on a full deck
+ *   dice_sevens_<k>[P]    min(seat k's sevens so far / 10, 1)
+ *   dice_seven_share_<k>[P]  seat k's sevens / all sevens so far (0 before the
+ *                         first): what the imbalance term reads
+ *   dice_streak_<k>[P]    min(length of the current run of sevens / 5, 1) in
+ *                         its owner's slot, else 0
+ *  Under random dice these are the features of a fresh balanced state (the
+ *  fair odds, a full deck, no history) at every roll: a deck that never ages.
  *
  * players (Fp = 46), for the slot's seat; all zero for absent slots:
  *   present               the slot has a seat
@@ -90,13 +104,18 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  *                         robber's tile excluded) / 15
  *   port_<R>[5], port_3to1 trades at a 2:1 port of R / a 3:1 port
  *
- * tiles (Ft = 19 + P), per land tile:
+ * tiles (Ft = 19 + P, and P + 2 more with dice_state), per land tile:
  *   valid                 the slot is a tile of this map
  *   resource_<R>[5], desert  one-hot terrain
  *   number_<n>[10]        one-hot number, n in 2-6, 8-12
  *   pips                  pips / 5
  *   robber                the robber is here
  *   buildings_<k>[P]      seat k's settlements + 2 x cities on the tile / 6
+ *  only with dice_state, about the tile's own number n (0 on the desert):
+ *   dice_odds_<k>[P]      36/5 x P(next total = n) when seat k rolls: the
+ *                         tile's pips feature under fair dice
+ *   dice_deck             the global dice_deck_<n>
+ *   dice_recent           the global dice_recent_<n>
  *
  * nodes (Fn = 16 + 3P), per land node:
  *   valid                 the slot is a node of this map
@@ -129,7 +148,7 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  *
  * Information levels only change the seat-private features marked above,
  * which read 0 when hidden. The mask is the observer's own. Without
- * dice_odds a row is exactly what it was before the option existed.
+ * dice_state a row is exactly what it was before the option existed.
  */
 class GraphEncoder final : public ObservationEncoder {
 public:
@@ -139,8 +158,8 @@ public:
         std::vector<std::size_t> shape;
     };
 
-    /** `dice_odds` appends each seat's next-roll odds to the global block (see above). */
-    GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_odds = false);
+    /** `dice_state` appends the dice state to the global block and to each tile (see above). */
+    GraphEncoder(EncoderDims dims, InfoLevel level, bool dice_state = false);
 
     [[nodiscard]] std::size_t size() const noexcept override { return size_; }
     /** Throws std::invalid_argument if the game exceeds the dims or `out` is not size(). */
@@ -148,7 +167,7 @@ public:
 
     [[nodiscard]] const EncoderDims& dims() const noexcept { return dims_; }
     [[nodiscard]] InfoLevel level() const noexcept { return level_; }
-    [[nodiscard]] bool dice_odds() const noexcept { return dice_odds_; }
+    [[nodiscard]] bool dice_state() const noexcept { return dice_state_; }
     [[nodiscard]] const GraphActionSpace& action_space() const noexcept { return action_space_; }
     /** Blocks in row order: global, players, tiles, nodes, edges, edge_nodes, tile_nodes,
      * action_mask. */
@@ -185,6 +204,7 @@ private:
         std::size_t global_board_pips{};
         std::size_t tile_robber{};
         std::size_t tile_buildings{};
+        std::size_t tile_dice{};
         std::size_t node_settlement{};
         std::size_t node_city{};
         std::size_t node_pips{};
@@ -203,7 +223,7 @@ private:
 
     EncoderDims dims_;
     InfoLevel level_;
-    bool dice_odds_{};
+    bool dice_state_{};
     GraphActionSpace action_space_;
     std::vector<std::string> global_names_;
     std::vector<std::string> player_names_;
@@ -230,10 +250,10 @@ private:
  */
 class ActorCriticEncoder final : public ObservationEncoder {
 public:
-    /** `dice_odds` as GraphEncoder's (the actor row's global block; the critic block is
+    /** `dice_state` as GraphEncoder's (the actor row's global block; the critic block is
      * the players block, which it does not change). */
     ActorCriticEncoder(EncoderDims dims, InfoLevel level, InfoLevel critic_level,
-                       bool dice_odds = false);
+                       bool dice_state = false);
 
     [[nodiscard]] std::size_t size() const noexcept override {
         return actor_.size() + critic_.players_size();

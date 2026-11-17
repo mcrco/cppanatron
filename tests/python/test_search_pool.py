@@ -592,19 +592,52 @@ def tempered(priors: np.ndarray, temperature: float) -> np.ndarray:
     return powered / powered.sum()
 
 
-def forced_debt(priors: np.ndarray, visits: np.ndarray, k: float) -> tuple[float, float]:
-    """The visits missing from ceil(sqrt(k * prior * N)) over a root's actions
-    after its N simulations, and the most forced playouts can leave missing:
-    the debt recursion D(t + 1) = max(D(t) - 1, 0) + R(t + 1) - R(t), R the
-    sum of the counts at t visits (see test_forced_playouts_reach_their_counts
-    in tests/test_search_pool.cpp)."""
-    wanted = np.zeros(len(priors))
-    bound = 0.0
-    for total in range(1, int(visits.sum()) + 1):
-        now = np.ceil(np.sqrt(k * priors.astype(np.float64) * total))
-        bound = max(bound - 1.0, 0.0) + float((now - wanted).sum())
-        wanted = now
-    return float(np.maximum(wanted - visits, 0.0).sum()), bound
+def peaked(observations: np.ndarray, actions: int, players: int):
+    """:func:`hashed` with four times the logits: priors under which PUCT leaves root actions unvisited."""
+    logits, values = hashed(observations, actions, players)
+    return 4.0 * logits, values
+
+
+def short_of_forced(priors: np.ndarray, visits: np.ndarray, k: float) -> np.ndarray:
+    """What each visited root action lacks of sqrt(k * prior * N) visits, N the root's visits
+    (float64 as the engine computes it; -inf for an action without a visit, which nothing forces)."""
+    visits = visits.astype(np.int64)
+    return np.where(visits > 0, np.sqrt(k * priors.astype(np.float64) * visits.sum()) - visits, -np.inf)
+
+
+def forced_replay(pool: cpp.SearchPool, k: float, evaluate=hashed, players: int = 2, batch: int = 64) -> dict:
+    """Run ``pool`` (searches of one root world) and check its root selections against the
+    forced playouts' rule at ``k``. Root visits change only in ``collect`` and count a leaf from
+    the moment it is issued, so the visits before a round are the state its first selection
+    saw, and each selection the rule decides (a visited action is below its count: the one
+    furthest below is selected) gives the state the next one saw. A round is replayed until
+    its first selection the rule leaves to PUCT, whose choice the visits do not tell; with one
+    leaf per round that is every selection. Per search id: [selections the rule decided and the
+    search made, rounds in which the rule decided one the search did not make]."""
+    observations = np.zeros((batch, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(batch, dtype=np.int64)
+    states = {search: pool.visits(search).astype(np.int64) for search in pool.ids}
+    tally = {search: [0, 0] for search in states}
+    while n := pool.collect(observations, ids):
+        for search, state in states.items():
+            after = pool.visits(search).astype(np.int64)
+            priors = pool.root_search_priors(search)[0]
+            left = after - state
+            assert (left >= 0).all()
+            while left.sum():
+                missing = short_of_forced(priors, state, k)
+                if not missing.max() > 0.0:
+                    break  # PUCT's selection
+                pick = int(np.argmax(missing))
+                if not left[pick]:
+                    tally[search][1] += 1
+                    break
+                state[pick] += 1
+                left[pick] -= 1
+                tally[search][0] += 1
+            states[search] = after
+        pool.apply(*evaluate(observations[:n], pool.action_size, players))
+    return tally
 
 
 def test_root_temperature():
@@ -675,8 +708,10 @@ def test_root_temperature():
 @pytest.mark.parametrize("max_pending", [1, 4, 16])
 @pytest.mark.parametrize("shaped", [False, True])
 def test_forced_playouts(max_pending, shaped):
-    """With k = 2 every root action is searched up to ceil(sqrt(2 * prior * N))
-    visits, less at most the debt the priors allow; PUCT alone is not."""
+    """With k = 2 the root selects, whenever a visited action is below sqrt(2 * prior * N)
+    visits, the visited action furthest below (:func:`forced_replay`: every selection seen,
+    all of them with one leaf per round); an action without a visit is never forced, so
+    actions stay unvisited as under PUCT alone, which selects otherwise."""
     game, _ = random_game(2, 8, 60)
     codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
     encoder = cpp.FlatObservationEncoder(2, observation_layout())
@@ -687,26 +722,28 @@ def test_forced_playouts(max_pending, shaped):
     pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**settings))
     plain = pool.add(game, 4)
     forced = pool.add(game, 4, forced_playouts=2.0)
-    run_hashed(pool, 2)
+    tally = forced_replay(pool, 2.0, peaked)
     np.testing.assert_array_equal(pool.root_search_priors(forced), pool.root_search_priors(plain))
     priors = pool.root_search_priors(forced)[0]
     assert pool.visits(forced).sum() == 300 and pool.stats(forced).simulations == 300
-    missing, bound = forced_debt(priors, pool.visits(forced), 2.0)
-    assert bound <= 2.0  # tight enough to say something
-    assert missing <= bound
-    assert (pool.visits(forced) >= np.ceil(np.sqrt(2.0 * priors.astype(np.float64) * 300)) - bound).all()
-    assert forced_debt(priors, pool.visits(plain), 2.0)[0] > bound
+    assert tally[forced][0] > 0 and tally[forced][1] == 0  # the rule's selections, each one made
+    assert tally[plain][1] > 0  # PUCT alone makes others
+    # KataGo's rule: an action is forced once it has a visit, so some are never opened.
+    assert ((priors > 0) & (pool.visits(forced) == 0)).any()
+    # Here the visited actions end at their counts, which PUCT alone leaves them short of.
+    lacking = [np.ceil(short_of_forced(priors, pool.visits(search), 2.0)).clip(min=0.0).sum()
+               for search in (forced, plain)]
+    assert lacking[0] < lacking[1]
 
-    # Short searches, where the counts rise faster than one visit pays: the debt stays within its bound.
-    short = {budget: pool.add(game, budget, simulations=budget, forced_playouts=2.0) for budget in range(1, 61)}
-    run_hashed(pool, 2, batch=256)
-    owed = 0
-    for budget, search in short.items():
-        assert pool.visits(search).sum() == budget
-        missing, bound = forced_debt(pool.root_search_priors(search)[0], pool.visits(search), 2.0)
-        assert missing <= bound
-        owed += bound > 0
-    assert owed > 10
+    # Short searches, where the counts rise faster than one visit pays: the rule decides the same way.
+    made = 0
+    for budget in range(1, 61):
+        brief = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**settings))
+        search = brief.add(game, budget, simulations=budget, forced_playouts=2.0)
+        decided, missed = forced_replay(brief, 2.0, peaked)[search]
+        assert brief.visits(search).sum() == budget and missed == 0
+        made += decided
+    assert made > 20
 
 
 def test_root_options_per_search_and_refusals():

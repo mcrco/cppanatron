@@ -1746,73 +1746,130 @@ void test_root_temperature_reshapes_the_priors_in_use() {
 }
 
 /**
- * Forced playouts keep every root action near sqrt(k * prior * N) visits.
- * An action is forced while its visits n are below f(t) = sqrt(k * prior *
- * t), t the root's visits so far, both with the leaves in flight, i.e.
- * while n < r(t) = ceil(f(t)). Call the debt D(t) the sum over actions of
- * max(0, r(t) - n). A selection with D(t) > 0 is a forced one and pays one
- * visit of it; the next visit raises the r(t) by R(t + 1) - R(t) in all (R
- * their sum), so D(t + 1) <= max(D(t) - 1, 0) + R(t + 1) - R(t) from D(0) =
- * 0, whatever the leaves per round: a leaf in flight counts as its visit
- * from the moment it is issued. After N simulations of a fresh root of one
- * world the visits therefore miss ceil(sqrt(k * prior * N)) by at most that
- * recursion's D(N) over all actions together, which the priors alone give.
+ * Forced playouts select, whenever a visited root action is below f(t) =
+ * sqrt(k * prior * t) visits (t the root's visits so far, both with the
+ * leaves in flight), the visited action furthest below; an action without
+ * a visit is never forced (KataGo), so PUCT opens the actions it would
+ * open anyway. The test replays the root's selections from its visits:
+ * they change only in collect and count a leaf from the moment it is
+ * issued, so the visits before a round are the state its first selection
+ * saw, and each selection the rule decides gives the state the next one
+ * saw. A round is replayed until its first selection the rule leaves to
+ * PUCT (the visits do not tell what PUCT chose); with one leaf per round
+ * that is every selection.
  */
-void test_forced_playouts_reach_their_counts() {
+void test_forced_playouts_select_the_visited_action_furthest_below() {
     const Game game = hand_position({4, 4, 0, 0, 0});
     const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
     const int simulations = 300;
     const double k = 2.0;
-    // {the visits missing from the counts, the most the rule can leave missing}
-    const auto debt = [&](const SearchPool& pool, std::int64_t id) {
+    // Priors under which PUCT, with an unvisited action's value 0, leaves root actions unvisited.
+    const Evaluator peaked = [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        hashed_evaluator(4)(leaf, logits, values);
+        for (float& logit : logits) {
+            logit *= 4.0F;
+        }
+    };
+    // What a visited action lacks of its count (none: below zero).
+    const auto missing = [&](const std::vector<float>& priors, const std::vector<std::uint32_t>& visits,
+                             std::size_t i) {
+        return visits[i] == 0 ? -1.0
+                              : std::sqrt(k * priors[i] * static_cast<double>(total(visits))) -
+                                    static_cast<double>(visits[i]);
+    };
+    struct Replay {
+        int decided{}; // selections the rule decided, which the search made
+        int missed{};  // rounds in which the rule decided one the search did not make
+    };
+    const auto replay = [&](SearchPool& pool, std::int64_t id) {
+        Replay result;
+        std::vector<float> observations(64 * pool.observation_size());
+        std::vector<std::int64_t> ids(64);
+        std::vector<std::uint32_t> state = pool.visits(id);
+        while (true) {
+            const std::size_t rows = pool.collect(observations, ids);
+            if (rows == 0) {
+                return result;
+            }
+            const auto after = pool.visits(id);
+            const auto priors = pool.root_search_priors(id);
+            while (state != after) {
+                std::size_t pick = state.size();
+                double shortfall = 0.0;
+                for (std::size_t i = 0; i < state.size(); ++i) {
+                    if (const double lacks = missing(priors, state, i); lacks > shortfall) {
+                        shortfall = lacks;
+                        pick = i;
+                    }
+                }
+                if (pick == state.size()) {
+                    break; // PUCT's selection
+                }
+                if (state[pick] == after[pick]) {
+                    ++result.missed;
+                    break;
+                }
+                ++state[pick];
+                ++result.decided;
+            }
+            state = after;
+            const std::size_t width = pool.action_size();
+            std::vector<float> logits(rows * width);
+            std::vector<float> values(rows * 4);
+            for (std::size_t row = 0; row < rows; ++row) {
+                peaked(
+                    pool.pending_game(row), std::span<float>(logits).subspan(row * width, width),
+                    std::span<float>(values).subspan(row * 4, 4));
+            }
+            pool.apply(logits, values);
+        }
+    };
+    // The visits the visited actions lack of ceil(f(N)) in all.
+    const auto lacking = [&](const SearchPool& pool, std::int64_t id) {
         const auto priors = pool.root_search_priors(id);
         const auto visits = pool.visits(id);
-        std::vector<double> wanted(priors.size(), 0.0);
-        double bound = 0.0;
-        for (int total = 1; total <= simulations; ++total) {
-            double raised = 0.0;
-            for (std::size_t i = 0; i < priors.size(); ++i) {
-                const double now = std::ceil(std::sqrt(k * priors[i] * static_cast<double>(total)));
-                raised += now - wanted[i];
-                wanted[i] = now;
-            }
-            bound = std::max(bound - 1.0, 0.0) + raised;
+        double sum = 0.0;
+        for (std::size_t i = 0; i < visits.size(); ++i) {
+            sum += std::max(0.0, std::ceil(missing(priors, visits, i)));
         }
-        double missing = 0.0;
-        for (std::size_t i = 0; i < priors.size(); ++i) {
-            missing += std::max(0.0, wanted[i] - static_cast<double>(visits[i]));
-        }
-        return std::pair{missing, bound};
+        return sum;
     };
     for (const bool shaped : {false, true}) {
         SearchConfig config;
         config.simulations = simulations;
         config.max_players = 4;
+        config.fpu_value = 0.0; // an unvisited action counts as lost
         config.dirichlet_alpha = shaped ? 0.3 : 0.0;
         config.root_policy_temperature = shaped ? 1.25 : 1.0;
-        std::vector<std::uint32_t> unforced;
         for (const int pending : {1, 4, 16}) {
+            const std::string at = " (max_pending " + std::to_string(pending) + ")";
             config.max_pending = pending;
             config.forced_playouts = 0.0;
             SearchPool plain(codec, std::make_shared<ToyEncoder>(), config);
             const auto reference = plain.add(game, 5);
-            run(plain, hashed_evaluator(4));
-            const auto [short_of, allowed] = debt(plain, reference);
-            require(allowed <= 2.0, "the bound must be tight for the test to say anything");
-            require(short_of > allowed, "PUCT alone must fall short of the counts for the test to say anything");
+            require(replay(plain, reference).missed > 0,
+                    "PUCT alone must select otherwise for the test to say anything" + at);
 
             config.forced_playouts = k;
             SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
             const auto id = pool.add(game, 5);
-            run(pool, hashed_evaluator(4));
+            const Replay seen = replay(pool, id);
             require(pool.done(id) && total(pool.visits(id)) == static_cast<std::uint32_t>(simulations),
                     "forced playouts are simulations of the budget");
             require(pool.root_search_priors(id) == plain.root_search_priors(reference),
                     "forced playouts leave the priors alone");
-            const auto [missing, bound] = debt(pool, id);
-            require(missing <= bound, "forced playouts must reach their counts (max_pending " +
-                                          std::to_string(pending) + "): " + std::to_string(missing) +
-                                          " visits missing, at most " + std::to_string(bound) + " allowed");
+            require(seen.decided > 0 && seen.missed == 0,
+                    "a visited action below its count is selected, the furthest below first" + at + ": " +
+                        std::to_string(seen.decided) + " made, " + std::to_string(seen.missed) + " rounds without");
+            const auto priors = pool.root_search_priors(id);
+            const auto visits = pool.visits(id);
+            bool unopened = false;
+            for (std::size_t i = 0; i < visits.size(); ++i) {
+                unopened = unopened || (priors[i] > 0.0F && visits[i] == 0);
+            }
+            require(unopened, "an action without a visit is not forced: PUCT leaves some unvisited" + at);
+            require(lacking(pool, id) < lacking(plain, reference),
+                    "here the visited actions end nearer their counts than under PUCT alone" + at);
         }
     }
 }
@@ -1915,7 +1972,7 @@ int main() {
     try {
         test_root_options_off_are_bitwise_today();
         test_root_temperature_reshapes_the_priors_in_use();
-        test_forced_playouts_reach_their_counts();
+        test_forced_playouts_select_the_visited_action_furthest_below();
         test_root_options_are_per_search();
         test_search_options_are_per_search();
         test_reroot_counts_the_carried_visits();

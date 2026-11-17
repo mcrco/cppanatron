@@ -91,12 +91,14 @@ struct SearchConfig {
     double root_policy_temperature{1.0};
     /**
      * Forced playouts at a PUCT root (KataGo's k, which is 2 there; 0 = off):
-     * a root action with fewer than sqrt(k * prior * total) visits is
-     * selected before PUCT is asked, the one furthest below first (the first
-     * of equals). The prior is the one the root selects by (after the
-     * temperature and the noise), total the visits of all the root's
-     * actions, and both counts include the leaves awaiting evaluation. Only
-     * the root selects this way, each root world on its own counts.
+     * a root action that has a visit but fewer than sqrt(k * prior * total)
+     * of them is selected before PUCT is asked, the one furthest below first
+     * (the first of equals). An action without a visit is not forced: PUCT
+     * (and the noise) opens it, as without forced playouts. The prior is the
+     * one the root selects by (after the temperature and the noise), total
+     * the visits of all the root's actions, and both counts include the
+     * leaves awaiting evaluation. Only the root selects this way, each root
+     * world on its own counts.
      */
     double forced_playouts{0.0};
 };

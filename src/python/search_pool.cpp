@@ -103,10 +103,11 @@ void bind_search_pool(nb::module_& module) {
         "  trades in any order); off, every path has its own nodes.\n"
         "root_policy_temperature: a PUCT root selects by its priors raised to\n"
         "  1 / temperature and renormalized, before the noise (1 = as they are).\n"
-        "forced_playouts: KataGo's k (2 there; 0 = off). A PUCT root action with\n"
-        "  fewer than sqrt(k * prior * total root visits) visits is selected before\n"
-        "  PUCT is asked, the one furthest below first; the prior is the one the\n"
-        "  root selects by, and visits include leaves awaiting evaluation.")
+        "forced_playouts: KataGo's k (2 there; 0 = off). A PUCT root action with a\n"
+        "  visit but fewer than sqrt(k * prior * total root visits) of them is\n"
+        "  selected before PUCT is asked, the one furthest below first; the prior is\n"
+        "  the one the root selects by, and visits include leaves awaiting\n"
+        "  evaluation. An action without a visit is not forced.")
         .def(
             "__init__",
             [](SearchConfig* self, double c_puct, int simulations, int max_pending, RootSelection root,

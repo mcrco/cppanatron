@@ -916,8 +916,9 @@ struct SearchPool::Impl {
     /**
      * The edge PUCT descends, after the forced playouts at a root: with
      * `forced` > 0 (SearchConfig::forced_playouts, passed for the root only)
-     * the edge furthest below sqrt(forced * prior * total) visits, when one
-     * is below. Visits include the leaves awaiting evaluation.
+     * the visited edge furthest below sqrt(forced * prior * total) visits,
+     * when one is below (KataGo: an edge without a visit is PUCT's to open).
+     * Visits include the leaves awaiting evaluation.
      */
     std::uint32_t select_edge(const Tree& tree, std::uint32_t node_index, double forced = 0.0) const {
         const Node& node = tree.nodes[node_index];
@@ -931,9 +932,12 @@ struct SearchPool::Impl {
             double shortfall = 0.0;
             for (std::uint32_t e = node.first_edge; e < node.first_edge + node.num_edges; ++e) {
                 const TreeEdge& edge = tree.edges[e];
+                const std::uint32_t visits = edge_visits(tree, edge);
+                if (visits == 0) {
+                    continue;
+                }
                 const double missing =
-                    std::sqrt(forced * edge.prior * static_cast<double>(total)) -
-                    static_cast<double>(edge_visits(tree, edge));
+                    std::sqrt(forced * edge.prior * static_cast<double>(total)) - static_cast<double>(visits);
                 if (missing > shortfall) {
                     shortfall = missing;
                     short_edge = e;

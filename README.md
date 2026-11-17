@@ -231,12 +231,11 @@ applies it to the network's priors anew, so nothing compounds over re-rooted
 searches, `root_priors(id)` stays the network's and `root_search_priors(id)`
 gives the priors in use (after temperature and noise). `forced_playouts` k
 (0 = off; KataGo uses 2) makes the root select, before PUCT is asked, the
-action furthest below `sqrt(k * P * N)` visits, when one is below: `P` is the
-action's prior in use and `N` the visits of all the root's actions, both
-counts including leaves awaiting evaluation. Unlike KataGo, which forces only
-actions that already have a visit, an unvisited action is forced too: any
-prior above zero puts it below its count once the root has a visit, so a
-search of enough simulations visits every root action that has a prior at all.
+visited action furthest below `sqrt(k * P * N)` visits, when one is below:
+`P` is the action's prior in use and `N` the visits of all the root's
+actions, both counts including leaves awaiting evaluation. As in KataGo only
+an action that already has a visit is forced: PUCT (and the noise) opens an
+unvisited one, as it would without forced playouts.
 Each root world forces on its own counts, and only the root does. The visits
 this adds are meant to be pruned from a policy target (KataGo's policy target
 pruning; `catanrl.train.alphazero.pruned_visits`).

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 
 import numpy as np
 import pytest
@@ -1114,3 +1115,155 @@ def test_last_outcome_is_the_game_an_env_finished_last():
                 assert [p >= 5 for p in points] == [seat == winner for seat in range(3)]
                 won += 1
     assert won >= 5 and cut >= 1
+
+
+def award_holders(game: cpp.Game) -> tuple[int | None, int | None]:
+    """The seats holding Largest Army and Longest Road, None while nobody does."""
+    army = [seat for seat, player in enumerate(game.players) if player.has_army]
+    road = [seat for seat, player in enumerate(game.players) if player.has_road]
+    return (army[0] if army else None, road[0] if road else None)
+
+
+def changes_of_hands(holders: list[int | None]) -> int:
+    """Times an award passed from one seat to another in a sequence of its holders."""
+    held = [holder for holder in holders if holder is not None]
+    return sum(a != b for a, b in itertools.pairwise(held))
+
+
+@pytest.mark.parametrize("seats,vps,turn_limit,deck,trackers", [
+    (["learner"] * 2, 10, 300, [14, 2, 2, 2, 5], False),
+    (["learner"] * 3, 8, 300, [14, 0, 1, 1, 2], True),
+    (["learner"] * 4, 6, 200, [12, 1, 1, 1, 1], False),
+    (["learner", "value"], 10, 70, [8, 1, 1, 1, 2], False),
+    (["value", "learner", "value"], 10, 70, [8, 1, 1, 1, 2], True)])
+def test_style_stats_match_a_recount_of_every_move(seats, vps, turn_limit, deck, trackers):
+    """pop_stats' style means against a recount on copies of the games, which replay each
+    step's action, the forced moves and F's: the award holders after every move, the
+    development cards bought and the final victory points. Truncated games count everywhere
+    but in the victory points; the first award of Largest Army or Longest Road is not a
+    change of hands."""
+    players = len(seats)
+    rules = cpp.GameRules(vps_to_win=vps, development_deck=deck)
+    env = cpp.VecEnv([cpp.Scenario(num_players=players, rules=rules, turn_limit=turn_limit,
+                                   seats=seats)],
+                     num_envs=4, seed=3, dims=cpp.EncoderDims(max_players=players),
+                     trackers=trackers)
+    buffers = env.allocate()
+    env.reset()
+    space = env.encoder.action_space
+    rng = np.random.default_rng(1)
+    holders = [[] for _ in range(env.num_envs)]  # after every move of each env's current game
+    bought = [0] * env.num_envs
+    seen = dict.fromkeys(("won", "cut", "army_changes", "road_changes", "dev_deck_empty"), 0)
+    for _ in range(600 if "value" in seats else 3_000):
+        sample_actions(env, buffers, rng)
+        ended = []
+        for e in range(env.num_envs):
+            game = env.game(e)
+            row = e * players + game.current_player_index
+            action = space.decode(game, int(buffers["actions"][row]))
+            while True:
+                bought[e] += action.action_type == cpp.ActionType.BUY_DEVELOPMENT_CARD
+                game.execute(action)
+                holders[e].append(award_holders(game))
+                over = game.winning_color is not None or game.num_turns >= turn_limit
+                if over:
+                    break
+                if seats[game.current_player_index] == "value":
+                    action = cpp.value_action(game)
+                elif len(game.playable_actions) == 1:
+                    action = game.playable_actions[0]
+                else:
+                    break
+            if over:
+                ended.append((e, game))
+        env.step()
+        stats = env.pop_stats()
+        assert stats["episodes"] == len(ended)
+        expected = dict.fromkeys(("dev_bought", "dev_deck_empty", "army_changes", "road_changes",
+                                  "army_awarded", "road_awarded"), 0)
+        points = dict.fromkeys(("winner_vp", "loser_vp", "total_vp"), 0.0)
+        won = 0
+        for e, game in ended:
+            army, road = zip(*holders[e])
+            expected["dev_bought"] += bought[e]
+            expected["dev_deck_empty"] += game.development_cards_remaining == 0
+            expected["army_changes"] += changes_of_hands(army)
+            expected["road_changes"] += changes_of_hands(road)
+            expected["army_awarded"] += army[-1] is not None
+            expected["road_awarded"] += road[-1] is not None
+            holders[e], bought[e] = [], 0
+            if game.winning_color is None:
+                continue
+            won += 1
+            final = [player.actual_victory_points for player in game.players]
+            winner = final.pop(game.winning_player_index)
+            assert winner >= vps > max(final)
+            points["winner_vp"] += winner
+            points["loser_vp"] += sum(final) / len(final)
+            points["total_vp"] += winner + sum(final)
+        for key, total in expected.items():
+            assert stats[key] * len(ended) == pytest.approx(total), key
+            seen[key] = seen.get(key, 0) + total
+        for key, total in points.items():
+            assert stats[key] * won == pytest.approx(total), key
+        assert stats["truncated"] * len(ended) == pytest.approx(len(ended) - won)
+        seen["won"] += won
+        seen["cut"] += len(ended) - won
+    # against F here Largest Army stays where it went and the deck never runs out
+    rare = ("army_changes", "dev_deck_empty") if "value" in seats else ()
+    assert all(count > 0 for key, count in seen.items() if key not in rare), seen
+
+
+#: The episode means pop_stats gave before it counted the style of play.
+EPISODE_KEYS = ("episodes", "truncated", "length", "decisions", "learner_win", "learner_seats",
+                "stuck", "seat_win")
+ROLLOUTS = {
+    # OpenHex's 1v1 rules with the dice input
+    "2p friendly robber, balanced dice": lambda: cpp.VecEnv(
+        [cpp.Scenario(num_players=2, turn_limit=300, rules=cpp.GameRules(
+            vps_to_win=10, discard_limit=9, friendly_robber=True,
+            dice_mode=cpp.DiceMode.BALANCED))],
+        num_envs=6, seed=11, dice_state=True),
+    "3p against F and R": lambda: cpp.VecEnv(
+        [cpp.Scenario(num_players=3, seats=["learner", "value", "random"], shuffle_seats=True,
+                      turn_limit=80)],
+        num_envs=6, seed=12, dims=cpp.EncoderDims(max_players=3), num_threads=2),
+    "4p with trackers and shaping": lambda: cpp.VecEnv(
+        [cpp.Scenario(num_players=4, rules=cpp.GameRules(vps_to_win=6), turn_limit=120)],
+        num_envs=6, seed=13, trackers=True, vp_reward=0.5, critic_level=cpp.InfoLevel.FULL),
+}
+#: Recorded with the engine at e8edef9, before the style counters.
+GOLDEN_ROLLOUTS = {
+    "2p friendly robber, balanced dice":
+        "3284b33d25f346c7672646abb8d069ec68efa67d22cd8fc4eb77bab7fcd3eaec",
+    "3p against F and R": "b04e9282a4de50a1e672b0a75e1b798c43b58ca1b7ae4310184445e910652318",
+    "4p with trackers and shaping":
+        "4fdcf296fa6d7b8b4488ef101a114f6ab90da70f0136f213ee294abfc37f36d7",
+}
+
+
+def rollout_digest(env: cpp.VecEnv, steps: int = 500) -> str:
+    """sha256 over every step's buffers, then the episode means and each env's last outcome."""
+    buffers = env.allocate()
+    env.reset()
+    rng = np.random.default_rng(env.num_envs)
+    digest = hashlib.sha256()
+    for _ in range(steps):
+        sample_actions(env, buffers, rng)
+        env.step()
+        for name in sorted(buffers):
+            digest.update(buffers[name].tobytes())
+    stats = env.pop_stats()
+    assert stats["episodes"] > env.num_envs and 0 < stats["truncated"] < 1
+    summary = [[bucket[key] for key in EPISODE_KEYS] for bucket in (stats, *stats["scenarios"])]
+    outcomes = [sorted(env.last_outcome(e).items()) for e in range(env.num_envs)]
+    digest.update(repr((summary, outcomes)).encode())
+    return digest.hexdigest()
+
+
+@pytest.mark.parametrize("name", sorted(ROLLOUTS))
+def test_counting_the_style_of_play_changes_no_game(name):
+    """The style counters are logging only: seeded rollouts give the rows, rewards, flags,
+    episode means and outcomes the engine gave before it kept them."""
+    assert rollout_digest(ROLLOUTS[name]()) == GOLDEN_ROLLOUTS[name]

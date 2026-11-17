@@ -134,6 +134,20 @@ nb::dict bucket_to_python(const EpisodeStats::Bucket& bucket, std::size_t seats)
     result["learner_win"] = mean(bucket.learner_wins);
     result["learner_seats"] = mean(bucket.learner_seats);
     result["stuck"] = mean(bucket.stuck);
+    // Final victory points are means over the episodes with a winner.
+    const auto won = static_cast<double>(bucket.episodes - bucket.truncated);
+    const auto won_mean = [&](double value) -> nb::object {
+        return bucket.episodes == bucket.truncated ? nb::cast(0.0) : nb::cast(value / won);
+    };
+    result["winner_vp"] = won_mean(static_cast<double>(bucket.winner_points));
+    result["loser_vp"] = won_mean(bucket.loser_points);
+    result["total_vp"] = won_mean(static_cast<double>(bucket.total_points));
+    result["dev_bought"] = mean(bucket.development_cards_bought);
+    result["dev_deck_empty"] = mean(bucket.development_deck_empty);
+    result["army_changes"] = mean(bucket.army_changes);
+    result["road_changes"] = mean(bucket.road_changes);
+    result["army_awarded"] = mean(bucket.army_awarded);
+    result["road_awarded"] = mean(bucket.road_awarded);
     nb::list seat_wins;
     for (std::size_t seat = 0; seat < seats; ++seat) {
         seat_wins.append(mean(bucket.seat_wins[seat]));
@@ -458,7 +472,16 @@ void bind_vec_env(nb::module_& module) {
             "Episodes finished since the last call: count, and means of truncated,\n"
             "stuck (truncated with no playable action), length (turns), learner\n"
             "decisions, learner_win (won by a learner seat), learner_seats and\n"
-            "seat_win per seat; the same per scenario.")
+            "seat_win per seat; the same per scenario.\n\n"
+            "How they were played, for logging. Over the episodes with a winner (0.0\n"
+            "when every one was truncated): winner_vp, loser_vp (the mean over the\n"
+            "seats that lost) and total_vp (every seat's together), final victory\n"
+            "points with hidden cards counted. Over all episodes: dev_bought\n"
+            "(development cards bought per episode), dev_deck_empty (the share that\n"
+            "ended with the deck empty), army_changes and road_changes (times Largest\n"
+            "Army and Longest Road passed from one seat to another; the first award\n"
+            "of each is not one) and army_awarded and road_awarded (the share that\n"
+            "ended with a seat holding each).")
         .def(
             "game", [](const PyVecEnv& self, int env_index) { return Game(self.env.game(env_index)); },
             nb::arg("env_index"), "A copy of an env's current game.")

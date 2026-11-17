@@ -100,7 +100,13 @@ void bind_search_pool(nb::module_& module) {
         "threads: for collect/apply across searches (0 = all cores).\n"
         "transpositions: share one node between every order of actions reaching\n"
         "  the same position below the root's children (builds, discards and bank\n"
-        "  trades in any order); off, every path has its own nodes.")
+        "  trades in any order); off, every path has its own nodes.\n"
+        "root_policy_temperature: a PUCT root selects by its priors raised to\n"
+        "  1 / temperature and renormalized, before the noise (1 = as they are).\n"
+        "forced_playouts: KataGo's k (2 there; 0 = off). A PUCT root action with\n"
+        "  fewer than sqrt(k * prior * total root visits) visits is selected before\n"
+        "  PUCT is asked, the one furthest below first; the prior is the one the\n"
+        "  root selects by, and visits include leaves awaiting evaluation.")
         .def(
             "__init__",
             [](SearchConfig* self, double c_puct, int simulations, int max_pending, RootSelection root,
@@ -108,12 +114,13 @@ void bind_search_pool(nb::module_& module) {
                double gumbel_scale, double gumbel_c_visit, double gumbel_c_scale,
                bool gumbel_rescale_values, int determinizations, int max_players, double fpu_value,
                double fpu_reduction, bool skip_forced, bool release_games, int threads,
-               bool transpositions) {
+               bool transpositions, double root_policy_temperature, double forced_playouts) {
                 new (self) SearchConfig{
                     c_puct, simulations, max_pending, root, dirichlet_alpha, dirichlet_fraction,
                     gumbel_considered, gumbel_scale, gumbel_c_visit, gumbel_c_scale,
                     gumbel_rescale_values, determinizations, max_players, fpu_value, fpu_reduction,
-                    skip_forced, release_games, threads, transpositions};
+                    skip_forced, release_games, threads, transpositions, root_policy_temperature,
+                    forced_playouts};
             },
             nb::kw_only(), nb::arg("c_puct") = defaults.c_puct,
             nb::arg("simulations") = defaults.simulations,
@@ -130,7 +137,9 @@ void bind_search_pool(nb::module_& module) {
             nb::arg("fpu_reduction") = defaults.fpu_reduction,
             nb::arg("skip_forced") = defaults.skip_forced,
             nb::arg("release_games") = defaults.release_games, nb::arg("threads") = defaults.threads,
-            nb::arg("transpositions") = defaults.transpositions)
+            nb::arg("transpositions") = defaults.transpositions,
+            nb::arg("root_policy_temperature") = defaults.root_policy_temperature,
+            nb::arg("forced_playouts") = defaults.forced_playouts)
         .def_rw("c_puct", &SearchConfig::c_puct)
         .def_rw("simulations", &SearchConfig::simulations)
         .def_rw("max_pending", &SearchConfig::max_pending)
@@ -150,6 +159,8 @@ void bind_search_pool(nb::module_& module) {
         .def_rw("release_games", &SearchConfig::release_games)
         .def_rw("threads", &SearchConfig::threads)
         .def_rw("transpositions", &SearchConfig::transpositions)
+        .def_rw("root_policy_temperature", &SearchConfig::root_policy_temperature)
+        .def_rw("forced_playouts", &SearchConfig::forced_playouts)
         .def("__repr__", [](const SearchConfig& c) {
             return nb::str(
                        "SearchConfig(c_puct={}, simulations={}, max_pending={}, root={!r}, "
@@ -157,13 +168,13 @@ void bind_search_pool(nb::module_& module) {
                        "gumbel_scale={}, gumbel_c_visit={}, gumbel_c_scale={}, "
                        "gumbel_rescale_values={}, determinizations={}, max_players={}, "
                        "fpu_value={}, fpu_reduction={}, skip_forced={}, release_games={}, threads={}, "
-                       "transpositions={})")
+                       "transpositions={}, root_policy_temperature={}, forced_playouts={})")
                 .format(
                     c.c_puct, c.simulations, c.max_pending, c.root, c.dirichlet_alpha,
                     c.dirichlet_fraction, c.gumbel_considered, c.gumbel_scale, c.gumbel_c_visit,
                     c.gumbel_c_scale, c.gumbel_rescale_values, c.determinizations, c.max_players,
                     c.fpu_value, c.fpu_reduction, c.skip_forced, c.release_games, c.threads,
-                    c.transpositions);
+                    c.transpositions, c.root_policy_temperature, c.forced_playouts);
         });
 
     nb::class_<SearchStats>(module, "SearchStats", "Counters of one search.")
@@ -214,15 +225,19 @@ void bind_search_pool(nb::module_& module) {
             "add",
             [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker,
                bool ignore_tracker, std::optional<TrackerMode> deal, std::optional<int> simulations,
-               std::optional<int> max_pending, std::optional<double> dirichlet_alpha) {
+               std::optional<int> max_pending, std::optional<double> dirichlet_alpha,
+               std::optional<double> root_policy_temperature, std::optional<double> forced_playouts) {
                 return pool.add(
-                    game, seed, SearchOptions{simulations, max_pending, dirichlet_alpha}, tracker,
-                    ignore_tracker, deal);
+                    game, seed,
+                    SearchOptions{
+                        simulations, max_pending, dirichlet_alpha, root_policy_temperature, forced_playouts},
+                    tracker, ignore_tracker, deal);
             },
             nb::arg("game"), nb::arg("seed") = 0, nb::arg("tracker") = nb::none(), nb::kw_only(),
             nb::arg("ignore_tracker") = false, nb::arg("deal") = nb::none(),
             nb::arg("simulations") = nb::none(), nb::arg("max_pending") = nb::none(),
-            nb::arg("dirichlet_alpha") = nb::none(),
+            nb::arg("dirichlet_alpha") = nb::none(), nb::arg("root_policy_temperature") = nb::none(),
+            nb::arg("forced_playouts") = nb::none(),
             "Start a search for ``game``'s player to move; returns its id. With\n"
             "determinizations the root worlds are sampled from ``tracker``, which\n"
             "must follow that player, and the root offers exactly ``game``'s legal\n"
@@ -232,8 +247,9 @@ void bind_search_pool(nb::module_& module) {
             "by default). Without determinizations the search reads ``game`` as is,\n"
             "hidden cards included (an oracle), so a ``tracker`` raises ValueError\n"
             "unless ``ignore_tracker=True``. A finished game's search is done at once.\n"
-            "``simulations``, ``max_pending`` and ``dirichlet_alpha`` are this search's\n"
-            "own in place of the pool's config (None: the config's).")
+            "``simulations``, ``max_pending``, ``dirichlet_alpha``,\n"
+            "``root_policy_temperature`` and ``forced_playouts`` are this search's own\n"
+            "in place of the pool's config (None: the config's).")
         .def(
             "collect",
             [](SearchPool& pool, OutputMatrix<float> observations, OutputVector<std::int64_t> ids) {
@@ -309,9 +325,24 @@ void bind_search_pool(nb::module_& module) {
                     owned->data(), {owned->size() / actions, actions}, deleter);
             },
             nb::arg("id"),
-            "The root's priors as the network gave them, without the search's\n"
-            "Dirichlet noise (float32 [worlds, action_size], zero off the root's\n"
-            "actions; all zero until the roots are evaluated).")
+            "The root's priors as the network gave them, without the search's root\n"
+            "temperature and Dirichlet noise (float32 [worlds, action_size], zero off\n"
+            "the root's actions; all zero until the roots are evaluated).")
+        .def(
+            "root_search_priors",
+            [](const SearchPool& pool, std::int64_t id) {
+                auto* owned = new std::vector<float>(pool.root_search_priors(id));
+                nb::capsule deleter(owned, [](void* pointer) noexcept {
+                    delete static_cast<std::vector<float>*>(pointer);
+                });
+                const std::size_t actions = pool.action_size();
+                return nb::ndarray<nb::numpy, float, nb::ndim<2>>(
+                    owned->data(), {owned->size() / actions, actions}, deleter);
+            },
+            nb::arg("id"),
+            "The priors the root selects by in its current search: ``root_priors`` at\n"
+            "the root temperature with the Dirichlet noise mixed in (the same layout;\n"
+            "``root_priors`` themselves without either, and at a Gumbel root).")
         .def(
             "select", &SearchPool::select, nb::arg("id"), nb::arg("temperature") = 0.0,
             "The action index to play: most visits (PUCT) or the Sequential Halving\n"
@@ -328,17 +359,23 @@ void bind_search_pool(nb::module_& module) {
         .def(
             "reroot",
             [](SearchPool& pool, std::int64_t id, std::size_t action_index, std::optional<int> simulations,
-               std::optional<int> max_pending, std::optional<double> dirichlet_alpha) {
-                return pool.reroot(id, action_index, SearchOptions{simulations, max_pending, dirichlet_alpha});
+               std::optional<int> max_pending, std::optional<double> dirichlet_alpha,
+               std::optional<double> root_policy_temperature, std::optional<double> forced_playouts) {
+                return pool.reroot(
+                    id, action_index,
+                    SearchOptions{
+                        simulations, max_pending, dirichlet_alpha, root_policy_temperature, forced_playouts});
             },
             nb::arg("id"), nb::arg("action_index"), nb::kw_only(), nb::arg("simulations") = nb::none(),
             nb::arg("max_pending") = nb::none(), nb::arg("dirichlet_alpha") = nb::none(),
+            nb::arg("root_policy_temperature") = nb::none(), nb::arg("forced_playouts") = nb::none(),
             "``advance`` under a visit cap: the visits the new root already has\n"
             "(``visits(id).sum()``) count towards ``simulations``, so the search only\n"
             "tops the root up to them and is done at once when it has as many or more.\n"
-            "The three settings are the search's own from here on (None: the pool's\n"
-            "config), and a PUCT root with noise draws fresh Dirichlet noise. False\n"
-            "where ``advance`` is; ValueError on a Gumbel root.")
+            "The settings (``add``'s) are the search's own from here on (None: the\n"
+            "pool's config), and the new root starts from the network's priors: its\n"
+            "root temperature is applied to them and a root with noise draws fresh\n"
+            "Dirichlet noise. False where ``advance`` is; ValueError on a Gumbel root.")
         .def("remove", &SearchPool::remove, nb::arg("id"))
         .def("stats", &SearchPool::stats, nb::arg("id"));
 }

@@ -81,6 +81,24 @@ struct SearchConfig {
      * every path has its own nodes.
      */
     bool transpositions{false};
+    /**
+     * Temperature of a PUCT root's priors: the root selects by the network's
+     * priors raised to 1 / temperature and renormalized over its actions
+     * (then the Dirichlet noise is mixed in), so a value above 1 flattens
+     * them. 1 leaves them as they are. Every search starts from the
+     * network's priors, a re-rooted one too, and root_priors keeps them.
+     */
+    double root_policy_temperature{1.0};
+    /**
+     * Forced playouts at a PUCT root (KataGo's k, which is 2 there; 0 = off):
+     * a root action with fewer than sqrt(k * prior * total) visits is
+     * selected before PUCT is asked, the one furthest below first (the first
+     * of equals). The prior is the one the root selects by (after the
+     * temperature and the noise), total the visits of all the root's
+     * actions, and both counts include the leaves awaiting evaluation. Only
+     * the root selects this way, each root world on its own counts.
+     */
+    double forced_playouts{0.0};
 };
 
 /**
@@ -96,6 +114,10 @@ struct SearchOptions {
     std::optional<int> max_pending;
     /** SearchConfig::dirichlet_alpha (PUCT roots; <= 0: no noise). */
     std::optional<double> dirichlet_alpha;
+    /** SearchConfig::root_policy_temperature (PUCT roots; 1: the priors as they are). */
+    std::optional<double> root_policy_temperature;
+    /** SearchConfig::forced_playouts (PUCT roots; 0: none). */
+    std::optional<double> forced_playouts;
 };
 
 struct SearchStats {
@@ -184,8 +206,9 @@ public:
         const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
         bool ignore_tracker = false, std::optional<TrackerMode> deal = std::nullopt);
     /**
-     * add with the search's own budget, leaves per round and root noise
-     * (SearchOptions), which it keeps until a reroot gives it others.
+     * add with the search's own budget, leaves per round, root noise, root
+     * temperature and forced playouts (SearchOptions), which it keeps until
+     * a reroot gives it others.
      */
     std::int64_t add(
         const Game& game, std::uint64_t seed, const SearchOptions& options,
@@ -236,13 +259,19 @@ public:
     /** Mean root value per seat, seat-relative to the root player. */
     [[nodiscard]] std::vector<float> value(std::int64_t id) const;
     /**
-     * The root's priors as the network gave them, without the Dirichlet
-     * noise the search mixed in: action_size() floats per root world, world
-     * after world, zero off the root's actions. They are what the tree
-     * stores (float32), so a re-rooted root has them as a fresh one does.
-     * All zero until every root world is expanded.
+     * The root's priors as the network gave them, without the root
+     * temperature and the Dirichlet noise the search applied: action_size()
+     * floats per root world, world after world, zero off the root's actions.
+     * They are what the tree stores (float32), so a re-rooted root has them
+     * as a fresh one does. All zero until every root world is expanded.
      */
     [[nodiscard]] std::vector<float> root_priors(std::int64_t id) const;
+    /**
+     * The priors the root selects by in its current search: root_priors at
+     * the root temperature with the Dirichlet noise mixed in (root_priors
+     * themselves without either, and at a Gumbel root). Same layout.
+     */
+    [[nodiscard]] std::vector<float> root_search_priors(std::int64_t id) const;
     /**
      * The action to play. Temperature 0: most visits (PUCT) or the
      * Sequential Halving winner (Gumbel: the best noise + logits + sigma
@@ -253,8 +282,9 @@ public:
     /**
      * Re-root every world at the child of a deterministic root action and
      * start a fresh simulation budget (the search's own, see SearchOptions),
-     * keeping the subtree; a PUCT root with noise draws new Dirichlet noise
-     * for the new root's priors, which the old root's noise never touched.
+     * keeping the subtree; a PUCT root applies its root temperature to the
+     * new root's priors and, with noise, draws new Dirichlet noise for them:
+     * they are the network's, which the old root's never touched.
      * With transpositions the new root's children count only visits that
      * passed through the new root (SearchConfig::transpositions). Returns false
      * (and changes the search no further) when the action leads to a chance
@@ -275,10 +305,10 @@ public:
      * and is done at once, with no simulation, when the root has as many
      * or more. `options` are the search's settings from here on (unset
      * fields: the pool's), so consecutive searches of one tree can differ
-     * in budget, leaves per round and noise. Refuses what advance refuses,
-     * leaving the search and its settings as they were. PUCT roots only
-     * (std::invalid_argument on a Gumbel root: Sequential Halving plans its
-     * visits from an empty root).
+     * in budget, leaves per round, noise, root temperature and forced
+     * playouts. Refuses what advance refuses, leaving the search and its
+     * settings as they were. PUCT roots only (std::invalid_argument on a
+     * Gumbel root: Sequential Halving plans its visits from an empty root).
      */
     bool reroot(std::int64_t id, std::size_t action_index, const SearchOptions& options = {});
     void remove(std::int64_t id);

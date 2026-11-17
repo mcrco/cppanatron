@@ -449,9 +449,12 @@ struct Search {
     int cap{};
     int max_pending{};
     double dirichlet_alpha{};
+    double root_policy_temperature{};
+    double forced_playouts{};
     /**
-     * Each world's root priors as they were before Dirichlet noise was mixed
-     * into the edges; empty while the edges are as the network gave them.
+     * Each world's root priors as they were before the root temperature and
+     * the Dirichlet noise changed the edges; empty while the edges are as
+     * the network gave them.
      */
     std::vector<std::vector<float>> clean_priors;
     int started{};
@@ -586,6 +589,7 @@ struct SearchPool::Impl {
         if (!std::isfinite(config.fpu_value) || !std::isfinite(config.fpu_reduction)) {
             throw std::invalid_argument("first-play urgency settings must be finite");
         }
+        check_root(config.root_policy_temperature, config.forced_playouts);
         if (codec->size() >= kNone) {
             throw std::invalid_argument("action space is too large");
         }
@@ -595,8 +599,23 @@ struct SearchPool::Impl {
         workers = std::make_unique<WorkerPool>(threads);
     }
 
+    /** Refuse a root temperature or forced playouts no root can run with, and either at a Gumbel root. */
+    void check_root(double temperature, double forced) const {
+        if (!std::isfinite(temperature) || temperature <= 0.0) {
+            throw std::invalid_argument("root policy temperature must be finite and positive");
+        }
+        if (!std::isfinite(forced) || forced < 0.0) {
+            throw std::invalid_argument("forced playouts must be finite and non-negative");
+        }
+        if (config.root != RootSelection::puct && (temperature != 1.0 || forced != 0.0)) {
+            throw std::invalid_argument(
+                "root policy temperature and forced playouts shape a PUCT root's selection; "
+                "Sequential Halving plans a Gumbel root's visits itself");
+        }
+    }
+
     /** Refuse settings a search cannot run with (as the constructor does). */
-    static void check(const SearchOptions& options) {
+    void check(const SearchOptions& options) const {
         if ((options.simulations.has_value() && *options.simulations < 1) ||
             (options.max_pending.has_value() && *options.max_pending < 1)) {
             throw std::invalid_argument("simulations and max_pending must be positive");
@@ -604,6 +623,9 @@ struct SearchPool::Impl {
         if (options.dirichlet_alpha.has_value() && !std::isfinite(*options.dirichlet_alpha)) {
             throw std::invalid_argument("Dirichlet alpha must be finite");
         }
+        check_root(
+            options.root_policy_temperature.value_or(config.root_policy_temperature),
+            options.forced_playouts.value_or(config.forced_playouts));
     }
 
     /** Give a search its settings: the options, else the pool's. */
@@ -611,6 +633,9 @@ struct SearchPool::Impl {
         search.cap = options.simulations.value_or(config.simulations);
         search.max_pending = options.max_pending.value_or(config.max_pending);
         search.dirichlet_alpha = options.dirichlet_alpha.value_or(config.dirichlet_alpha);
+        search.root_policy_temperature =
+            options.root_policy_temperature.value_or(config.root_policy_temperature);
+        search.forced_playouts = options.forced_playouts.value_or(config.forced_playouts);
     }
 
     std::shared_ptr<const ActionCodec> codec;
@@ -888,12 +913,35 @@ struct SearchPool::Impl {
         return edge.child == kNone ? 0 : tree.nodes[edge.child].visits;
     }
 
-    std::uint32_t select_edge(const Tree& tree, std::uint32_t node_index) const {
+    /**
+     * The edge PUCT descends, after the forced playouts at a root: with
+     * `forced` > 0 (SearchConfig::forced_playouts, passed for the root only)
+     * the edge furthest below sqrt(forced * prior * total) visits, when one
+     * is below. Visits include the leaves awaiting evaluation.
+     */
+    std::uint32_t select_edge(const Tree& tree, std::uint32_t node_index, double forced = 0.0) const {
         const Node& node = tree.nodes[node_index];
         const int seat = node.to_play;
         std::uint64_t total = 0;
         for (std::uint32_t e = node.first_edge; e < node.first_edge + node.num_edges; ++e) {
             total += edge_visits(tree, tree.edges[e]);
+        }
+        if (forced > 0.0) {
+            std::uint32_t short_edge = kNone;
+            double shortfall = 0.0;
+            for (std::uint32_t e = node.first_edge; e < node.first_edge + node.num_edges; ++e) {
+                const TreeEdge& edge = tree.edges[e];
+                const double missing =
+                    std::sqrt(forced * edge.prior * static_cast<double>(total)) -
+                    static_cast<double>(edge_visits(tree, edge));
+                if (missing > shortfall) {
+                    shortfall = missing;
+                    short_edge = e;
+                }
+            }
+            if (short_edge != kNone) {
+                return short_edge;
+            }
         }
         double fpu = config.fpu_value;
         if (fpu < 0.0 || fpu > 1.0) {
@@ -992,7 +1040,7 @@ struct SearchPool::Impl {
             }
             edge = node == 0 && root_edge.has_value()
                 ? current.first_edge + static_cast<std::uint32_t>(*root_edge)
-                : select_edge(tree, node);
+                : select_edge(tree, node, node == 0 ? search.forced_playouts : 0.0);
             const std::uint32_t child = tree.edges[edge].child;
             node = child != kNone ? child : create_child(tree, node, edge);
         }
@@ -1132,26 +1180,50 @@ struct SearchPool::Impl {
             return;
         }
         search.clean_priors.clear();
-        if (config.root == RootSelection::puct && search.dirichlet_alpha > 0.0 &&
-            config.dirichlet_fraction > 0.0) {
-            std::vector<double> noise(count);
+        // The priors a PUCT root selects by: the network's at the root
+        // temperature, then the Dirichlet noise mixed in. The edges here are
+        // the network's (a re-rooted root's too: the root before it had the
+        // changed ones), so neither carries over from an earlier search.
+        const bool noisy = config.root == RootSelection::puct && search.dirichlet_alpha > 0.0 &&
+            config.dirichlet_fraction > 0.0;
+        const bool tempered = config.root == RootSelection::puct && search.root_policy_temperature != 1.0;
+        if (noisy || tempered) {
+            std::vector<double> noise(noisy ? count : 0);
             for (double& value : noise) {
                 value = random::gamma(search.rng, search.dirichlet_alpha);
             }
             double total = std::accumulate(noise.begin(), noise.end(), 0.0);
-            if (total <= kTiny) {
+            if (noisy && total <= kTiny) {
                 std::fill(noise.begin(), noise.end(), 1.0);
                 total = static_cast<double>(count);
             }
+            std::vector<double> priors(count);
             for (Tree& tree : search.worlds) {
                 const Node& world_root = tree.nodes.front();
                 std::vector<float>& clean = search.clean_priors.emplace_back(count);
                 for (std::size_t i = 0; i < count; ++i) {
-                    TreeEdge& edge = tree.edges[world_root.first_edge + i];
-                    clean[i] = edge.prior;
-                    edge.prior = static_cast<float>(
-                        (1.0 - config.dirichlet_fraction) * edge.prior +
-                        config.dirichlet_fraction * noise[i] / total);
+                    clean[i] = tree.edges[world_root.first_edge + i].prior;
+                    priors[i] = clean[i];
+                }
+                // Powers of the priors relative to the largest: a low
+                // temperature sharpens them without underflowing to nothing.
+                const double top = *std::max_element(priors.begin(), priors.end());
+                if (tempered && top > 0.0) {
+                    double sum = 0.0;
+                    for (double& prior : priors) {
+                        prior = std::pow(prior / top, 1.0 / search.root_policy_temperature);
+                        sum += prior;
+                    }
+                    for (double& prior : priors) {
+                        prior /= sum;
+                    }
+                }
+                for (std::size_t i = 0; i < count; ++i) {
+                    tree.edges[world_root.first_edge + i].prior = static_cast<float>(
+                        noisy
+                            ? (1.0 - config.dirichlet_fraction) * priors[i] +
+                                  config.dirichlet_fraction * noise[i] / total
+                            : priors[i]);
                 }
             }
         }
@@ -1781,7 +1853,8 @@ struct SearchPool::Impl {
         return result;
     }
 
-    std::vector<float> root_priors(const Search& search) const {
+    /** Each world's root priors: the network's, or (`searched`) the ones the root selects by. */
+    std::vector<float> root_priors(const Search& search, bool searched = false) const {
         const std::size_t actions = codec->size();
         std::vector<float> result(search.worlds.size() * actions, 0.0F);
         if (!search.roots_ready) {
@@ -1793,7 +1866,7 @@ struct SearchPool::Impl {
             for (std::uint32_t i = 0; i < root.num_edges; ++i) {
                 const TreeEdge& edge = tree.edges[root.first_edge + i];
                 result[w * actions + edge.action] =
-                    search.clean_priors.empty() ? edge.prior : search.clean_priors[w][i];
+                    searched || search.clean_priors.empty() ? edge.prior : search.clean_priors[w][i];
             }
         }
         return result;
@@ -1918,7 +1991,7 @@ std::int64_t SearchPool::add(
 std::int64_t SearchPool::add(
     const Game& game, std::uint64_t seed, const SearchOptions& options, const HandTracker* tracker,
     bool ignore_tracker, std::optional<TrackerMode> deal) {
-    Impl::check(options);
+    impl_->check(options);
     const int players = static_cast<int>(game.colors().size());
     if (players > impl_->config.max_players) {
         throw std::invalid_argument("the game has more seats than max_players");
@@ -2062,6 +2135,10 @@ std::vector<float> SearchPool::value(std::int64_t id) const {
 
 std::vector<float> SearchPool::root_priors(std::int64_t id) const {
     return impl_->root_priors(impl_->find(id));
+}
+
+std::vector<float> SearchPool::root_search_priors(std::int64_t id) const {
+    return impl_->root_priors(impl_->find(id), true);
 }
 
 std::size_t SearchPool::select(std::int64_t id, double temperature) {

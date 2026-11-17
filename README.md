@@ -222,6 +222,25 @@ noise draws fresh Dirichlet noise at every root, and `root_priors(id)` returns
 the root's priors without it (the tree keeps the network's). `reroot` is for
 PUCT roots: Sequential Halving plans its visits from an empty root.
 
+Two more settings shape a PUCT root's exploration, in `SearchConfig` and per
+search (`add(..., root_policy_temperature=, forced_playouts=)`, `reroot`
+alike); a Gumbel root refuses both. `root_policy_temperature` T (1 = off)
+makes the root select by the network's priors raised to 1 / T and
+renormalized over its actions, before the noise is mixed in; every search
+applies it to the network's priors anew, so nothing compounds over re-rooted
+searches, `root_priors(id)` stays the network's and `root_search_priors(id)`
+gives the priors in use (after temperature and noise). `forced_playouts` k
+(0 = off; KataGo uses 2) makes the root select, before PUCT is asked, the
+action furthest below `sqrt(k * P * N)` visits, when one is below: `P` is the
+action's prior in use and `N` the visits of all the root's actions, both
+counts including leaves awaiting evaluation. Unlike KataGo, which forces only
+actions that already have a visit, an unvisited action is forced too: any
+prior above zero puts it below its count once the root has a visit, so a
+search of enough simulations visits every root action that has a prior at all.
+Each root world forces on its own counts, and only the root does. The visits
+this adds are meant to be pruned from a policy target (KataGo's policy target
+pruning; `catanrl.train.alphazero.pruned_visits`).
+
 `SearchConfig(transpositions=True)` makes each world a graph: a position that
 another order of actions already reached (two roads built either way round,
 one discarder's kinds in any order, a bank trade before or after a build)

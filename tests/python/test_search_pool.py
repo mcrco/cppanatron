@@ -584,3 +584,200 @@ def test_search_options_and_reroot():
     run_hashed(gumbel, 2)
     with pytest.raises(ValueError):
         gumbel.reroot(search, chosen)
+
+
+def tempered(priors: np.ndarray, temperature: float) -> np.ndarray:
+    """Priors at a root temperature: each to the power 1 / temperature, renormalized."""
+    powered = np.where(priors > 0, priors.astype(np.float64) ** (1.0 / temperature), 0.0)
+    return powered / powered.sum()
+
+
+def forced_debt(priors: np.ndarray, visits: np.ndarray, k: float) -> tuple[float, float]:
+    """The visits missing from ceil(sqrt(k * prior * N)) over a root's actions
+    after its N simulations, and the most forced playouts can leave missing:
+    the debt recursion D(t + 1) = max(D(t) - 1, 0) + R(t + 1) - R(t), R the
+    sum of the counts at t visits (see test_forced_playouts_reach_their_counts
+    in tests/test_search_pool.cpp)."""
+    wanted = np.zeros(len(priors))
+    bound = 0.0
+    for total in range(1, int(visits.sum()) + 1):
+        now = np.ceil(np.sqrt(k * priors.astype(np.float64) * total))
+        bound = max(bound - 1.0, 0.0) + float((now - wanted).sum())
+        wanted = now
+    return float(np.maximum(wanted - visits, 0.0).sum()), bound
+
+
+def test_root_temperature():
+    """The root selects by its priors at the temperature; the tree keeps the
+    network's, so a re-rooted search meets them unchanged."""
+    game, _ = random_game(2, 8, 60)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    assert cpp.SearchConfig().root_policy_temperature == 1.0
+    assert "root_policy_temperature=1.0, forced_playouts=0.0" in repr(cpp.SearchConfig())
+
+    plain = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=120, max_players=2))
+    reference = plain.add(game, 4)
+    run_hashed(plain, 2)
+    np.testing.assert_array_equal(plain.root_search_priors(reference), plain.root_priors(reference))
+
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(
+        simulations=120, max_players=2, root_policy_temperature=1.5))
+    assert pool.config.root_policy_temperature == 1.5
+    search = pool.add(game, 4)
+    assert not pool.root_search_priors(search).any()  # the root is not evaluated yet
+    run_hashed(pool, 2)
+    used = pool.root_search_priors(search)
+    assert used.dtype == np.float32 and used.shape == (1, codec.size)
+    np.testing.assert_array_equal(pool.root_priors(search), plain.root_priors(reference))
+    np.testing.assert_allclose(used[0], tempered(pool.root_priors(search)[0], 1.5), atol=1e-6)
+    assert used.max() < pool.root_priors(search).max() - 1e-3
+    assert (pool.visits(search) != plain.visits(reference)).any()
+
+    # The noise is mixed into the priors at the temperature: one seed, one noise.
+    noisy = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=120, max_players=2, dirichlet_alpha=0.3))
+    both = noisy.add(game, 4, root_policy_temperature=1.5)
+    alone = noisy.add(game, 4)
+    run_hashed(noisy, 2)
+    network = noisy.root_priors(alone)[0]
+    np.testing.assert_array_equal(noisy.root_priors(both)[0], network)
+    noise = noisy.root_search_priors(alone)[0] - 0.75 * network
+    assert noise.max() > 1e-2
+    np.testing.assert_allclose(noisy.root_search_priors(both)[0] - 0.75 * tempered(network, 1.5), noise, atol=1e-6)
+
+    # Re-rooted, the temperature meets the network's priors again (it never compounds).
+    visits = pool.visits(search)
+    chosen = None
+    for index in np.argsort(-visits.astype(np.int64), kind="stable"):
+        kind = codec.decode(game, int(index)).action_type
+        if visits[index] and kind not in (
+                cpp.ActionType.ROLL, cpp.ActionType.BUY_DEVELOPMENT_CARD, cpp.ActionType.MOVE_ROBBER,
+                cpp.ActionType.END_TURN):
+            chosen = int(index)
+            break
+    if chosen is None:
+        pytest.skip("no building action was visited")
+    assert pool.reroot(search, chosen, simulations=200)
+    after = game.copy()
+    after.execute(codec.decode(game, chosen))
+    legal = codec.mask(after).astype(bool)
+    logits, _ = hashed(encoder.encode(after, after.current_player_index)[None], codec.size, 2)
+    clean = np.where(legal, np.exp(logits[0].astype(np.float64)), 0.0)
+    clean /= clean.sum()
+    for searched in (False, True):
+        if searched:
+            run_hashed(pool, 2)
+        np.testing.assert_allclose(pool.root_priors(search)[0], clean, atol=1e-6)
+        np.testing.assert_allclose(pool.root_search_priors(search)[0], tempered(clean, 1.5), atol=1e-6)
+    assert pool.visits(search).sum() == 200
+
+
+@pytest.mark.parametrize("max_pending", [1, 4, 16])
+@pytest.mark.parametrize("shaped", [False, True])
+def test_forced_playouts(max_pending, shaped):
+    """With k = 2 every root action is searched up to ceil(sqrt(2 * prior * N))
+    visits, less at most the debt the priors allow; PUCT alone is not."""
+    game, _ = random_game(2, 8, 60)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    assert cpp.SearchConfig().forced_playouts == 0.0
+    settings = dict(simulations=300, max_pending=max_pending, max_players=2)
+    if shaped:
+        settings.update(dirichlet_alpha=0.3, root_policy_temperature=1.25)
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**settings))
+    plain = pool.add(game, 4)
+    forced = pool.add(game, 4, forced_playouts=2.0)
+    run_hashed(pool, 2)
+    np.testing.assert_array_equal(pool.root_search_priors(forced), pool.root_search_priors(plain))
+    priors = pool.root_search_priors(forced)[0]
+    assert pool.visits(forced).sum() == 300 and pool.stats(forced).simulations == 300
+    missing, bound = forced_debt(priors, pool.visits(forced), 2.0)
+    assert bound <= 2.0  # tight enough to say something
+    assert missing <= bound
+    assert (pool.visits(forced) >= np.ceil(np.sqrt(2.0 * priors.astype(np.float64) * 300)) - bound).all()
+    assert forced_debt(priors, pool.visits(plain), 2.0)[0] > bound
+
+    # Short searches, where the counts rise faster than one visit pays: the debt stays within its bound.
+    short = {budget: pool.add(game, budget, simulations=budget, forced_playouts=2.0) for budget in range(1, 61)}
+    run_hashed(pool, 2, batch=256)
+    owed = 0
+    for budget, search in short.items():
+        assert pool.visits(search).sum() == budget
+        missing, bound = forced_debt(pool.root_search_priors(search)[0], pool.visits(search), 2.0)
+        assert missing <= bound
+        owed += bound > 0
+    assert owed > 10
+
+
+def test_root_options_per_search_and_refusals():
+    """add's and reroot's root temperature and forced playouts beat the pool's
+    config; values no root can run with, and either at a Gumbel root, raise."""
+    game, trackers = random_game(2, 8, 60)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    base = dict(simulations=120, max_pending=4, max_players=2, dirichlet_alpha=0.3)
+
+    def result(pool, search):
+        return np.concatenate([pool.visits(search), pool.q(search), pool.root_search_priors(search)[0]])
+
+    def alone(**settings):
+        pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**base, **settings))
+        search = pool.add(game, 4)
+        run_hashed(pool, 2)
+        return result(pool, search)
+
+    plain, shaped = alone(), alone(root_policy_temperature=1.5, forced_playouts=2.0)
+    for other in (alone(root_policy_temperature=1.5), alone(forced_playouts=2.0)):
+        assert not np.array_equal(other, plain, equal_nan=True)
+        assert not np.array_equal(other, shaped, equal_nan=True)
+    on = dict(root_policy_temperature=1.5, forced_playouts=2.0)
+    off = dict(root_policy_temperature=1.0, forced_playouts=0.0)
+    for config, options, expected in ((on, off, plain), ({}, on, shaped)):
+        pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**base, **config))
+        own = pool.add(game, 4, **options)
+        pools = pool.add(game, 4)
+        run_hashed(pool, 2)
+        np.testing.assert_array_equal(result(pool, own), expected)
+        np.testing.assert_array_equal(result(pool, pools), shaped if config else plain)
+
+    pool = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**base))
+    search = pool.add(game, 4)
+    run_hashed(pool, 2)
+    before = result(pool, search)
+    chosen = int(pool.visits(search).argmax())
+    nan, inf = float("nan"), float("inf")
+    for bad in (dict(root_policy_temperature=0.0), dict(root_policy_temperature=-1.0),
+                dict(root_policy_temperature=nan), dict(root_policy_temperature=inf),
+                dict(forced_playouts=-0.5), dict(forced_playouts=nan), dict(forced_playouts=inf)):
+        with pytest.raises(ValueError):
+            cpp.SearchPool(codec, encoder, cpp.SearchConfig(**base, **bad))
+        with pytest.raises(ValueError):
+            pool.add(game, 4, **bad)
+        with pytest.raises(ValueError):
+            pool.reroot(search, chosen, **bad)
+        np.testing.assert_array_equal(result(pool, search), before)
+    assert len(pool) == 1
+
+    gumbel = dict(simulations=32, max_players=2, root=cpp.RootSelection.GUMBEL)
+    halving = cpp.SearchPool(codec, encoder, cpp.SearchConfig(**gumbel))
+    for bad in (dict(root_policy_temperature=1.25), dict(forced_playouts=2.0)):
+        with pytest.raises(ValueError):
+            cpp.SearchPool(codec, encoder, cpp.SearchConfig(**gumbel, **bad))
+        with pytest.raises(ValueError):
+            halving.add(game, 4, **bad)
+    search = halving.add(game, 4, **off)
+    run_hashed(halving, 2)
+    np.testing.assert_array_equal(halving.root_search_priors(search), halving.root_priors(search))
+
+    # Every root world takes both: the worlds' visits still fill the budget.
+    worlds = cpp.SearchPool(codec, encoder, cpp.SearchConfig(
+        simulations=90, max_pending=3, max_players=2, determinizations=3, dirichlet_alpha=0.3, **on))
+    search = worlds.add(game, 4, trackers[game.current_player_index])
+    run_hashed(worlds, 2)
+    count = worlds.stats(search).worlds
+    assert worlds.done(search) and worlds.visits(search).sum() == 90
+    used, network = worlds.root_search_priors(search), worlds.root_priors(search)
+    assert used.shape == network.shape == (count, codec.size)
+    noise = used[0] - 0.75 * tempered(network[0], 1.5)
+    for world in range(count):
+        np.testing.assert_allclose(used[world] - 0.75 * tempered(network[world], 1.5), noise, atol=1e-6)

@@ -14,6 +14,8 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "cppanatron/flat_codec.hpp"
@@ -1399,6 +1401,31 @@ void test_reroot_counts_the_carried_visits() {
     }
 }
 
+/** The hashed network's priors at a position: softmax of its logits over the legal actions. */
+std::vector<double> network_priors(const ActionCodec& codec, const Game& position) {
+    std::vector<float> logits(codec.size());
+    hashed_logits(position, logits);
+    std::vector<std::uint8_t> legal(codec.size());
+    codec.mask(position, legal);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+        sum += legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) : 0.0;
+    }
+    std::vector<double> priors(codec.size(), 0.0);
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+        priors[i] = legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) / sum : 0.0;
+    }
+    return priors;
+}
+
+bool close(const std::vector<float>& actual, const std::vector<double>& expected) {
+    bool equal = actual.size() == expected.size();
+    for (std::size_t i = 0; equal && i < actual.size(); ++i) {
+        equal = std::abs(actual[i] - expected[i]) < 1e-6;
+    }
+    return equal;
+}
+
 /**
  * Every search with noise draws it anew at its own root, also a re-rooted
  * one; the tree keeps the network's priors (root_priors), which the next
@@ -1407,28 +1434,7 @@ void test_reroot_counts_the_carried_visits() {
 void test_reroot_noise_is_per_search() {
     const Game game = hand_position({4, 4, 0, 0, 0});
     const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
-    const auto clean = [&](const Game& position) {
-        std::vector<float> logits(codec->size());
-        hashed_logits(position, logits);
-        std::vector<std::uint8_t> legal(codec->size());
-        codec->mask(position, legal);
-        double sum = 0.0;
-        for (std::size_t i = 0; i < logits.size(); ++i) {
-            sum += legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) : 0.0;
-        }
-        std::vector<double> priors(codec->size(), 0.0);
-        for (std::size_t i = 0; i < logits.size(); ++i) {
-            priors[i] = legal[i] != 0 ? std::exp(static_cast<double>(logits[i])) / sum : 0.0;
-        }
-        return priors;
-    };
-    const auto close = [](const std::vector<float>& actual, const std::vector<double>& expected) {
-        bool equal = actual.size() == expected.size();
-        for (std::size_t i = 0; equal && i < actual.size(); ++i) {
-            equal = std::abs(actual[i] - expected[i]) < 1e-6;
-        }
-        return equal;
-    };
+    const auto clean = [&](const Game& position) { return network_priors(*codec, position); };
     SearchConfig config;
     config.simulations = 256;
     config.max_players = 4;
@@ -1581,9 +1587,336 @@ void test_reroot_determinized() {
     require(pool.root_priors(id).size() == pool.stats(id).worlds * codec->size(), "priors per world");
 }
 
+/**
+ * With the root temperature at 1 and no forced playouts (the defaults) a
+ * search is the one it was before either existed: the visits, the tree
+ * size, the action chosen and its value match the ones pinned then, for a
+ * noised search with leaves in flight, fresh and re-rooted under a cap.
+ */
+void test_root_options_off_are_bitwise_today() {
+    struct Root {
+        std::uint64_t nodes;
+        std::size_t selected;
+        double q;
+        std::vector<std::pair<std::size_t, std::uint32_t>> visits;
+    };
+    struct Pin {
+        Game game;
+        int players;
+        Root fresh;
+        std::size_t moved;
+        Root rerooted;
+    };
+    const std::vector<Pin> pins{
+        {hand_position({4, 4, 0, 0, 0}), 4,
+         {480, 87, 0x1.f36308c2aaaabp-2,
+          {{64, 1}, {67, 1}, {68, 1}, {87, 24}, {88, 12}, {103, 1}, {122, 1}, {124, 9}, {186, 10},
+           {187, 2}, {188, 1}, {189, 3}, {190, 5}, {235, 16}, {236, 1}, {237, 4}, {238, 4}}},
+         87,
+         {1085, 103, 0x1.bdd2f984bda13p-2,
+          {{64, 20}, {67, 21}, {68, 19}, {86, 17}, {88, 18}, {103, 27}, {122, 4}, {124, 16}, {186, 18}}}},
+        {play_random(2, 5, 200).game, 2,
+         {284, 195, 0x1.1795d1c1642c8p-1, {{186, 20}, {195, 46}, {196, 18}, {197, 6}, {198, 6}}},
+         195,
+         {443, 180, 0x1.eb252a1109209p-2, {{180, 81}, {186, 79}}}},
+    };
+    for (const Pin& pin : pins) {
+        const auto codec = std::make_shared<FlatActionCodec>(pin.players, MapType::base);
+        SearchConfig config;
+        config.simulations = 96;
+        config.max_pending = 4;
+        config.dirichlet_alpha = 0.3;
+        config.max_players = pin.players;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(pin.game, 3);
+        const auto matches = [&](const Root& root) {
+            std::vector<std::uint32_t> expected(codec->size(), 0);
+            for (const auto& [index, count] : root.visits) {
+                expected[index] = count;
+            }
+            const std::size_t selected = pool.select(id);
+            return pool.visits(id) == expected && pool.stats(id).nodes == root.nodes &&
+                selected == root.selected && pool.q(id)[selected] == root.q;
+        };
+        run(pool, hashed_evaluator(pin.players));
+        require(matches(pin.fresh), "a search with the root options off must match the pinned one");
+        require(most_visited_build(pool, id, *codec, pin.game) == pin.moved &&
+                    pool.reroot(id, pin.moved, SearchOptions{160, 3, 0.3}),
+                "the pinned action re-roots");
+        run(pool, hashed_evaluator(pin.players));
+        require(matches(pin.rerooted), "a re-rooted search with the root options off must match the pinned one");
+    }
+}
+
+/** Priors at a root temperature: each to the power 1 / temperature, renormalized. */
+std::vector<double> tempered(const std::vector<float>& priors, double temperature) {
+    std::vector<double> result(priors.size(), 0.0);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < priors.size(); ++i) {
+        result[i] = priors[i] > 0.0F ? std::pow(static_cast<double>(priors[i]), 1.0 / temperature) : 0.0;
+        sum += result[i];
+    }
+    for (double& value : result) {
+        value /= sum;
+    }
+    return result;
+}
+
+/**
+ * The root temperature changes the priors the root selects by, not the
+ * tree's: root_search_priors are root_priors to the power 1 / temperature,
+ * renormalized, with the noise mixed in after, and every root starts from
+ * the network's priors, so the temperature applies once however often a
+ * search is re-rooted.
+ */
+void test_root_temperature_reshapes_the_priors_in_use() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    SearchConfig config;
+    config.simulations = 256;
+    config.max_players = 4;
+    SearchPool plain(codec, std::make_shared<ToyEncoder>(), config);
+    const auto reference = plain.add(game, 5);
+    run(plain, hashed_evaluator(4));
+    require(plain.root_search_priors(reference) == plain.root_priors(reference),
+            "without temperature and noise the root selects by the network's priors");
+
+    SearchConfig warm_config = config;
+    warm_config.root_policy_temperature = 1.5;
+    SearchPool warm(codec, std::make_shared<ToyEncoder>(), warm_config);
+    const auto id = warm.add(game, 5);
+    require(close(warm.root_search_priors(id), std::vector<double>(codec->size(), 0.0)),
+            "no priors before the root is evaluated");
+    run(warm, hashed_evaluator(4));
+    require(warm.root_priors(id) == plain.root_priors(reference), "root_priors are the priors before the temperature");
+    require(close(warm.root_search_priors(id), tempered(warm.root_priors(id), 1.5)),
+            "the root selects by its priors at the temperature");
+    const auto flat = warm.root_search_priors(id);
+    const auto sharp = warm.root_priors(id);
+    require(*std::max_element(flat.begin(), flat.end()) < *std::max_element(sharp.begin(), sharp.end()) - 1e-3F &&
+                warm.visits(id) != plain.visits(reference),
+            "a temperature above one flattens the priors, and the search follows them");
+
+    // The noise is mixed into the priors at the temperature: one seed draws
+    // one noise, which is what the edges hold beyond their share of priors.
+    SearchConfig noisy_config = config;
+    noisy_config.dirichlet_alpha = 0.3;
+    SearchPool noisy(codec, std::make_shared<ToyEncoder>(), noisy_config);
+    noisy_config.root_policy_temperature = 1.5;
+    SearchPool both(codec, std::make_shared<ToyEncoder>(), noisy_config);
+    const auto noisy_id = noisy.add(game, 5);
+    const auto both_id = both.add(game, 5);
+    run(noisy, hashed_evaluator(4));
+    run(both, hashed_evaluator(4));
+    require(both.root_priors(both_id) == plain.root_priors(reference), "root_priors have neither temperature nor noise");
+    const auto network = noisy.root_priors(noisy_id);
+    const auto warmed = tempered(network, 1.5);
+    const auto noisy_priors = noisy.root_search_priors(noisy_id);
+    const auto both_priors = both.root_search_priors(both_id);
+    double most_noise = 0.0;
+    for (std::size_t i = 0; i < network.size(); ++i) {
+        const double noise = noisy_priors[i] - 0.75 * network[i];
+        most_noise = std::max(most_noise, noise);
+        require(std::abs(both_priors[i] - 0.75 * warmed[i] - noise) < 1e-6,
+                "the noise is mixed into the priors at the temperature");
+    }
+    require(most_noise > 1e-2, "the noise must matter for the test to say anything");
+
+    // Re-rooted, the temperature meets the network's priors again.
+    Game position = game;
+    for (int move = 0; move < 2; ++move) {
+        const std::size_t chosen = most_visited_build(warm, id, *codec, position);
+        require(chosen < codec->size(), "a building action was visited");
+        position.execute(codec->decode(position, chosen));
+        require(warm.reroot(id, chosen, SearchOptions{256, {}, {}, {}, {}}), "re-rooting a search with a temperature");
+        for (const bool searched : {false, true}) {
+            if (searched) {
+                run(warm, hashed_evaluator(4));
+            }
+            require(close(warm.root_priors(id), network_priors(*codec, position)),
+                    "the new root starts from the network's priors, whatever the old root selected by");
+            require(close(warm.root_search_priors(id), tempered(warm.root_priors(id), 1.5)),
+                    "the temperature applies once to every root");
+        }
+    }
+    const std::size_t chosen = most_visited_build(warm, id, *codec, position);
+    require(chosen < codec->size(), "a building action was visited");
+    require(warm.reroot(id, chosen, SearchOptions{256, {}, {}, 1.0, {}}), "re-rooting to a search without a temperature");
+    require(warm.root_search_priors(id) == warm.root_priors(id), "a root at temperature one selects by the network's priors");
+}
+
+/**
+ * Forced playouts keep every root action near sqrt(k * prior * N) visits.
+ * An action is forced while its visits n are below f(t) = sqrt(k * prior *
+ * t), t the root's visits so far, both with the leaves in flight, i.e.
+ * while n < r(t) = ceil(f(t)). Call the debt D(t) the sum over actions of
+ * max(0, r(t) - n). A selection with D(t) > 0 is a forced one and pays one
+ * visit of it; the next visit raises the r(t) by R(t + 1) - R(t) in all (R
+ * their sum), so D(t + 1) <= max(D(t) - 1, 0) + R(t + 1) - R(t) from D(0) =
+ * 0, whatever the leaves per round: a leaf in flight counts as its visit
+ * from the moment it is issued. After N simulations of a fresh root of one
+ * world the visits therefore miss ceil(sqrt(k * prior * N)) by at most that
+ * recursion's D(N) over all actions together, which the priors alone give.
+ */
+void test_forced_playouts_reach_their_counts() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    const int simulations = 300;
+    const double k = 2.0;
+    // {the visits missing from the counts, the most the rule can leave missing}
+    const auto debt = [&](const SearchPool& pool, std::int64_t id) {
+        const auto priors = pool.root_search_priors(id);
+        const auto visits = pool.visits(id);
+        std::vector<double> wanted(priors.size(), 0.0);
+        double bound = 0.0;
+        for (int total = 1; total <= simulations; ++total) {
+            double raised = 0.0;
+            for (std::size_t i = 0; i < priors.size(); ++i) {
+                const double now = std::ceil(std::sqrt(k * priors[i] * static_cast<double>(total)));
+                raised += now - wanted[i];
+                wanted[i] = now;
+            }
+            bound = std::max(bound - 1.0, 0.0) + raised;
+        }
+        double missing = 0.0;
+        for (std::size_t i = 0; i < priors.size(); ++i) {
+            missing += std::max(0.0, wanted[i] - static_cast<double>(visits[i]));
+        }
+        return std::pair{missing, bound};
+    };
+    for (const bool shaped : {false, true}) {
+        SearchConfig config;
+        config.simulations = simulations;
+        config.max_players = 4;
+        config.dirichlet_alpha = shaped ? 0.3 : 0.0;
+        config.root_policy_temperature = shaped ? 1.25 : 1.0;
+        std::vector<std::uint32_t> unforced;
+        for (const int pending : {1, 4, 16}) {
+            config.max_pending = pending;
+            config.forced_playouts = 0.0;
+            SearchPool plain(codec, std::make_shared<ToyEncoder>(), config);
+            const auto reference = plain.add(game, 5);
+            run(plain, hashed_evaluator(4));
+            const auto [short_of, allowed] = debt(plain, reference);
+            require(allowed <= 2.0, "the bound must be tight for the test to say anything");
+            require(short_of > allowed, "PUCT alone must fall short of the counts for the test to say anything");
+
+            config.forced_playouts = k;
+            SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+            const auto id = pool.add(game, 5);
+            run(pool, hashed_evaluator(4));
+            require(pool.done(id) && total(pool.visits(id)) == static_cast<std::uint32_t>(simulations),
+                    "forced playouts are simulations of the budget");
+            require(pool.root_search_priors(id) == plain.root_search_priors(reference),
+                    "forced playouts leave the priors alone");
+            const auto [missing, bound] = debt(pool, id);
+            require(missing <= bound, "forced playouts must reach their counts (max_pending " +
+                                          std::to_string(pending) + "): " + std::to_string(missing) +
+                                          " visits missing, at most " + std::to_string(bound) + " allowed");
+        }
+    }
+}
+
+/**
+ * The root temperature and the forced playouts are a search's own settings
+ * like the others: given to add they run as in a pool configured with
+ * them, and they are refused where no root, or no Gumbel root, can run
+ * with them.
+ */
+void test_root_options_are_per_search() {
+    const Game game = hand_position({4, 4, 0, 0, 0});
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    SearchConfig base;
+    base.simulations = 200;
+    base.max_pending = 4;
+    base.dirichlet_alpha = 0.3;
+    base.max_players = 4;
+    const auto result = [](SearchPool& pool, std::int64_t id) {
+        return std::tuple{pool.visits(id), pool.root_search_priors(id), pool.q(id)[pool.select(id)]};
+    };
+    const auto alone = [&](double temperature, double forced) {
+        SearchConfig config = base;
+        config.root_policy_temperature = temperature;
+        config.forced_playouts = forced;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 7);
+        run(pool, hashed_evaluator(4));
+        return result(pool, id);
+    };
+    const auto plain = alone(1.0, 0.0);
+    const auto shaped = alone(1.5, 2.0);
+    require(alone(1.5, 0.0) != plain && alone(1.0, 2.0) != plain && alone(1.5, 0.0) != shaped &&
+                alone(1.0, 2.0) != shaped,
+            "each option must matter for the test to say anything");
+    for (const bool shaped_pool : {true, false}) {
+        SearchConfig config = base;
+        config.root_policy_temperature = shaped_pool ? 1.5 : 1.0;
+        config.forced_playouts = shaped_pool ? 2.0 : 0.0;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        // One search with the pool's settings, one with the other pool's.
+        const auto a = pool.add(game, 7, shaped_pool ? SearchOptions{} : SearchOptions{{}, {}, {}, 1.5, 2.0});
+        const auto b = pool.add(game, 7, shaped_pool ? SearchOptions{{}, {}, {}, 1.0, 0.0} : SearchOptions{});
+        run(pool, hashed_evaluator(4));
+        require(result(pool, a) == shaped, "options must equal a pool configured with them (on)");
+        require(result(pool, b) == plain, "options must equal a pool configured with them (off)");
+    }
+
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double infinity = std::numeric_limits<double>::infinity();
+    const auto refused = [](const auto& attempt) {
+        try {
+            attempt();
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), base);
+    const auto id = pool.add(game, 7);
+    run(pool, hashed_evaluator(4));
+    const std::size_t chosen = most_visited_build(pool, id, *codec, game);
+    require(chosen < codec->size(), "a building action was visited");
+    const auto before = result(pool, id);
+    for (const auto& [temperature, forced] : std::vector<std::pair<double, double>>{
+             {0.0, 0.0}, {-1.0, 0.0}, {nan, 0.0}, {infinity, 0.0}, {1.0, -0.5}, {1.0, nan}, {1.0, infinity}}) {
+        SearchConfig config = base;
+        config.root_policy_temperature = temperature;
+        config.forced_playouts = forced;
+        require(refused([&] { SearchPool(codec, std::make_shared<ToyEncoder>(), config); }),
+                "a pool refuses a root temperature that is not positive and forced playouts that are negative");
+        const SearchOptions bad{{}, {}, {}, temperature, forced};
+        require(refused([&] { pool.add(game, 1, bad); }) && pool.size() == 1,
+                "invalid options are refused before a search exists");
+        require(refused([&] { pool.reroot(id, chosen, bad); }) && result(pool, id) == before && pool.done(id),
+                "invalid options leave the search as it was");
+    }
+    // Sequential Halving plans a Gumbel root's visits: neither option applies.
+    SearchConfig gumbel = base;
+    gumbel.root = RootSelection::gumbel;
+    for (const auto& [temperature, forced] : std::vector<std::pair<double, double>>{{1.25, 0.0}, {1.0, 2.0}}) {
+        SearchConfig config = gumbel;
+        config.root_policy_temperature = temperature;
+        config.forced_playouts = forced;
+        require(refused([&] { SearchPool(codec, std::make_shared<ToyEncoder>(), config); }),
+                "a Gumbel pool refuses a root temperature and forced playouts");
+        SearchPool halving(codec, std::make_shared<ToyEncoder>(), gumbel);
+        require(refused([&] { halving.add(game, 1, SearchOptions{{}, {}, {}, temperature, forced}); }) &&
+                    halving.size() == 0,
+                "a Gumbel search refuses a root temperature and forced playouts");
+    }
+    SearchPool halving(codec, std::make_shared<ToyEncoder>(), gumbel);
+    const auto off = halving.add(game, 1, SearchOptions{{}, {}, {}, 1.0, 0.0});
+    run(halving, hashed_evaluator(4));
+    require(halving.done(off) && halving.root_search_priors(off) == halving.root_priors(off),
+            "a Gumbel search takes both options switched off, and selects by the network's priors");
+}
 
 int main() {
     try {
+        test_root_options_off_are_bitwise_today();
+        test_root_temperature_reshapes_the_priors_in_use();
+        test_forced_playouts_reach_their_counts();
+        test_root_options_are_per_search();
         test_search_options_are_per_search();
         test_reroot_counts_the_carried_visits();
         test_reroot_noise_is_per_search();

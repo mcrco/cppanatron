@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <limits>
 #include <cmath>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -1968,8 +1970,289 @@ void test_root_options_are_per_search() {
             "a Gumbel search takes both options switched off, and selects by the network's priors");
 }
 
+/** Everything a finished search reports, bit for bit (q is NaN where unvisited). */
+std::vector<std::uint64_t> report(SearchPool& pool, std::int64_t id) {
+    std::vector<std::uint64_t> out{static_cast<std::uint64_t>(id), pool.done(id) ? 1U : 0U};
+    for (const std::uint32_t visits : pool.visits(id)) {
+        out.push_back(visits);
+    }
+    for (const double q : pool.q(id)) {
+        out.push_back(std::bit_cast<std::uint64_t>(q));
+    }
+    for (const float p : pool.policy_target(id)) {
+        out.push_back(std::bit_cast<std::uint32_t>(p));
+    }
+    for (const float v : pool.value(id)) {
+        out.push_back(std::bit_cast<std::uint32_t>(v));
+    }
+    const SearchStats stats = pool.stats(id);
+    out.insert(out.end(), {stats.nodes, stats.games, stats.simulations, stats.evaluations, pool.select(id)});
+    return out;
+}
+
+/**
+ * SearchConfig::free_backlog only moves where a removed search's trees are
+ * freed. A pool that adds, re-roots and removes searches between and during
+ * rounds reports the same, bit for bit and under the same ids, whether
+ * remove frees them (0, or one thread), the pool's threads do at the next
+ * collect, or a small bound has them freed from inside remove as well.
+ */
+void test_free_backlog_changes_no_result() {
+    const Played played = play_random(2, 21, 120);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    const Evaluator evaluate = hashed_evaluator(2);
+    struct Outcome {
+        std::vector<std::uint64_t> log;
+        std::size_t most_unfreed{};
+        std::size_t largest{};
+        std::size_t flushed_in_remove{};
+    };
+    const auto churn = [&](int free_backlog, int threads) {
+        SearchConfig config;
+        config.simulations = 80;
+        config.max_players = 2;
+        config.max_pending = 2;
+        config.threads = threads;
+        config.free_backlog = free_backlog;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        std::vector<float> observations(64 * pool.observation_size());
+        std::vector<std::int64_t> rows(64);
+        // One collect and apply; false once every search is done.
+        const auto step = [&] {
+            const std::size_t n = pool.collect(observations, rows);
+            std::vector<float> logits(n * pool.action_size());
+            std::vector<float> values(n * 2);
+            for (std::size_t row = 0; row < n; ++row) {
+                const std::size_t width = pool.action_size();
+                evaluate(
+                    pool.pending_game(row), std::span<float>(logits).subspan(row * width, width),
+                    std::span<float>(values).subspan(row * 2, 2));
+            }
+            if (n > 0) {
+                pool.apply(logits, values);
+            }
+            return n > 0;
+        };
+        Outcome outcome;
+        const auto remove = [&](std::int64_t id) {
+            outcome.largest = std::max<std::size_t>(outcome.largest, pool.stats(id).nodes);
+            const std::size_t before = pool.unfreed_nodes();
+            pool.remove(id);
+            outcome.flushed_in_remove += pool.unfreed_nodes() < before;
+            outcome.most_unfreed = std::max(outcome.most_unfreed, pool.unfreed_nodes());
+            require(pool.unfreed_nodes() <= static_cast<std::size_t>(free_backlog), "the backlog keeps to its bound");
+        };
+        std::vector<std::int64_t> live;
+        std::uint64_t seed = 0;
+        for (int round = 0; round < 6; ++round) {
+            while (live.size() < 10) {
+                live.push_back(pool.add(played.game, seed++));
+            }
+            // A search goes while it and the others are still running.
+            for (int i = 0; i < 6; ++i) {
+                require(step(), "the searches are still running");
+            }
+            require(!pool.done(live[3]), "the search removed halfway is unfinished");
+            remove(live[3]);
+            live.erase(live.begin() + 3);
+            while (step()) {
+            }
+            require(pool.unfreed_nodes() == 0, "collect frees what remove left");
+            std::vector<std::int64_t> kept;
+            for (std::size_t i = 0; i < live.size(); ++i) {
+                const std::int64_t id = live[i];
+                const auto reported = report(pool, id);
+                outcome.log.insert(outcome.log.end(), reported.begin(), reported.end());
+                const std::size_t chosen = pool.select(id);
+                const bool keep = i % 3 == 1   ? pool.advance(id, chosen)
+                                  : i % 3 == 2 ? pool.reroot(id, chosen, SearchOptions{40, {}, {}, {}, {}})
+                                               : false;
+                outcome.log.push_back(keep ? 1U : 0U);
+                if (keep) {
+                    kept.push_back(id);
+                } else {
+                    remove(id);
+                }
+            }
+            live = kept;
+            for (const std::int64_t id : pool.ids()) {
+                outcome.log.push_back(static_cast<std::uint64_t>(id));
+            }
+        }
+        return outcome;
+    };
+    const Outcome inside = churn(0, 4);
+    require(inside.most_unfreed == 0 && inside.largest > 0, "at 0 every search is freed inside remove");
+    const Outcome threaded = churn(SearchConfig{}.free_backlog, 4);
+    require(threaded.most_unfreed > inside.largest, "by default the pool's threads free the trees, several at once");
+    require(threaded.log == inside.log, "who frees the trees must not change a result");
+    // Room for one tree and a half: the next one has remove free what waits.
+    const Outcome tight = churn(static_cast<int>(inside.largest + inside.largest / 2), 4);
+    require(tight.most_unfreed > 0 && tight.flushed_in_remove > 0, "a full backlog is freed from inside remove");
+    require(tight.log == inside.log, "nor must a backlog that keeps filling");
+    const Outcome single = churn(SearchConfig{}.free_backlog, 1);
+    require(single.most_unfreed == 0, "a pool of one thread has no thread to leave the trees to");
+    require(single.log == inside.log, "one thread reports the same");
+}
+
+/**
+ * What waits to be freed keeps to SearchConfig::free_backlog, tree node for
+ * tree node: a search that does not fit beside what waits has it freed
+ * first, one larger than the bound is freed inside remove, and the next
+ * collect frees the rest. remove refuses what it always refused.
+ */
+void test_free_backlog_bounds_what_waits() {
+    const Played played = play_random(2, 21, 120);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    SearchConfig config;
+    config.simulations = 64;
+    config.max_players = 2;
+    config.threads = 3;
+    const std::size_t searches = 12;
+    const auto searched = [&](SearchPool& pool) {
+        std::vector<std::int64_t> ids;
+        for (std::uint64_t seed = 0; seed < searches; ++seed) {
+            // One search in four is several times the size of the others.
+            ids.push_back(pool.add(played.game, seed, SearchOptions{seed % 4 == 3 ? 640 : 64, {}, {}, {}, {}}));
+        }
+        run(pool, hashed_evaluator(2));
+        return ids;
+    };
+    std::vector<std::size_t> nodes;
+    std::size_t bound = 0;
+    {
+        config.free_backlog = 0;
+        SearchPool sizes(codec, std::make_shared<ToyEncoder>(), config);
+        for (const std::int64_t id : searched(sizes)) {
+            nodes.push_back(sizes.stats(id).nodes);
+            if (id % 4 != 3) {
+                bound = std::max(bound, 2 * nodes.back() + nodes.back() / 2);
+            }
+        }
+    }
+    config.free_backlog = static_cast<int>(bound);
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    const std::vector<std::int64_t> ids = searched(pool);
+    require(pool.unfreed_nodes() == 0, "nothing waits before a search is removed");
+    std::size_t expected = 0;
+    int inside = 0;
+    int flushes = 0;
+    int left = 0;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        require(pool.stats(ids[i]).nodes == nodes[i], "the searches are those measured");
+        if (nodes[i] > bound) {
+            ++inside;  // too large to wait: freed inside remove
+        } else {
+            if (nodes[i] > bound - expected) {
+                ++flushes;  // no room beside what waits: that is freed first
+                expected = 0;
+            }
+            expected += nodes[i];
+            ++left;
+        }
+        pool.remove(ids[i]);
+        require(pool.unfreed_nodes() == expected && expected <= bound,
+                "what waits is counted node for node, within the bound");
+        require(!pool.contains(ids[i]) && pool.size() == ids.size() - i - 1, "the search is gone at once either way");
+    }
+    require(inside == 3 && flushes >= 2 && left == 9 && expected > 0, "the searches exercise every case");
+    std::vector<float> observations(4 * pool.observation_size());
+    std::vector<std::int64_t> rows(4);
+    require(pool.collect(observations, rows) == 0 && pool.unfreed_nodes() == 0,
+            "a collect frees what waits, even with no search left");
+
+    // remove refuses an unknown id, and a search with leaves awaiting apply, which stays whole.
+    const auto id = pool.add(played.game, 99);
+    const auto other = pool.add(played.game, 100);
+    run(pool, hashed_evaluator(2));
+    pool.remove(other);
+    const std::size_t waiting = pool.unfreed_nodes();
+    require(waiting > 0, "a removed search waits");
+    bool unknown = false;
+    try {
+        pool.remove(other);
+    } catch (const std::out_of_range&) {
+        unknown = true;
+    }
+    require(unknown && pool.unfreed_nodes() == waiting, "an unknown id is refused as before");
+    const auto busy = pool.add(played.game, 101);
+    require(pool.collect(observations, rows) == 1 && pool.unfreed_nodes() == 0,
+            "the new search's root awaits its evaluation");
+    bool pending = false;
+    try {
+        pool.remove(busy);
+    } catch (const std::logic_error&) {
+        pending = true;
+    }
+    require(pending && pool.contains(busy) && pool.unfreed_nodes() == 0,
+            "a search with leaves awaiting apply is refused as before");
+    pool.cancel();
+    run(pool, hashed_evaluator(2));
+    require(pool.done(busy) && pool.stats(busy).simulations == 64 && pool.done(id), "and searches on, whole");
+
+    config.free_backlog = -1;
+    bool refused = false;
+    try {
+        SearchPool(codec, std::make_shared<ToyEncoder>(), config);
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    require(refused, "a negative backlog is refused");
+}
+
+/**
+ * Searches come and go many times over, and pools are destroyed (and moved)
+ * with trees still waiting for their threads and searches still alive:
+ * nothing crashes, hangs or leaks (run it under a sanitizer to see the last).
+ */
+void test_pools_die_with_trees_still_waiting() {
+    const Played played = play_random(2, 21, 120);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    for (const int threads : {1, 4}) {
+        for (const int free_backlog : {0, 150, SearchConfig{}.free_backlog}) {
+            SearchConfig config;
+            config.simulations = 24;
+            config.max_players = 2;
+            config.threads = threads;
+            config.free_backlog = free_backlog;
+            std::optional<SearchPool> pool;
+            std::size_t waited = 0;
+            for (int i = 0; i < 240; ++i) {
+                if (i % 40 == 0) {
+                    waited += pool.has_value() ? pool->unfreed_nodes() : 0;
+                    pool.emplace(codec, std::make_shared<ToyEncoder>(), config);  // the last pool dies as it is
+                }
+                std::vector<std::int64_t> ids;
+                for (std::uint64_t seed = 0; seed < 6; ++seed) {
+                    ids.push_back(pool->add(played.game, static_cast<std::uint64_t>(i) * 6 + seed));
+                }
+                run(*pool, hashed_evaluator(2));
+                // Some searches stay alive, for the pool's end or a later round.
+                for (std::size_t k = static_cast<std::size_t>(i % 3); k < ids.size(); ++k) {
+                    pool->remove(ids[k]);
+                }
+                if (i % 7 == 0) {
+                    for (const std::int64_t id : pool->ids()) {
+                        pool->remove(id);
+                    }
+                }
+            }
+            const std::size_t waiting = pool->unfreed_nodes();
+            SearchPool moved(std::move(*pool));
+            require(moved.unfreed_nodes() == waiting, "a moved pool keeps what waits");
+            pool.reset();
+            const bool leaves = threads > 1 && free_backlog == SearchConfig{}.free_backlog;
+            require((waited + waiting > 0) == (threads > 1 && free_backlog > 0) && (!leaves || waiting > 0),
+                    "pools were destroyed with trees waiting where trees wait at all");
+        }
+    }
+}
+
 int main() {
     try {
+        test_free_backlog_changes_no_result();
+        test_free_backlog_bounds_what_waits();
+        test_pools_die_with_trees_still_waiting();
         test_root_options_off_are_bitwise_today();
         test_root_temperature_reshapes_the_priors_in_use();
         test_forced_playouts_select_the_visited_action_furthest_below();

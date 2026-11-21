@@ -579,6 +579,9 @@ struct SearchPool::Impl {
         if (config.determinizations < 0 || config.threads < 0) {
             throw std::invalid_argument("determinizations and threads must be non-negative");
         }
+        if (config.free_backlog < 0) {
+            throw std::invalid_argument("free_backlog must be non-negative");
+        }
         if (config.gumbel_considered < 1 || !(config.gumbel_scale >= 0.0) ||
             !(config.gumbel_c_visit >= 0.0) || !(config.gumbel_c_scale >= 0.0)) {
             throw std::invalid_argument("invalid Gumbel settings");
@@ -650,6 +653,16 @@ struct SearchPool::Impl {
     };
     std::vector<Row> batch;
     std::unique_ptr<WorkerPool> workers;
+    /** A removed search's tree, waiting for the thread that ran the search to free it. */
+    struct Removed {
+        Tree tree;
+        std::size_t lane{};
+        /** Its games' map, held here so that no worker thread drops a map's last reference. */
+        std::shared_ptr<const CatanMap> map;
+    };
+    std::vector<Removed> removed;
+    /** Tree nodes in `removed`: never above config.free_backlog. */
+    std::size_t removed_nodes{};
 
     // ---------------------------------------------------------------- lookup
 
@@ -659,6 +672,59 @@ struct SearchPool::Impl {
             throw std::out_of_range("no search with this id");
         }
         return *it->second;
+    }
+
+    // --------------------------------------------------------------- removal
+
+    /**
+     * Take the trees of a search about to be removed, for free_removed. A
+     * tree owns its nodes and games outright and a game shares nothing but
+     * its immutable map, so the pool never reads them again. With more
+     * nodes than config.free_backlog, or in a pool of one thread, they stay
+     * with the search and die with it, in remove.
+     */
+    void discard(Search& search) {
+        std::size_t nodes = 0;
+        for (const Tree& tree : search.worlds) {
+            nodes += tree.nodes.size();
+        }
+        const auto limit = static_cast<std::size_t>(config.free_backlog);
+        if (nodes == 0 || nodes > limit || workers->threads() == 1) {
+            return;
+        }
+        if (nodes > limit - removed_nodes) {
+            free_removed();
+        }
+        // Room first: if it cannot be had, no tree has moved.
+        removed.reserve(removed.size() + search.worlds.size());
+        for (Tree& tree : search.worlds) {
+            // A root keeps its game (release_games spares it).
+            const std::unique_ptr<Game>& root = tree.nodes.front().game;
+            std::shared_ptr<const CatanMap> map = root ? root->board().shared_map() : nullptr;
+            removed.push_back({std::move(tree), search.lane, std::move(map)});
+        }
+        removed_nodes += nodes;
+    }
+
+    /**
+     * Free the removed trees, each on the thread that ran its search and so
+     * allocated its games: the threads free side by side, every allocator
+     * arena used by its own thread. Only between loops: a thread of its own
+     * freeing them in the background, beside the searching, more than
+     * doubled the time the searching took (every free contends for the arena
+     * its search's thread is allocating from), far more than remove saved.
+     */
+    void free_removed() {
+        if (removed.empty()) {
+            return;
+        }
+        std::vector<std::size_t> lanes(removed.size());
+        for (std::size_t i = 0; i < removed.size(); ++i) {
+            lanes[i] = removed[i].lane;
+        }
+        workers->run(removed.size(), [&](std::size_t i) { removed[i].tree = Tree{}; }, &lanes);
+        removed.clear();
+        removed_nodes = 0;
     }
 
     // ------------------------------------------------------------ tree nodes
@@ -1431,6 +1497,7 @@ struct SearchPool::Impl {
         if (observations.size() < capacity * width) {
             throw std::invalid_argument("observation buffer is smaller than ids.size() rows");
         }
+        free_removed();
         while (true) {
             std::vector<Search*> active;
             for (auto& [id, search] : searches) {
@@ -2162,8 +2229,13 @@ void SearchPool::remove(std::int64_t id) {
     if (search.pending > 0) {
         throw std::logic_error("cannot remove a search with leaves awaiting apply (apply or cancel first)");
     }
+    // The trees are what freeing a search costs: the pool's threads free
+    // them later (free_removed) unless discard leaves them to die here.
+    impl_->discard(search);
     impl_->searches.erase(id);
 }
+
+std::size_t SearchPool::unfreed_nodes() const noexcept { return impl_->removed_nodes; }
 
 SearchStats SearchPool::stats(std::int64_t id) const { return impl_->stats(impl_->find(id)); }
 

@@ -2,19 +2,28 @@
 // trivial evaluator: uniform logits, every value 0.5.
 //
 //   cppanatron_search_bench MODE PLAYERS [SEARCHES] [SIMULATIONS] [THREADS] [TRANSPOSITIONS]
+//   cppanatron_search_bench churn PLAYERS SEARCHES SIMULATIONS THREADS FREE_BACKLOG [ROUNDS]
 //
 // The pool runs its searches twice and reports the second round's speed,
 // when the allocator reuses the first round's memory as in steady use.
 // MODE is pool, mcts or game (the memory of one game copy). Memory is the
 // growth of resident memory while every tree is alive, so run one mode per
 // process.
+//
+// churn is self-play's cycle: every round removes the last round's searches,
+// adds as many and runs them. It reports the caller's time inside remove and
+// the time searching (whose first collect frees what remove left), per round
+// after the first, with SearchConfig::free_backlog as given (0: freed inside
+// remove).
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -65,7 +74,8 @@ Game position(int players) {
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "usage: " << argv[0]
-                  << " pool|mcts|game PLAYERS [SEARCHES] [SIMS] [THREADS] [TRANSPOSITIONS]\n";
+                  << " pool|mcts|game PLAYERS [SEARCHES] [SIMS] [THREADS] [TRANSPOSITIONS]\n"
+                  << "       " << argv[0] << " churn PLAYERS SEARCHES SIMS THREADS FREE_BACKLOG [ROUNDS]\n";
         return 2;
     }
     const std::string mode = argv[1];
@@ -138,6 +148,68 @@ int main(int argc, char** argv) {
                   << " nodes, " << games / searches << " games, " << linked / searches
                   << " transpositions per tree; tree structure "
                   << tree_bytes / static_cast<double>(nodes) << " B/node)\n";
+        return 0;
+    }
+
+    if (mode == "churn") {
+        SearchConfig config;
+        config.simulations = simulations;
+        config.max_players = players;
+        config.threads = threads;
+        config.free_backlog = argc > 6 ? std::atoi(argv[6]) : config.free_backlog;
+        const int rounds = argc > 7 ? std::atoi(argv[7]) : 6;
+        const auto seconds_since = [](std::chrono::steady_clock::time_point from) {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
+        };
+        const std::size_t batch = static_cast<std::size_t>(searches);
+        std::vector<float> all_logits(batch * codec->size(), 0.0F);
+        std::vector<float> values(batch * static_cast<std::size_t>(players), 0.5F);
+        double removing = 0.0;
+        double searching = 0.0;
+        double closing = 0.0;
+        std::size_t most_unfreed = 0;
+        {
+            std::optional<SearchPool> owner(std::in_place, codec, std::make_shared<NullEncoder>(), config);
+            SearchPool& pool = *owner;
+            std::vector<float> observations(batch * pool.observation_size());
+            std::vector<std::int64_t> rows(batch);
+            std::vector<std::int64_t> ids;
+            for (int round = 0; round <= rounds; ++round) {
+                const auto remove_start = std::chrono::steady_clock::now();
+                for (const auto id : ids) {
+                    pool.remove(id);
+                }
+                const double removed = seconds_since(remove_start);
+                most_unfreed = std::max(most_unfreed, pool.unfreed_nodes());
+                ids.clear();
+                const auto search_start = std::chrono::steady_clock::now();
+                for (int i = 0; i < searches; ++i) {
+                    ids.push_back(pool.add(game, static_cast<std::uint64_t>(round * searches + i)));
+                }
+                while (const std::size_t n = pool.collect(observations, rows)) {
+                    pool.apply(
+                        std::span<const float>(all_logits).first(n * codec->size()),
+                        std::span<const float>(values).first(n * static_cast<std::size_t>(players)));
+                }
+                if (round > 0) {  // the first round has nothing to remove and a cold allocator
+                    removing += removed;
+                    searching += seconds_since(search_start);
+                }
+            }
+            const auto close_start = std::chrono::steady_clock::now();
+            for (const auto id : ids) {
+                pool.remove(id);
+            }
+            // Destroying the pool frees what is still waiting.
+            owner.reset();
+            closing = seconds_since(close_start);
+        }
+        std::cout << "churn " << players << "p threads=" << threads << " free_backlog=" << config.free_backlog
+                  << ": remove " << 1e3 * removing / rounds << " ms, search " << 1e3 * searching / rounds
+                  << " ms, both " << 1e3 * (removing + searching) / rounds << " ms a round ("
+                  << searches << " searches of " << simulations << " simulations, " << rounds
+                  << " rounds); most unfreed " << most_unfreed << " nodes; last remove and destroying the pool "
+                  << 1e3 * closing << " ms\n";
         return 0;
     }
 

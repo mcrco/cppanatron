@@ -101,6 +101,17 @@ struct SearchConfig {
      * world on its own counts.
      */
     double forced_playouts{0.0};
+    /**
+     * Leave the trees of removed searches to the pool's threads, so remove
+     * does not pay for freeing them (a tree is many small allocations): the
+     * most tree nodes that may wait to be freed. They are freed at the next
+     * collect, and before that when another removed search would take them
+     * past this bound, by the threads that ran the searches, side by side.
+     * A search with more nodes than the bound is freed inside remove, as
+     * every search is at 0 or with one thread. Results do not depend on it;
+     * the default is about 160 MB of two-player base games.
+     */
+    int free_backlog{1 << 16};
 };
 
 /**
@@ -313,7 +324,14 @@ public:
      * Gumbel root: Sequential Halving plans its visits from an empty root).
      */
     bool reroot(std::int64_t id, std::size_t action_index, const SearchOptions& options = {});
+    /**
+     * Forget a search (std::out_of_range for an unknown id, std::logic_error
+     * while it has leaves awaiting apply). Its trees are freed here or left
+     * to the pool's threads (SearchConfig::free_backlog).
+     */
     void remove(std::int64_t id);
+    /** Tree nodes of removed searches not freed yet: at most SearchConfig::free_backlog. */
+    [[nodiscard]] std::size_t unfreed_nodes() const noexcept;
     [[nodiscard]] SearchStats stats(std::int64_t id) const;
 
 private:

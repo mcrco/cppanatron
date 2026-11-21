@@ -102,14 +102,15 @@ struct SearchConfig {
      */
     double forced_playouts{0.0};
     /**
-     * Leave the trees of removed searches to the pool's threads, so remove
-     * does not pay for freeing them (a tree is many small allocations): the
-     * most tree nodes that may wait to be freed. They are freed at the next
-     * collect, and before that when another removed search would take them
+     * Leave the trees that remove, advance and reroot discard (a removed
+     * search's, and what a new root cuts away) to the pool's threads, so the
+     * caller does not pay for freeing them (a tree is many small
+     * allocations): the most tree nodes that may wait to be freed. They are
+     * freed at the next collect, and before that when more would take them
      * past this bound, by the threads that ran the searches, side by side.
-     * A search with more nodes than the bound is freed inside remove, as
-     * every search is at 0 or with one thread. Results do not depend on it;
-     * the default is about 160 MB of two-player base games.
+     * What has more nodes than the bound is freed by the call that discards
+     * it, as everything is at 0 or with one thread. Results do not depend
+     * on it; the default is about 160 MB of two-player base games.
      */
     int free_backlog{1 << 16};
 };
@@ -330,7 +331,10 @@ public:
      * to the pool's threads (SearchConfig::free_backlog).
      */
     void remove(std::int64_t id);
-    /** Tree nodes of removed searches not freed yet: at most SearchConfig::free_backlog. */
+    /**
+     * Tree nodes that remove, advance and reroot discarded and nothing has
+     * freed yet: at most SearchConfig::free_backlog.
+     */
     [[nodiscard]] std::size_t unfreed_nodes() const noexcept;
     [[nodiscard]] SearchStats stats(std::int64_t id) const;
 

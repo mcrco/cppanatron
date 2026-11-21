@@ -2,7 +2,7 @@
 // trivial evaluator: uniform logits, every value 0.5.
 //
 //   cppanatron_search_bench MODE PLAYERS [SEARCHES] [SIMULATIONS] [THREADS] [TRANSPOSITIONS]
-//   cppanatron_search_bench churn PLAYERS SEARCHES SIMULATIONS THREADS FREE_BACKLOG [ROUNDS]
+//   cppanatron_search_bench churn|reuse PLAYERS SEARCHES SIMULATIONS THREADS FREE_BACKLOG [ROUNDS]
 //
 // The pool runs its searches twice and reports the second round's speed,
 // when the allocator reuses the first round's memory as in steady use.
@@ -15,6 +15,15 @@
 // the time searching (whose first collect frees what remove left), per round
 // after the first, with SearchConfig::free_backlog as given (0: freed inside
 // remove).
+//
+// reuse is self-play with tree reuse: every round runs the searches and
+// re-roots each at its most visited action that allows it, under the same
+// visit cap (reroot). A search that allows none (a chance action is never
+// re-rooted through) is removed and a new one added, as after a real roll.
+// The priors are peaked, the same at every node, so that the chosen child
+// holds a good part of the tree as it does with a trained network. It
+// reports the caller's time inside reroot and inside remove, and the time
+// searching, per round after the first.
 
 #include <algorithm>
 #include <chrono>
@@ -75,7 +84,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "usage: " << argv[0]
                   << " pool|mcts|game PLAYERS [SEARCHES] [SIMS] [THREADS] [TRANSPOSITIONS]\n"
-                  << "       " << argv[0] << " churn PLAYERS SEARCHES SIMS THREADS FREE_BACKLOG [ROUNDS]\n";
+                  << "       " << argv[0] << " churn|reuse PLAYERS SEARCHES SIMS THREADS FREE_BACKLOG [ROUNDS]\n";
         return 2;
     }
     const std::string mode = argv[1];
@@ -178,9 +187,9 @@ int main(int argc, char** argv) {
                 const auto remove_start = std::chrono::steady_clock::now();
                 for (const auto id : ids) {
                     pool.remove(id);
+                    most_unfreed = std::max(most_unfreed, pool.unfreed_nodes());
                 }
                 const double removed = seconds_since(remove_start);
-                most_unfreed = std::max(most_unfreed, pool.unfreed_nodes());
                 ids.clear();
                 const auto search_start = std::chrono::steady_clock::now();
                 for (int i = 0; i < searches; ++i) {
@@ -210,6 +219,92 @@ int main(int argc, char** argv) {
                   << searches << " searches of " << simulations << " simulations, " << rounds
                   << " rounds); most unfreed " << most_unfreed << " nodes; last remove and destroying the pool "
                   << 1e3 * closing << " ms\n";
+        return 0;
+    }
+
+    if (mode == "reuse") {
+        SearchConfig config;
+        config.simulations = simulations;
+        config.max_players = players;
+        config.threads = threads;
+        config.free_backlog = argc > 6 ? std::atoi(argv[6]) : config.free_backlog;
+        const int rounds = argc > 7 ? std::atoi(argv[7]) : 6;
+        const SearchOptions capped{simulations, {}, {}, {}, {}};
+        const auto seconds_since = [](std::chrono::steady_clock::time_point from) {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
+        };
+        const std::size_t batch = static_cast<std::size_t>(searches);
+        std::vector<float> all_logits(batch * codec->size());
+        std::mt19937_64 rng(11);
+        for (std::size_t action = 0; action < codec->size(); ++action) {
+            const float logit = 3.0F * static_cast<float>(rng() >> 40) / static_cast<float>(1 << 24);
+            for (std::size_t row = 0; row < batch; ++row) {
+                all_logits[row * codec->size() + action] = logit;
+            }
+        }
+        std::vector<float> values(batch * static_cast<std::size_t>(players), 0.5F);
+        SearchPool pool(codec, std::make_shared<NullEncoder>(), config);
+        std::vector<float> observations(batch * pool.observation_size());
+        std::vector<std::int64_t> rows(batch);
+        std::vector<std::int64_t> ids;
+        std::uint64_t seed = 0;
+        for (int i = 0; i < searches; ++i) {
+            ids.push_back(pool.add(game, seed++));
+        }
+        double rerooting = 0.0;
+        double removing = 0.0;
+        double searching = 0.0;
+        std::uint64_t rerooted = 0;
+        std::uint64_t held = 0;
+        std::uint64_t cut = 0;
+        std::size_t most_unfreed = 0;
+        for (int round = 0; round <= rounds; ++round) {
+            const bool counted = round > 0;  // the first round runs on a cold allocator
+            const auto search_start = std::chrono::steady_clock::now();
+            while (const std::size_t n = pool.collect(observations, rows)) {
+                pool.apply(
+                    std::span<const float>(all_logits).first(n * codec->size()),
+                    std::span<const float>(values).first(n * static_cast<std::size_t>(players)));
+            }
+            searching += counted ? seconds_since(search_start) : 0.0;
+            for (auto& id : ids) {
+                const auto visits = pool.visits(id);
+                std::vector<std::size_t> order;
+                for (std::size_t action = 0; action < visits.size(); ++action) {
+                    if (visits[action] > 0) {
+                        order.push_back(action);
+                    }
+                }
+                std::stable_sort(
+                    order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return visits[a] > visits[b]; });
+                const std::uint64_t before_nodes = pool.stats(id).nodes;
+                const auto reroot_start = std::chrono::steady_clock::now();
+                bool moved = false;
+                for (std::size_t i = 0; i < order.size() && !moved; ++i) {
+                    moved = pool.reroot(id, order[i], capped);
+                }
+                rerooting += counted ? seconds_since(reroot_start) : 0.0;
+                if (moved) {
+                    rerooted += counted;
+                    held += counted ? before_nodes : 0;
+                    cut += counted ? before_nodes - pool.stats(id).nodes : 0;
+                } else {
+                    const auto remove_start = std::chrono::steady_clock::now();
+                    pool.remove(id);
+                    removing += counted ? seconds_since(remove_start) : 0.0;
+                    id = pool.add(game, seed++);
+                }
+                most_unfreed = std::max(most_unfreed, pool.unfreed_nodes());
+            }
+        }
+        const double all = rerooting + removing + searching;
+        std::cout << "reuse " << players << "p threads=" << threads << " free_backlog=" << config.free_backlog
+                  << ": reroot " << 1e3 * rerooting / rounds << " ms, remove " << 1e3 * removing / rounds
+                  << " ms, search " << 1e3 * searching / rounds << " ms, all " << 1e3 * all / rounds
+                  << " ms a round (" << searches << " searches of " << simulations << " simulations, " << rounds
+                  << " rounds); re-rooted " << 100.0 * static_cast<double>(rerooted) / (double(searches) * rounds)
+                  << "% of the searches, cutting " << (held == 0 ? 0.0 : 100.0 * static_cast<double>(cut) / held)
+                  << "% of their nodes; most unfreed " << most_unfreed << " nodes\n";
         return 0;
     }
 

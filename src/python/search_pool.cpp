@@ -107,7 +107,11 @@ void bind_search_pool(nb::module_& module) {
         "  visit but fewer than sqrt(k * prior * total root visits) of them is\n"
         "  selected before PUCT is asked, the one furthest below first; the prior is\n"
         "  the one the root selects by, and visits include leaves awaiting\n"
-        "  evaluation. An action without a visit is not forced.")
+        "  evaluation. An action without a visit is not forced.\n"
+        "free_backlog: the most tree nodes that remove, advance and reroot may leave\n"
+        "  for the pool's threads to free (at the next collect, or when more would\n"
+        "  pass it) instead of freeing them in the call; 0, or one thread: all in the\n"
+        "  call. No result depends on it.")
         .def(
             "__init__",
             [](SearchConfig* self, double c_puct, int simulations, int max_pending, RootSelection root,
@@ -115,13 +119,14 @@ void bind_search_pool(nb::module_& module) {
                double gumbel_scale, double gumbel_c_visit, double gumbel_c_scale,
                bool gumbel_rescale_values, int determinizations, int max_players, double fpu_value,
                double fpu_reduction, bool skip_forced, bool release_games, int threads,
-               bool transpositions, double root_policy_temperature, double forced_playouts) {
+               bool transpositions, double root_policy_temperature, double forced_playouts,
+               int free_backlog) {
                 new (self) SearchConfig{
                     c_puct, simulations, max_pending, root, dirichlet_alpha, dirichlet_fraction,
                     gumbel_considered, gumbel_scale, gumbel_c_visit, gumbel_c_scale,
                     gumbel_rescale_values, determinizations, max_players, fpu_value, fpu_reduction,
                     skip_forced, release_games, threads, transpositions, root_policy_temperature,
-                    forced_playouts};
+                    forced_playouts, free_backlog};
             },
             nb::kw_only(), nb::arg("c_puct") = defaults.c_puct,
             nb::arg("simulations") = defaults.simulations,
@@ -140,7 +145,8 @@ void bind_search_pool(nb::module_& module) {
             nb::arg("release_games") = defaults.release_games, nb::arg("threads") = defaults.threads,
             nb::arg("transpositions") = defaults.transpositions,
             nb::arg("root_policy_temperature") = defaults.root_policy_temperature,
-            nb::arg("forced_playouts") = defaults.forced_playouts)
+            nb::arg("forced_playouts") = defaults.forced_playouts,
+            nb::arg("free_backlog") = defaults.free_backlog)
         .def_rw("c_puct", &SearchConfig::c_puct)
         .def_rw("simulations", &SearchConfig::simulations)
         .def_rw("max_pending", &SearchConfig::max_pending)
@@ -162,6 +168,7 @@ void bind_search_pool(nb::module_& module) {
         .def_rw("transpositions", &SearchConfig::transpositions)
         .def_rw("root_policy_temperature", &SearchConfig::root_policy_temperature)
         .def_rw("forced_playouts", &SearchConfig::forced_playouts)
+        .def_rw("free_backlog", &SearchConfig::free_backlog)
         .def("__repr__", [](const SearchConfig& c) {
             return nb::str(
                        "SearchConfig(c_puct={}, simulations={}, max_pending={}, root={!r}, "
@@ -169,13 +176,14 @@ void bind_search_pool(nb::module_& module) {
                        "gumbel_scale={}, gumbel_c_visit={}, gumbel_c_scale={}, "
                        "gumbel_rescale_values={}, determinizations={}, max_players={}, "
                        "fpu_value={}, fpu_reduction={}, skip_forced={}, release_games={}, threads={}, "
-                       "transpositions={}, root_policy_temperature={}, forced_playouts={})")
+                       "transpositions={}, root_policy_temperature={}, forced_playouts={}, "
+                       "free_backlog={})")
                 .format(
                     c.c_puct, c.simulations, c.max_pending, c.root, c.dirichlet_alpha,
                     c.dirichlet_fraction, c.gumbel_considered, c.gumbel_scale, c.gumbel_c_visit,
                     c.gumbel_c_scale, c.gumbel_rescale_values, c.determinizations, c.max_players,
                     c.fpu_value, c.fpu_reduction, c.skip_forced, c.release_games, c.threads,
-                    c.transpositions, c.root_policy_temperature, c.forced_playouts);
+                    c.transpositions, c.root_policy_temperature, c.forced_playouts, c.free_backlog);
         });
 
     nb::class_<SearchStats>(module, "SearchStats", "Counters of one search.")
@@ -222,6 +230,10 @@ void bind_search_pool(nb::module_& module) {
         .def("__contains__", &SearchPool::contains, nb::arg("id"))
         .def_prop_ro("ids", &SearchPool::ids)
         .def_prop_ro("pending", &SearchPool::pending, "Rows of the last collect awaiting apply.")
+        .def_prop_ro(
+            "unfreed_nodes", &SearchPool::unfreed_nodes,
+            "Tree nodes that remove, advance and reroot discarded and nothing has freed\n"
+            "yet: at most ``SearchConfig.free_backlog``.")
         .def(
             "add",
             [](SearchPool& pool, const Game& game, std::uint64_t seed, const HandTracker* tracker,

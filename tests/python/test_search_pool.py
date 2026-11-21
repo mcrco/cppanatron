@@ -818,3 +818,48 @@ def test_root_options_per_search_and_refusals():
     noise = used[0] - 0.75 * tempered(network[0], 1.5)
     for world in range(count):
         np.testing.assert_allclose(used[world] - 0.75 * tempered(network[world], 1.5), noise, atol=1e-6)
+
+
+def test_free_backlog():
+    """Who frees the trees that ``remove`` and ``reroot`` discard changes no result: the pool
+    counts what waits for its threads, and the next ``collect`` frees it."""
+    game, _ = random_game(2, 8, 60)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    default = cpp.SearchConfig().free_backlog
+    assert default == 65536 and f"forced_playouts=0.0, free_backlog={default})" in repr(cpp.SearchConfig())
+    with pytest.raises(ValueError, match="free_backlog"):
+        cpp.SearchPool(codec, encoder, cpp.SearchConfig(max_players=2, free_backlog=-1))
+
+    def played(free_backlog: int, threads: int):
+        config = cpp.SearchConfig(simulations=80, max_players=2, threads=threads, free_backlog=free_backlog)
+        pool = cpp.SearchPool(codec, encoder, config)
+        assert pool.config.free_backlog == free_backlog and pool.unfreed_nodes == 0
+        waits = free_backlog > 0 and threads > 1
+        ids = [pool.add(game, seed) for seed in range(6)]
+        results, most, seed = [], 0, 6
+        for _ in range(3):
+            run_hashed(pool, 2)
+            assert pool.unfreed_nodes == 0  # the collect freed what waited
+            for i, search in enumerate(ids):
+                visits = pool.visits(search)
+                before, waiting = pool.stats(search).nodes, pool.unfreed_nodes
+                results.append((search, visits.tobytes(), pool.q(search).tobytes(), pool.value(search).tobytes(),
+                                pool.policy_target(search).tobytes(), pool.select(search), before))
+                order = [int(a) for a in np.argsort(-visits.astype(np.int64), kind="stable") if visits[a] > 0]
+                if any(pool.reroot(search, action, simulations=80) for action in order):
+                    cut = before - pool.stats(search).nodes  # what the new root left behind
+                else:  # only chance actions were visited
+                    pool.remove(search)
+                    cut = before
+                    ids[i] = pool.add(game, seed)
+                    seed += 1
+                assert cut > 0 and pool.unfreed_nodes == waiting + (cut if waits else 0)
+            most = max(most, pool.unfreed_nodes)
+        return results, most
+
+    inside, none = played(0, 2)
+    threaded, most = played(default, 2)
+    single, alone = played(default, 1)
+    assert none == 0 and alone == 0 and 0 < most <= default
+    assert threaded == inside and single == inside

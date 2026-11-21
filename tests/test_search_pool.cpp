@@ -2067,6 +2067,8 @@ void test_free_backlog_changes_no_result() {
                 const bool keep = i % 3 == 1   ? pool.advance(id, chosen)
                                   : i % 3 == 2 ? pool.reroot(id, chosen, SearchOptions{40, {}, {}, {}, {}})
                                                : false;
+                outcome.most_unfreed = std::max(outcome.most_unfreed, pool.unfreed_nodes());
+                require(pool.unfreed_nodes() <= static_cast<std::size_t>(free_backlog), "a new root keeps to it too");
                 outcome.log.push_back(keep ? 1U : 0U);
                 if (keep) {
                     kept.push_back(id);
@@ -2093,6 +2095,122 @@ void test_free_backlog_changes_no_result() {
     const Outcome single = churn(SearchConfig{}.free_backlog, 1);
     require(single.most_unfreed == 0, "a pool of one thread has no thread to leave the trees to");
     require(single.log == inside.log, "one thread reports the same");
+}
+
+/**
+ * advance and reroot cut most of a tree away, and SearchConfig::free_backlog
+ * leaves that to the pool's threads as well. Searches re-rooted round after
+ * round (of one world or several, the budget started again or the root's
+ * visits carried) report the same, bit for bit, whoever frees what is cut
+ * away; and what waits is every node the new roots left behind, counted
+ * node for node, within the bound, and freed by the next collect.
+ */
+void test_free_backlog_covers_what_a_new_root_cuts_away() {
+    const Played played = play_random(2, 21, 120);
+    const HandTracker& tracker = played.trackers[static_cast<std::size_t>(played.game.current_player_index())];
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    struct Outcome {
+        std::vector<std::uint64_t> log;
+        std::size_t rerooted{};
+        /** The most nodes one new root cut away. */
+        std::size_t largest{};
+        std::size_t most_unfreed{};
+        /** How often what waited was freed to make room. */
+        std::size_t flushes{};
+    };
+    const auto reuse = [&](int determinizations, std::size_t bound, int threads) {
+        SearchConfig config;
+        config.simulations = 96;
+        config.max_players = 2;
+        config.max_pending = 2;
+        config.determinizations = determinizations;
+        config.threads = threads;
+        config.free_backlog = static_cast<int>(bound);
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        Outcome outcome;
+        std::size_t waiting = 0;
+        // What the pool does with `nodes` discarded nodes.
+        const auto discarded = [&](std::size_t nodes) {
+            if (nodes > 0 && nodes <= bound && threads > 1) {
+                if (nodes > bound - waiting) {
+                    waiting = 0;
+                    ++outcome.flushes;
+                }
+                waiting += nodes;
+            }
+            require(pool.unfreed_nodes() == waiting && waiting <= bound,
+                    "what waits is counted node for node, within the bound");
+            outcome.most_unfreed = std::max(outcome.most_unfreed, waiting);
+        };
+        std::uint64_t seed = 0;
+        const auto add = [&] { return pool.add(played.game, seed++, determinizations > 0 ? &tracker : nullptr); };
+        std::vector<std::int64_t> ids;
+        for (int i = 0; i < 8; ++i) {
+            ids.push_back(add());
+        }
+        for (int round = 0; round < 5; ++round) {
+            run(pool, hashed_evaluator(2));
+            require(pool.unfreed_nodes() == 0, "a collect frees what waits");
+            waiting = 0;
+            for (std::size_t i = 0; i < ids.size(); ++i) {
+                std::int64_t& id = ids[i];
+                const auto reported = report(pool, id);
+                outcome.log.insert(outcome.log.end(), reported.begin(), reported.end());
+                // The most visited root action the search can be re-rooted at.
+                const auto visits = pool.visits(id);
+                std::vector<std::size_t> order;
+                for (std::size_t action = 0; action < visits.size(); ++action) {
+                    if (visits[action] > 0) {
+                        order.push_back(action);
+                    }
+                }
+                std::stable_sort(
+                    order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return visits[a] > visits[b]; });
+                const std::size_t before = pool.stats(id).nodes;
+                bool moved = false;
+                for (const std::size_t action : order) {
+                    moved = (i + static_cast<std::size_t>(round)) % 2 == 0
+                        ? pool.advance(id, action)
+                        : pool.reroot(id, action, SearchOptions{96, {}, {}, {}, {}});
+                    if (moved) {
+                        outcome.log.push_back(action);
+                        break;
+                    }
+                    require(pool.unfreed_nodes() == waiting && pool.stats(id).nodes == before,
+                            "a refused new root discards nothing");
+                }
+                outcome.log.push_back(moved ? 1U : 0U);
+                if (moved) {
+                    const std::size_t kept = pool.stats(id).nodes;
+                    require(kept < before, "a new root leaves nodes behind");
+                    outcome.largest = std::max(outcome.largest, before - kept);
+                    ++outcome.rerooted;
+                    discarded(before - kept);
+                } else {
+                    pool.remove(id);
+                    discarded(before);
+                    id = add();
+                }
+            }
+        }
+        return outcome;
+    };
+    const auto standard = static_cast<std::size_t>(SearchConfig{}.free_backlog);
+    for (const int determinizations : {0, 3}) {
+        const Outcome inside = reuse(determinizations, 0, 4);
+        require(inside.most_unfreed == 0 && inside.rerooted >= 16, "at 0 advance and reroot free what they cut away");
+        const Outcome threaded = reuse(determinizations, standard, 4);
+        require(threaded.most_unfreed > inside.largest && threaded.flushes == 0,
+                "by default the pool's threads free it, a round's worth at once");
+        require(threaded.log == inside.log, "who frees what a new root cuts away must not change a result");
+        // Room for one new root's nodes and a half: the next has what waits freed first.
+        const Outcome tight = reuse(determinizations, inside.largest + inside.largest / 2, 4);
+        require(tight.most_unfreed > 0 && tight.flushes > 0, "a full backlog is freed from inside advance and reroot");
+        require(tight.log == inside.log, "nor must a backlog that keeps filling");
+        const Outcome single = reuse(determinizations, standard, 1);
+        require(single.most_unfreed == 0, "a pool of one thread has no thread to leave it to");
+        require(single.log == inside.log, "one thread reports the same");
+    }
 }
 
 /**
@@ -2251,6 +2369,7 @@ void test_pools_die_with_trees_still_waiting() {
 int main() {
     try {
         test_free_backlog_changes_no_result();
+        test_free_backlog_covers_what_a_new_root_cuts_away();
         test_free_backlog_bounds_what_waits();
         test_pools_die_with_trees_still_waiting();
         test_root_options_off_are_bitwise_today();

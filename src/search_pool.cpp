@@ -653,7 +653,7 @@ struct SearchPool::Impl {
     };
     std::vector<Row> batch;
     std::unique_ptr<WorkerPool> workers;
-    /** A removed search's tree, waiting for the thread that ran the search to free it. */
+    /** A discarded tree (see discard), waiting for the thread that ran its search to free it. */
     struct Removed {
         Tree tree;
         std::size_t lane{};
@@ -677,17 +677,15 @@ struct SearchPool::Impl {
     // --------------------------------------------------------------- removal
 
     /**
-     * Take the trees of a search about to be removed, for free_removed. A
-     * tree owns its nodes and games outright and a game shares nothing but
-     * its immutable map, so the pool never reads them again. With more
-     * nodes than config.free_backlog, or in a pool of one thread, they stay
-     * with the search and die with it, in remove.
+     * Leave trees the pool will not read again to free_removed: those of a
+     * search being removed, or what advance cut away (`nodes`: the tree
+     * nodes they still own, on `lane`). A tree owns its nodes and games
+     * outright and a game shares nothing but its immutable map, `map`. With
+     * more nodes than config.free_backlog, or in a pool of one thread, the
+     * trees stay where they are, for the caller to free.
      */
-    void discard(Search& search) {
-        std::size_t nodes = 0;
-        for (const Tree& tree : search.worlds) {
-            nodes += tree.nodes.size();
-        }
+    void discard(
+        std::vector<Tree>& trees, std::size_t nodes, std::size_t lane, const std::shared_ptr<const CatanMap>& map) {
         const auto limit = static_cast<std::size_t>(config.free_backlog);
         if (nodes == 0 || nodes > limit || workers->threads() == 1) {
             return;
@@ -696,18 +694,28 @@ struct SearchPool::Impl {
             free_removed();
         }
         // Room first: if it cannot be had, no tree has moved.
-        removed.reserve(removed.size() + search.worlds.size());
-        for (Tree& tree : search.worlds) {
-            // A root keeps its game (release_games spares it).
-            const std::unique_ptr<Game>& root = tree.nodes.front().game;
-            std::shared_ptr<const CatanMap> map = root ? root->board().shared_map() : nullptr;
-            removed.push_back({std::move(tree), search.lane, std::move(map)});
+        removed.reserve(removed.size() + trees.size());
+        for (Tree& tree : trees) {
+            removed.push_back({std::move(tree), lane, map});
         }
         removed_nodes += nodes;
     }
 
+    /** The trees of a search about to be removed. */
+    void discard(Search& search) {
+        std::size_t nodes = 0;
+        for (const Tree& tree : search.worlds) {
+            nodes += tree.nodes.size();
+        }
+        if (nodes > 0) {
+            // A root keeps its game (release_games spares it).
+            const std::unique_ptr<Game>& root = search.worlds.front().nodes.front().game;
+            discard(search.worlds, nodes, search.lane, root ? root->board().shared_map() : nullptr);
+        }
+    }
+
     /**
-     * Free the removed trees, each on the thread that ran its search and so
+     * Free the discarded trees, each on the thread that ran its search and so
      * allocated its games: the threads free side by side, every allocator
      * arena used by its own thread. Only between loops: a thread of its own
      * freeing them in the background, beside the searching, more than
@@ -1811,9 +1819,15 @@ struct SearchPool::Impl {
                 }
             }
         }
+        // What is cut away: the old trees, and in them every node extract leaves.
+        std::vector<Tree> cut;
+        cut.reserve(search.worlds.size());
+        std::size_t cut_nodes = 0;
         for (std::size_t w = 0; w < search.worlds.size(); ++w) {
             (void)game_of(search.worlds[w], children[w]);
-            search.worlds[w] = extract(search.worlds[w], children[w]);
+            Tree kept = extract(search.worlds[w], children[w]);
+            cut_nodes += search.worlds[w].nodes.size() - kept.nodes.size();
+            cut.push_back(std::exchange(search.worlds[w], std::move(kept)));
         }
         search.root_player = search.worlds.front().nodes.front().to_play;
         search.root_mask.clear();
@@ -1842,6 +1856,9 @@ struct SearchPool::Impl {
             // A root that already has its visits runs no simulation.
             finish_if_done(search);
         }
+        // Last, with the search whole: the pool's threads free what was cut
+        // away (free_removed), or it dies here.
+        discard(cut, cut_nodes, search.lane, search.worlds.front().nodes.front().game->board().shared_map());
         return true;
     }
 

@@ -421,6 +421,11 @@ struct GumbelRoot {
     std::vector<double> logits;
     std::vector<double> noise;
     std::vector<std::uint32_t> own_visits;
+    /**
+     * Likely worlds: the simulations each root edge has started in each
+     * world (edge after edge), by which the edge's next world is chosen.
+     */
+    std::vector<std::uint32_t> dealt;
     double root_value{};
     std::vector<std::pair<int, int>> phases;
     int phase{-1};
@@ -444,6 +449,14 @@ struct Search {
     std::vector<Tree> worlds;
     /** World of each simulation, cyclically; merged samples appear repeatedly. */
     std::vector<std::uint32_t> schedule;
+    /**
+     * Likely worlds (WorldChoice::likely): each world's probability among
+     * the worlds, which is its share of the simulations in place of the
+     * schedule. Empty otherwise.
+     */
+    std::vector<double> weights;
+    /** Likely worlds at a PUCT root: the simulations started in each world. */
+    std::vector<std::uint32_t> dealt;
     int budget{};
     /** The search's own settings (SearchOptions over the pool's config). */
     int cap{};
@@ -471,6 +484,49 @@ struct Search {
     std::uint64_t depth_sum{};
     std::uint32_t max_depth{};
 };
+
+/**
+ * The world of the next simulation when worlds take simulations in
+ * proportion to `weights` and have had `dealt` of them so far. Earliest
+ * deadline first over the worlds whose next simulation is due: with weight p
+ * a world's k-th simulation belongs in slots floor((k - 1) / p) to
+ * ceil(k / p) - 1, and taking the due one that ends soonest keeps every
+ * world, after any number of simulations t, within one of p * t (the weights
+ * sum to 1, so one simulation per slot is always enough). Ties go to the
+ * first, most likely, world. Counts that left the pattern (visits carried by
+ * a reroot, withdrawn leaves) are pulled back to it: when no world is due,
+ * the one furthest behind its share goes.
+ */
+std::uint32_t next_world(std::span<const double> weights, std::span<const std::uint32_t> dealt) {
+    // Slack for the rounding of a quotient that is a whole number.
+    constexpr double kSlack = 1e-9;
+    const double slot = static_cast<double>(std::accumulate(dealt.begin(), dealt.end(), std::uint64_t{0}));
+    std::uint32_t best = kNone;
+    double best_deadline = std::numeric_limits<double>::infinity();
+    for (std::uint32_t w = 0; w < weights.size(); ++w) {
+        if (std::floor(dealt[w] / weights[w] + kSlack) > slot) {
+            continue;
+        }
+        const double deadline = std::ceil((dealt[w] + 1.0) / weights[w] - kSlack);
+        if (deadline < best_deadline) {
+            best_deadline = deadline;
+            best = w;
+        }
+    }
+    if (best != kNone) {
+        return best;
+    }
+    best = 0;
+    double most_behind = -std::numeric_limits<double>::infinity();
+    for (std::uint32_t w = 0; w < weights.size(); ++w) {
+        const double behind = weights[w] * (slot + 1.0) - dealt[w];
+        if (behind > most_behind) {
+            most_behind = behind;
+            best = w;
+        }
+    }
+    return best;
+}
 
 /** ``(actions kept, simulations)`` per Sequential Halving phase, as mctx. */
 std::vector<std::pair<int, int>> halving_phases(int considered, int simulations) {
@@ -581,6 +637,10 @@ struct SearchPool::Impl {
         }
         if (config.free_backlog < 0) {
             throw std::invalid_argument("free_backlog must be non-negative");
+        }
+        if (config.world_choice == WorldChoice::likely && config.determinizations < 1) {
+            throw std::invalid_argument(
+                "likely worlds need determinizations: how many of the most likely worlds to search");
         }
         if (config.gumbel_considered < 1 || !(config.gumbel_scale >= 0.0) ||
             !(config.gumbel_c_visit >= 0.0) || !(config.gumbel_c_scale >= 0.0)) {
@@ -1311,20 +1371,38 @@ struct SearchPool::Impl {
         }
         GumbelRoot gumbel;
         gumbel.logits.assign(count, 0.0);
-        for (const Tree& tree : search.worlds) {
+        // The worlds' log-priors, averaged: evenly over sampled worlds, by
+        // their probabilities over likely ones.
+        for (std::size_t w = 0; w < search.worlds.size(); ++w) {
+            const Tree& tree = search.worlds[w];
             const Node& world_root = tree.nodes.front();
             for (std::size_t i = 0; i < count; ++i) {
                 const double prior = tree.edges[world_root.first_edge + i].prior;
-                gumbel.logits[i] += std::max(prior > 0.0 ? std::log(prior) : kMinLogPrior, kMinLogPrior) /
-                                    static_cast<double>(search.worlds.size());
+                const double log_prior = std::max(prior > 0.0 ? std::log(prior) : kMinLogPrior, kMinLogPrior);
+                gumbel.logits[i] += search.weights.empty()
+                    ? log_prior / static_cast<double>(search.worlds.size())
+                    : log_prior * search.weights[w];
             }
         }
         for (std::size_t i = 0; i < count; ++i) {
             gumbel.noise.push_back(config.gumbel_scale * random::gumbel(search.rng));
         }
         gumbel.own_visits.assign(count, 0);
+        gumbel.dealt.assign(search.weights.empty() ? 0 : count * search.worlds.size(), 0);
         if (root_value.has_value()) {
             gumbel.root_value = *root_value;
+        } else if (!search.weights.empty()) {
+            // A re-rooted root: each likely world's own mean, by the weights.
+            double weight = 0.0;
+            double value = 0.0;
+            for (std::size_t w = 0; w < search.worlds.size(); ++w) {
+                const Node& world_root = search.worlds[w].nodes.front();
+                if (world_root.visits > 0) {
+                    weight += search.weights[w];
+                    value += search.weights[w] * mean(world_root, search.root_player);
+                }
+            }
+            gumbel.root_value = weight > 0 ? value / weight : 0.0;
         } else {
             double visits = 0.0;
             double value = 0.0;
@@ -1385,10 +1463,8 @@ struct SearchPool::Impl {
             }
             return;
         }
+        const bool likely = !search.weights.empty();
         while (issued < quota && search.started < search.budget) {
-            const std::uint32_t world =
-                search.schedule[static_cast<std::size_t>(search.started) % search.schedule.size()];
-            Tree& tree = search.worlds[world];
             std::optional<std::size_t> root_edge;
             if (search.gumbel.has_value()) {
                 root_edge = next_root_edge(search);
@@ -1396,6 +1472,18 @@ struct SearchPool::Impl {
                     break;
                 }
             }
+            // Sampled worlds take turns. Likely worlds take their share: of
+            // all simulations, or at a Gumbel root of each root edge's own,
+            // so every action is searched in the same worlds as the others.
+            const std::span<std::uint32_t> dealt = !likely ? std::span<std::uint32_t>{}
+                : root_edge.has_value()
+                    ? std::span<std::uint32_t>(search.gumbel->dealt)
+                          .subspan(*root_edge * search.worlds.size(), search.worlds.size())
+                    : std::span<std::uint32_t>(search.dealt);
+            const std::uint32_t world = likely
+                ? next_world(search.weights, dealt)
+                : search.schedule[static_cast<std::size_t>(search.started) % search.schedule.size()];
+            Tree& tree = search.worlds[world];
             const auto unpop = [&] {
                 if (root_edge.has_value()) {
                     search.gumbel->queue.push_back(*root_edge);
@@ -1414,6 +1502,9 @@ struct SearchPool::Impl {
                 break;
             }
             ++search.started;
+            if (likely) {
+                ++dealt[world];
+            }
             Node& node = tree.nodes[descent.node];
             if (descent.stop == Stop::leaf) {
                 node.pending = true;
@@ -1458,6 +1549,11 @@ struct SearchPool::Impl {
         if (leaf.root_edge != kNone && search.gumbel.has_value()) {
             search.gumbel->queue.push_back(leaf.root_edge);
             --search.gumbel->own_visits[leaf.root_edge];
+            if (!search.weights.empty()) {
+                --search.gumbel->dealt[leaf.root_edge * search.worlds.size() + leaf.world];
+            }
+        } else if (!search.weights.empty()) {
+            --search.dealt[leaf.world];
         }
         search.done = false;
     }
@@ -1483,10 +1579,15 @@ struct SearchPool::Impl {
         --search.pending;
         if (leaf.node == 0) {
             backup(tree, leaf.path, absolute, true);
-            search.root_net_value += absolute[static_cast<std::size_t>(search.root_player)];
+            // The root's value is the worlds' mean: even over sampled
+            // worlds, by their probabilities (which sum to 1) over likely ones.
+            const bool likely = !search.weights.empty();
+            search.root_net_value += absolute[static_cast<std::size_t>(search.root_player)] *
+                                     (likely ? search.weights[leaf.world] : 1.0);
             if (++search.roots_evaluated == static_cast<int>(search.worlds.size())) {
                 search.roots_ready = true;
-                prepare_root(search, search.root_net_value / search.roots_evaluated);
+                prepare_root(
+                    search, likely ? search.root_net_value : search.root_net_value / search.roots_evaluated);
             }
         } else {
             backup(tree, leaf.path, absolute, false);
@@ -1835,13 +1936,23 @@ struct SearchPool::Impl {
         search.completed = 0;
         search.done = false;
         search.budget = search.cap;
+        // Likely worlds share a fresh budget from its first simulation on.
+        std::fill(search.dealt.begin(), search.dealt.end(), 0U);
         if (options != nullptr) {
             configure(search, *options);
             std::uint64_t carried = 0;
-            for (const Tree& tree : search.worlds) {
+            for (std::size_t w = 0; w < search.worlds.size(); ++w) {
+                const Tree& tree = search.worlds[w];
                 const Node& root = tree.nodes.front();
+                std::uint64_t own = 0;
                 for (std::uint32_t e = root.first_edge; e < root.first_edge + root.num_edges; ++e) {
-                    carried += edge_visits(tree, tree.edges[e]);
+                    own += edge_visits(tree, tree.edges[e]);
+                }
+                carried += own;
+                if (!search.dealt.empty()) {
+                    // Under a cap the carried visits count: the worlds
+                    // behind their share are topped up first.
+                    search.dealt[w] = static_cast<std::uint32_t>(own);
                 }
             }
             search.budget = static_cast<int>(
@@ -2137,7 +2248,30 @@ std::int64_t SearchPool::add(
                 return true;
             };
             std::vector<std::uint8_t> common = search->root_mask;
-            for (int k = 0; k < impl_->config.determinizations; ++k) {
+            const bool likely = impl_->config.world_choice == WorldChoice::likely;
+            if (likely) {
+                // The most likely deals, each with its probability among
+                // them; only the rest of a world (its deck's order, its
+                // random stream) is drawn.
+                std::vector<LikelyWorld> deals = likely_worlds(game, *tracker, deal);
+                deals.resize(std::min(deals.size(), static_cast<std::size_t>(impl_->config.determinizations)));
+                double kept = 0.0;
+                for (const LikelyWorld& hidden : deals) {
+                    kept += hidden.probability;
+                }
+                for (const LikelyWorld& hidden : deals) {
+                    Game world = game;
+                    world.redeal_hidden_cards(hidden.hands, search->rng());
+                    const auto mask = mask_of(world);
+                    for (std::size_t i = 0; i < common.size(); ++i) {
+                        common[i] &= mask[i];
+                    }
+                    search->weights.push_back(hidden.probability / kept);
+                    worlds.push_back(std::move(world));
+                }
+                search->dealt.assign(worlds.size(), 0);
+            }
+            for (int k = 0; !likely && k < impl_->config.determinizations; ++k) {
                 Game world = sample_world(game, *tracker, search->rng, deal);
                 auto mask = mask_of(world);
                 for (int attempt = 1; attempt < kWorldAttempts && !covers(mask); ++attempt) {
@@ -2158,7 +2292,9 @@ std::int64_t SearchPool::add(
                 }
             }
             if (std::none_of(common.begin(), common.end(), [](std::uint8_t legal) { return legal != 0; })) {
-                throw std::invalid_argument("no sampled world allows any of the real legal actions");
+                throw std::invalid_argument(
+                    search->weights.empty() ? "no sampled world allows any of the real legal actions"
+                                            : "no likely world allows any of the real legal actions");
             }
             search->root_mask = std::move(common);
         } else {
@@ -2227,6 +2363,32 @@ std::vector<float> SearchPool::root_priors(std::int64_t id) const {
 
 std::vector<float> SearchPool::root_search_priors(std::int64_t id) const {
     return impl_->root_priors(impl_->find(id), true);
+}
+
+std::vector<double> SearchPool::world_weights(std::int64_t id) const {
+    const Search& search = impl_->find(id);
+    if (!search.weights.empty()) {
+        return search.weights;
+    }
+    std::vector<double> weights(search.worlds.size(), 0.0);
+    for (const std::uint32_t world : search.schedule) {
+        weights[world] += 1.0 / static_cast<double>(search.schedule.size());
+    }
+    return weights;
+}
+
+std::vector<std::uint32_t> SearchPool::world_visits(std::int64_t id) const {
+    const Search& search = impl_->find(id);
+    const std::size_t actions = impl_->codec->size();
+    std::vector<std::uint32_t> result(search.worlds.size() * actions, 0);
+    for (std::size_t w = 0; w < search.worlds.size(); ++w) {
+        const Tree& tree = search.worlds[w];
+        const Node& root = tree.nodes.front();
+        for (std::uint32_t e = root.first_edge; e < root.first_edge + root.num_edges; ++e) {
+            result[w * actions + tree.edges[e].action] += Impl::edge_visits(tree, tree.edges[e]);
+        }
+    }
+    return result;
 }
 
 std::size_t SearchPool::select(std::int64_t id, double temperature) {

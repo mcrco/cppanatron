@@ -1,8 +1,10 @@
 // HandTracker and sample_world: soundness, independence from hidden truth,
 // and legality of sampled worlds over random games of 2-6 players, in both
-// tracker modes; the exact mode's posterior on worked examples.
+// tracker modes; the exact mode's posterior on worked examples; likely_worlds
+// against the sampler whose deals it lists.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -10,6 +12,7 @@
 #include <iostream>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -962,6 +965,296 @@ void test_exact_tracker_follows_random_games() {
               << " on average over " << exact_steps << " exact seat-steps, " << samples << " samples\n";
 }
 
+/** What tells two worlds apart: every seat's hidden cards (Game::redeal_hidden_cards' input). */
+using HiddenKey = std::vector<std::array<int, 14>>;
+
+HiddenKey hidden_key(const std::vector<HiddenHand>& hands) {
+    HiddenKey key;
+    for (const HiddenHand& hand : hands) {
+        std::array<int, 14>& row = key.emplace_back();
+        std::copy(hand.resources.begin(), hand.resources.end(), row.begin());
+        std::copy(hand.development_cards.begin(), hand.development_cards.end(), row.begin() + 5);
+        std::copy(hand.development_card_owned_at_start.begin(), hand.development_card_owned_at_start.end(),
+                  row.begin() + 10);
+    }
+    return key;
+}
+
+HiddenKey hidden_key(const Game& world) {
+    std::vector<HiddenHand> hands;
+    for (const PlayerState& player : world.players()) {
+        hands.push_back({player.resources, player.development_cards, player.development_card_owned_at_start});
+    }
+    return hidden_key(hands);
+}
+
+/** How likely_worlds did against the sampler on one position. */
+struct LikelyCheck {
+    std::size_t worlds{};
+    /** Every listed deal was likely enough for the samples to have to show it, and did. */
+    bool every_world_sampled{};
+    /** The probability of the eight most likely deals together. */
+    double top_eight{};
+};
+
+/**
+ * likely_worlds against the sampler it lists: distinct deals, most likely
+ * first, whose probabilities sum to 1; `samples` draws of sample_world land
+ * on listed deals only, each about as often as its probability says (five
+ * standard deviations), so a deal expected some forty times or more cannot
+ * be missing from them.
+ */
+LikelyCheck check_likely_worlds(
+    const Game& game, const HandTracker& tracker, int samples, std::uint64_t seed,
+    std::optional<TrackerMode> deal = std::nullopt) {
+    const std::vector<LikelyWorld> worlds = likely_worlds(game, tracker, deal);
+    require(!worlds.empty(), "a position in play has a possible deal");
+    std::map<HiddenKey, double> listed;
+    double total = 0.0;
+    LikelyCheck check;
+    check.worlds = worlds.size();
+    for (std::size_t i = 0; i < worlds.size(); ++i) {
+        const LikelyWorld& world = worlds[i];
+        require(world.probability > 0.0, "a listed deal is possible");
+        require(i == 0 || world.probability <= worlds[i - 1].probability, "the most likely deals come first");
+        require(listed.emplace(hidden_key(world.hands), world.probability).second, "the listed deals are distinct");
+        total += world.probability;
+        check.top_eight += i < 8 ? world.probability : 0.0;
+        // A deal's game is one the tracker accepts and one sample_world could have made.
+        Game dealt = game;
+        dealt.redeal_hidden_cards(world.hands, seed + i);
+        require(tracker.consistent_with(dealt), "a listed deal satisfies the tracker");
+        require(hidden_key(dealt) == hidden_key(world.hands), "a deal's game holds the deal");
+    }
+    require(std::abs(total - 1.0) < 1e-12, "the probabilities sum to 1");
+    const std::vector<LikelyWorld> again = likely_worlds(game, tracker, deal);
+    for (std::size_t i = 0; i < worlds.size(); ++i) {
+        require(hidden_key(again[i].hands) == hidden_key(worlds[i].hands) &&
+                    again[i].probability == worlds[i].probability,
+                "the list is the same every time, ties included");
+    }
+
+    std::map<HiddenKey, int> drawn;
+    std::mt19937_64 rng(seed);
+    for (int i = 0; i < samples; ++i) {
+        ++drawn[hidden_key(sample_world(game, tracker, rng, deal))];
+    }
+    for (const auto& [key, count] : drawn) {
+        require(listed.contains(key), "every sampled deal is listed");
+    }
+    check.every_world_sampled = true;
+    for (const auto& [key, probability] : listed) {
+        const double expected = samples * probability;
+        const auto found = drawn.find(key);
+        const double count = found == drawn.end() ? 0.0 : found->second;
+        require(std::abs(count - expected) <= 5.0 * std::sqrt(expected * (1.0 - probability)) + 2.0,
+                "a deal is sampled as often as its listed probability says (expected " +
+                    std::to_string(expected) + ", drew " + std::to_string(count) + ")");
+        check.every_world_sampled = check.every_world_sampled && expected >= 40.0 && count > 0;
+    }
+    return check;
+}
+
+/**
+ * The listed deals are the sampler's, with its probabilities, on positions
+ * of random two-player games where the other seat holds no, one, two and
+ * four or more unplayed development cards, and where it bought one this
+ * turn (which the deals tell from the cards it held before).
+ */
+void test_likely_worlds_match_the_sampler_with_two_players() {
+    std::map<std::string, int> found;
+    const auto take = [&](const std::string& kind) { return found[kind]++ == 0; };
+    std::string summary;
+    const auto note = [&](const std::string& kind, const LikelyCheck& check) {
+        summary += (summary.empty() ? "" : "; ") + kind + ": " + std::to_string(check.worlds) + " deals, " +
+                   std::to_string(check.top_eight).substr(0, 5) + " in the top eight";
+    };
+    for (std::uint64_t seed = 1; seed <= 40 && found.size() < 6; ++seed) {
+        Game game(seats(2), MapType::base, seed);
+        std::vector<HandTracker> trackers{HandTracker(game, 0), HandTracker(game, 1)};
+        std::mt19937_64 rng(seed);
+        for (int step = 0; step < 1200 && !game.winning_color().has_value(); ++step) {
+            const Game before = game;
+            const Action action = random_action(game, rng);
+            game.execute(action);
+            for (HandTracker& tracker : trackers) {
+                tracker.observe(before, action, game);
+            }
+            if (game.winning_color().has_value()) {
+                break;
+            }
+            const int mover = game.current_player_index();
+            const HandTracker& tracker = trackers[static_cast<std::size_t>(mover)];
+            const int hidden = tracker.development_card_count(1 - mover);
+            const std::uint64_t sample_seed = seed * 1009 + static_cast<std::uint64_t>(step);
+            if (step % 25 == 0 && hidden <= 2 && take("holds " + std::to_string(hidden))) {
+                const LikelyCheck check = check_likely_worlds(game, tracker, 20000, sample_seed);
+                require((check.worlds == 1) == (hidden == 0), "one deal exactly when nothing is hidden");
+                require(check.every_world_sampled, "with up to two hidden cards every deal is sampled");
+                require(check.top_eight > 0.85, "eight deals cover most of two hidden cards");
+                note("holds " + std::to_string(hidden), check);
+            }
+            if (step % 25 == 0 && hidden >= 4 && take("holds four or more")) {
+                const LikelyCheck check = check_likely_worlds(game, tracker, 60000, sample_seed);
+                require(check.worlds > 8 && check.top_eight < 1.0, "four cards have more than eight deals");
+                note("holds " + std::to_string(hidden), check);
+            }
+            // The seat that just bought, as the other seat sees it: the new
+            // card is not one it held at the start of the turn.
+            const HandTracker& watcher = trackers[static_cast<std::size_t>(1 - mover)];
+            if (action.type == ActionType::buy_development_card && watcher.bought_this_turn(mover) > 0 &&
+                watcher.development_card_count(mover) >= 2 && take("bought this turn")) {
+                const LikelyCheck check = check_likely_worlds(game, watcher, 60000, sample_seed);
+                HandTracker forgetful = watcher;
+                forgetful.end_turn(mover);
+                require(check.worlds > likely_worlds(game, forgetful).size(),
+                        "a card bought this turn is told from the cards held before");
+                note("bought one of " + std::to_string(watcher.development_card_count(mover)), check);
+            }
+        }
+    }
+    for (const char* kind : {"holds 0", "holds 1", "holds 2", "holds four or more", "bought this turn"}) {
+        require(found.contains(kind), std::string("random games must reach a position where the other seat ") + kind);
+    }
+    std::cout << "tracker: likely worlds against the sampler (" << summary << ")\n";
+}
+
+/** Victory point caps and floors cut the deals down as they do the sampler's. */
+void test_likely_worlds_respect_victory_point_bounds() {
+    // Four points win and both seats show two: at most one victory point card.
+    GameRules rules;
+    rules.victory_points_to_win = 4;
+    const Game capped = positioned(2, 21, rules, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        players[1].development_cards = {2, 0, 0, 0, 1};
+    });
+    const HandTracker capped_tracker(capped, 0);
+    const LikelyCheck under_cap = check_likely_worlds(capped, capped_tracker, 40000, 3);
+    int most = 0;
+    for (const LikelyWorld& world : likely_worlds(capped, capped_tracker)) {
+        most = std::max(most, world.hands[1].development_cards[4]);
+    }
+    require(most == 1, "no listed deal goes over the cap, and some reach it");
+    const Game open = positioned(2, 21, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        players[1].development_cards = {2, 0, 0, 0, 1};
+    });
+    require(under_cap.worlds < likely_worlds(open, HandTracker(open, 0)).size(), "the cap rules deals out");
+
+    // Seat 1 is known to hold at least two victory point cards among its three.
+    const Game floored = positioned(2, 21, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        players[1].development_cards = {1, 0, 0, 0, 2};
+    });
+    HandTracker floored_tracker(floored, 0);
+    floored_tracker.apply(TrackerEvent::victory_point_cards(1, 2, 3));
+    const LikelyCheck over_floor = check_likely_worlds(floored, floored_tracker, 40000, 4);
+    require(over_floor.every_world_sampled, "every deal over the floor is sampled");
+    for (const LikelyWorld& world : likely_worlds(floored, floored_tracker)) {
+        require(world.hands[1].development_cards[4] >= 2, "no listed deal goes under the floor");
+    }
+    // Two victory point cards and one of the four other kinds, or three: five deals.
+    require(over_floor.worlds == 5, "the floor leaves five deals");
+
+    // Bounds no deal fits are the tracker's inconsistency, as for the sampler.
+    HandTracker impossible(capped, 0);
+    bool threw = false;
+    try {
+        impossible.apply(TrackerEvent::victory_point_cards(1, 2, 3));
+        (void)likely_worlds(capped, impossible);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw, "a floor over the cap fits no deal");
+}
+
+/**
+ * With more seats the resources have deals too: the unknown pool's, or the
+ * exact belief's hypotheses. Both are listed with the sampler's
+ * probabilities while they are few, and refused when they are too many.
+ */
+void test_likely_worlds_with_more_seats() {
+    int pooled = 0;
+    int believed = 0;
+    for (std::uint64_t seed = 1; seed <= 30 && (pooled < 2 || believed < 2); ++seed) {
+        Game game(seats(3), MapType::base, seed);
+        HandTracker pool(game, 0);
+        HandTracker exact(game, 0, TrackerMode::exact);
+        std::mt19937_64 rng(seed);
+        for (int step = 0; step < 600 && !game.winning_color().has_value(); ++step) {
+            const Game before = game;
+            const Action action = random_action(game, rng);
+            game.execute(action);
+            pool.observe(before, action, game);
+            exact.observe(before, action, game);
+            if (game.winning_color().has_value() || step % 10 != 0) {
+                continue;
+            }
+            const int unknown = pool.unknown_count(1) + pool.unknown_count(2);
+            const std::uint64_t sample_seed = seed * 31 + static_cast<std::uint64_t>(step);
+            if (pooled < 2 && pool.unknown_count(1) > 0 && pool.unknown_count(2) > 0 && unknown <= 4) {
+                const std::size_t worlds = likely_worlds(game, pool).size();
+                if (worlds > 1 && worlds <= 60) {
+                    (void)check_likely_worlds(game, pool, 60000, sample_seed);
+                    ++pooled;
+                }
+            }
+            if (believed < 2 && exact.exact() && exact.hypothesis_count() > 1) {
+                const std::size_t worlds = likely_worlds(game, exact).size();
+                if (worlds <= 60) {
+                    require(worlds >= exact.hypothesis_count(), "every hypothesis is a deal");
+                    (void)check_likely_worlds(game, exact, 60000, sample_seed);
+                    // The pool's deal of the same tracker is another list.
+                    (void)check_likely_worlds(game, exact, 20000, sample_seed, TrackerMode::pool);
+                    ++believed;
+                }
+            }
+        }
+    }
+    require(pooled == 2 && believed == 2, "random three-player games must hide resources both ways");
+
+    // Thirty unknown cards over three seats: far too many deals to list.
+    const Game wide = positioned(4, 31, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        for (int seat = 1; seat < 4; ++seat) {
+            players[static_cast<std::size_t>(seat)].resources = {2, 2, 2, 2, 2};
+        }
+    });
+    const HandTracker late(wide, 0);
+    for (const std::size_t limit : {kMaxLikelyWorlds, std::size_t{3}}) {
+        bool threw = false;
+        try {
+            (void)likely_worlds(wide, late, std::nullopt, limit);
+        } catch (const std::invalid_argument& error) {
+            threw = std::string(error.what()).find("likely worlds need") != std::string::npos;
+        }
+        require(threw, "too many deals are refused by name");
+    }
+    // A limit the deals fit under changes nothing.
+    const Game narrow = positioned(2, 21, GameRules{}, [](std::vector<PlayerSetup>& players, GameSetup&) {
+        players[1].development_cards = {1, 0, 0, 0, 0};
+    });
+    const HandTracker narrow_tracker(narrow, 0);
+    require(likely_worlds(narrow, narrow_tracker, std::nullopt, 5).size() == 5, "five kinds of one hidden card");
+    bool threw = false;
+    try {
+        (void)likely_worlds(narrow, narrow_tracker, std::nullopt, 4);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "one deal over the limit is refused");
+
+    Game over(seats(2), MapType::base, 5);
+    const HandTracker over_tracker(over, 0);
+    std::mt19937_64 rng(5);
+    while (!over.winning_color().has_value()) {
+        over.execute(random_action(over, rng));
+    }
+    threw = false;
+    try {
+        (void)likely_worlds(over, HandTracker(over, 0));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "a finished game has no worlds to list");
+}
+
 int main() {
     try {
         test_tracker_follows_random_games();
@@ -980,6 +1273,9 @@ int main() {
         test_exact_belief_overflow_falls_back();
         test_exact_tracker_started_mid_game_enumerates_deals();
         test_exact_tracker_follows_random_games();
+        test_likely_worlds_match_the_sampler_with_two_players();
+        test_likely_worlds_respect_victory_point_bounds();
+        test_likely_worlds_with_more_seats();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

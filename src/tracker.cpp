@@ -5,11 +5,13 @@
 #include <cstddef>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "cppanatron/random.hpp"
@@ -1320,6 +1322,207 @@ Game sample_world(
     Game world = game;
     world.redeal_hidden_cards(hands, rng());
     return world;
+}
+
+namespace {
+
+/** n choose k (exact while below 2^53, which the engine's decks stay far under). */
+double choose(int n, int k) {
+    double result = 1.0;
+    for (int i = 1; i <= k; ++i) {
+        result = result * static_cast<double>(n - k + i) / static_cast<double>(i);
+    }
+    return result;
+}
+
+/**
+ * Every way to deal cards of five kinds (`left` of each) to groups of the
+ * given sizes, group after group; the cards left over stay undealt. Calls
+ * `visit(dealt, ways)` per deal with each group's cards and the number of
+ * deals of distinguishable cards that look like it: every such deal is
+ * equally likely when the cards are shuffled, so `ways` is the deal's
+ * probability up to the common total.
+ */
+template <typename Visit>
+void each_deal(
+    std::array<int, 5>& left, std::span<const int> sizes, std::vector<std::array<int, 5>>& dealt,
+    std::size_t group, std::size_t kind, int need, double ways, Visit& visit) {
+    if (group == sizes.size()) {
+        visit(dealt, ways);
+        return;
+    }
+    if (kind == 5) {
+        if (need == 0) {
+            each_deal(
+                left, sizes, dealt, group + 1, 0, group + 1 < sizes.size() ? sizes[group + 1] : 0, ways, visit);
+        }
+        return;
+    }
+    const int later = std::accumulate(left.begin() + static_cast<std::ptrdiff_t>(kind) + 1, left.end(), 0);
+    const int most = std::min(left[kind], need);
+    for (int taken = std::max(0, need - later); taken <= most; ++taken) {
+        const double chosen = choose(left[kind], taken);
+        dealt[group][kind] = taken;
+        left[kind] -= taken;
+        each_deal(left, sizes, dealt, group, kind + 1, need - taken, ways * chosen, visit);
+        left[kind] += taken;
+    }
+    dealt[group][kind] = 0;
+}
+
+template <typename Visit>
+void each_deal(std::array<int, 5> cards, std::span<const int> sizes, Visit visit) {
+    std::vector<std::array<int, 5>> dealt(sizes.size());
+    each_deal(cards, sizes, dealt, 0, 0, sizes.empty() ? 0 : sizes.front(), 1.0, visit);
+}
+
+[[noreturn]] void too_many_worlds(std::size_t limit) {
+    throw std::invalid_argument(
+        "likely worlds need a position whose hidden cards have at most " + std::to_string(limit) +
+        " possible deals; this one has more (sampled worlds have no such limit)");
+}
+
+}  // namespace
+
+std::vector<LikelyWorld> likely_worlds(
+    const Game& game, const HandTracker& tracker, std::optional<TrackerMode> deal, std::size_t limit) {
+    if (game.winning_color().has_value()) {
+        throw std::invalid_argument("likely_worlds needs a game in progress, not a finished one");
+    }
+    const TrackerMode dealing = deal.value_or(tracker.mode());
+    if (dealing == TrackerMode::exact && tracker.mode() != TrackerMode::exact) {
+        throw std::invalid_argument("an exact deal needs a tracker in exact mode");
+    }
+    tracker.check_public(game);
+    const int n = tracker.num_players();
+    const int observer = tracker.observer();
+    std::vector<int> others;
+    for (int seat = 0; seat < n; ++seat) {
+        if (seat != observer) {
+            others.push_back(seat);
+        }
+    }
+
+    // Each part of a deal as the cards of every other seat, in seat order,
+    // with its weight; std::map keeps the parts in the order ties fall back on.
+    using Part = std::vector<std::array<int, 5>>;
+    std::map<Part, double> resources;
+    if (dealing == TrackerMode::exact && tracker.exact()) {
+        // Resources: the exact belief's hypotheses, by their posterior.
+        for (std::size_t h = 0; h < tracker.hypothesis_count(); ++h) {
+            const auto hypothesis = tracker.hypothesis_hands(h);
+            Part part;
+            for (int seat : others) {
+                part.push_back(hypothesis[static_cast<std::size_t>(seat)]);
+            }
+            resources[std::move(part)] += tracker.hypothesis_weight(h);
+            if (resources.size() > limit) {
+                too_many_worlds(limit);
+            }
+        }
+    } else {
+        // Resources: known cards plus the deals of the unknown pool.
+        std::vector<int> sizes;
+        for (int seat : others) {
+            sizes.push_back(tracker.unknown_count(seat));
+        }
+        each_deal(tracker.unknown_pool(), sizes, [&](const Part& dealt, double ways) {
+            Part part;
+            for (std::size_t i = 0; i < others.size(); ++i) {
+                auto hand = tracker.known_resources(others[i]);
+                for (std::size_t r = 0; r < 5; ++r) {
+                    hand[r] += dealt[i][r];
+                }
+                part.push_back(hand);
+            }
+            resources[std::move(part)] += ways;
+            if (resources.size() > limit) {
+                too_many_worlds(limit);
+            }
+        });
+    }
+    if (resources.empty()) {
+        inconsistent("no deal of resource cards fits the hands");
+    }
+
+    // Development cards: per seat the cards bought this turn, then the ones
+    // held before; a hand is its five counts and, in a second array, whether
+    // it held each playable kind at the start of the turn.
+    std::vector<int> sizes;
+    std::vector<int> caps;
+    std::vector<int> floors;
+    for (int seat : others) {
+        const int count = tracker.development_card_count(seat);
+        const int bought = std::min(tracker.bought_this_turn(seat), count);
+        sizes.push_back(bought);
+        sizes.push_back(count - bought);
+        caps.push_back(std::min(
+            tracker.victory_point_card_cap(seat),
+            game.victory_points_to_win() - 1 -
+                game.players()[static_cast<std::size_t>(seat)].victory_points));
+        floors.push_back(tracker.victory_point_card_floor(seat));
+    }
+    std::map<Part, double> development;
+    each_deal(tracker.unseen_development_cards(), sizes, [&](const Part& dealt, double ways) {
+        Part part;
+        for (std::size_t i = 0; i < others.size(); ++i) {
+            const auto& bought = dealt[2 * i];
+            const auto& held = dealt[2 * i + 1];
+            const int victory_points = bought[kVictoryPoint] + held[kVictoryPoint];
+            if (victory_points > caps[i] || victory_points < floors[i]) {
+                return;
+            }
+            std::array<int, 5> cards{};
+            std::array<int, 5> owned_at_start{};
+            for (std::size_t d = 0; d < 5; ++d) {
+                cards[d] = bought[d] + held[d];
+                owned_at_start[d] = d < 4 && held[d] > 0;
+            }
+            part.push_back(cards);
+            part.push_back(owned_at_start);
+        }
+        development[std::move(part)] += ways;
+        if (development.size() > limit) {
+            too_many_worlds(limit);
+        }
+    });
+    if (development.empty()) {
+        inconsistent("no deal of development cards fits the victory point caps");
+    }
+    if (resources.size() > limit / development.size()) {
+        too_many_worlds(limit);
+    }
+
+    const PlayerState& own = game.players()[static_cast<std::size_t>(observer)];
+    std::vector<LikelyWorld> worlds;
+    worlds.reserve(resources.size() * development.size());
+    double total = 0.0;
+    for (const auto& [resource_part, resource_weight] : resources) {
+        for (const auto& [development_part, development_weight] : development) {
+            LikelyWorld& world = worlds.emplace_back();
+            world.hands.resize(static_cast<std::size_t>(n));
+            world.hands[static_cast<std::size_t>(observer)] = {
+                own.resources, own.development_cards, own.development_card_owned_at_start};
+            for (std::size_t i = 0; i < others.size(); ++i) {
+                HiddenHand& hand = world.hands[static_cast<std::size_t>(others[i])];
+                hand.resources = resource_part[i];
+                hand.development_cards = development_part[2 * i];
+                for (std::size_t d = 0; d < hand.development_card_owned_at_start.size(); ++d) {
+                    hand.development_card_owned_at_start[d] = development_part[2 * i + 1][d] != 0;
+                }
+            }
+            world.probability = resource_weight * development_weight;
+            total += world.probability;
+        }
+    }
+    // Stable, so equally likely deals stay in the maps' order.
+    std::stable_sort(worlds.begin(), worlds.end(), [](const LikelyWorld& a, const LikelyWorld& b) {
+        return a.probability > b.probability;
+    });
+    for (LikelyWorld& world : worlds) {
+        world.probability /= total;
+    }
+    return worlds;
 }
 
 }  // namespace cppanatron

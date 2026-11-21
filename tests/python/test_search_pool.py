@@ -1,4 +1,4 @@
-"""HandTracker, sample_world and SearchPool through the Python bindings."""
+"""HandTracker, sample_world, likely_worlds and SearchPool through the Python bindings."""
 
 from __future__ import annotations
 
@@ -863,3 +863,111 @@ def test_free_backlog():
     single, alone = played(default, 1)
     assert none == 0 and alone == 0 and 0 < most <= default
     assert threaded == inside and single == inside
+
+
+def hidden_cards_game(hidden: int, seed: int = 1):
+    """A two-player game where the seat to move has a choice and the other holds at least ``hidden``
+    unplayed development cards, with a tracker per seat."""
+    for start in range(seed, seed + 40):
+        game = cpp.Game(2, seed=start)
+        trackers = [cpp.HandTracker(game, seat) for seat in range(2)]
+        rng = random.Random(start)
+        for step in range(1200):
+            action = rng.choice(game.playable_actions)
+            before = game.copy()
+            game.execute(action)
+            for tracker in trackers:
+                tracker.observe(before, action, game)
+            if game.winning_color is not None:
+                break
+            mover = game.current_player_index
+            held = trackers[mover].development_card_count(1 - mover)
+            if step % 20 == 0 and held >= hidden and len(game.playable_actions) >= 2:
+                return game, trackers
+    raise AssertionError("no random game reached the position")
+
+
+def test_likely_worlds_bindings():
+    """``likely_worlds`` lists the deals ``sample_world`` draws, most likely first, with their
+    probabilities; too many of them, or a finished game, is a ``ValueError``."""
+    game, trackers = hidden_cards_game(3)
+    mover = game.current_player_index
+    tracker = trackers[mover]
+    deals = cpp.likely_worlds(game, tracker)
+    probabilities = [probability for _, probability in deals]
+    assert len(deals) > 8 and sum(probabilities) == pytest.approx(1.0, abs=1e-12)
+    assert probabilities == sorted(probabilities, reverse=True)
+    again = cpp.likely_worlds(game, tracker, deal=cpp.TrackerMode.POOL)
+    assert [probability for _, probability in again] == probabilities
+    listed = set()
+    for hands, _ in deals:
+        assert len(hands) == 2 and isinstance(hands[0], cpp.HiddenHand)
+        assert hands[mover].resources == game.player(mover).resources
+        assert hands[mover].development_cards == game.player(mover).development_cards
+        assert hands[1 - mover].resources == game.player(1 - mover).resources  # one seat: nothing to deal
+        assert sum(hands[1 - mover].development_cards) == tracker.development_card_count(1 - mover)
+        world = game.copy()
+        world.redeal_hidden_cards(hands, 7)
+        assert tracker.consistent_with(world)
+        listed.add((hands[1 - mover].development_cards, hands[1 - mover].development_card_owned_at_start))
+    assert len(listed) == len(deals)
+    for seed in range(200):
+        other = cpp.sample_world(game, tracker, seed=seed).player(1 - mover)
+        assert (other.development_cards, other.development_card_owned_at_start) in listed
+
+    with pytest.raises(ValueError, match="likely worlds need a position whose hidden cards have at most 8"):
+        cpp.likely_worlds(game, tracker, limit=8)
+    assert len(cpp.likely_worlds(game, tracker, limit=len(deals))) == len(deals)
+    with pytest.raises(ValueError, match="exact"):
+        cpp.likely_worlds(game, tracker, deal=cpp.TrackerMode.EXACT)
+
+
+@pytest.mark.parametrize("root", [cpp.RootSelection.PUCT, cpp.RootSelection.GUMBEL])
+def test_search_pool_likely_worlds(root):
+    """``world_choice=LIKELY`` searches the most likely deals by their probability: the weights,
+    the worlds' shares of the simulations and the pooled visits, at both roots."""
+    assert cpp.SearchConfig().world_choice == cpp.WorldChoice.SAMPLE
+    assert "determinizations=0, world_choice=WorldChoice.SAMPLE" in repr(cpp.SearchConfig())
+    game, trackers = hidden_cards_game(3)
+    tracker = trackers[game.current_player_index]
+    deals = cpp.likely_worlds(game, tracker)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    config = cpp.SearchConfig(
+        simulations=300, max_players=2, root=root, determinizations=8, world_choice=cpp.WorldChoice.LIKELY,
+        max_pending=4)
+    assert config.world_choice == cpp.WorldChoice.LIKELY and "world_choice=WorldChoice.LIKELY" in repr(config)
+    with pytest.raises(ValueError, match="likely worlds need determinizations"):
+        cpp.SearchPool(codec, encoder, cpp.SearchConfig(max_players=2, world_choice=cpp.WorldChoice.LIKELY))
+    pool = cpp.SearchPool(codec, encoder, config)
+    assert pool.config.world_choice == cpp.WorldChoice.LIKELY
+    with pytest.raises(ValueError):
+        pool.add(game, 1)  # likely worlds are the tracker's
+    first, second = pool.add(game, 1, tracker), pool.add(game, 2, tracker)
+    weights = pool.world_weights(first)
+    kept = sum(probability for _, probability in deals[:8])
+    assert weights.dtype == np.float64 and weights.shape == (8,)
+    np.testing.assert_allclose(weights, [probability / kept for _, probability in deals[:8]], rtol=1e-12)
+    np.testing.assert_array_equal(weights, pool.world_weights(second))  # whatever the seed
+    run_hashed(pool, 2)
+    legal = codec.mask(game).astype(bool)
+    for search in (first, second):
+        assert pool.done(search) and pool.stats(search).worlds == 8
+        visits, by_world = pool.visits(search), pool.world_visits(search)
+        assert by_world.dtype == np.uint32 and by_world.shape == (8, codec.size)
+        np.testing.assert_array_equal(by_world.sum(axis=0), visits)
+        assert visits.sum() == 300 and not visits[~legal].any()
+        if root == cpp.RootSelection.PUCT:  # every world within one simulation of its share
+            assert np.abs(by_world.sum(axis=1) - weights * 300).max() <= 1 + 1e-9
+        else:  # and at a Gumbel root every action is shared so
+            assert np.abs(by_world - weights[:, None] * visits[None, :]).max() <= 1 + 1e-9
+        assert legal[pool.select(search)] and pool.policy_target(search).sum() == pytest.approx(1.0)
+        assert pool.root_priors(search).shape == (8, codec.size)
+
+    # Sampled worlds report their share of the draws.
+    sampled = cpp.SearchPool(codec, encoder, cpp.SearchConfig(simulations=64, max_players=2, determinizations=8))
+    search = sampled.add(game, 1, tracker)
+    shares = sampled.world_weights(search)
+    assert shares.shape == (sampled.stats(search).worlds,) and shares.sum() == pytest.approx(1.0)
+    run_hashed(sampled, 2)
+    np.testing.assert_array_equal(sampled.world_visits(search).sum(axis=1), shares * 64)

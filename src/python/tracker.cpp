@@ -1,8 +1,10 @@
 #include "bindings.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <nanobind/operators.h>
@@ -292,6 +294,29 @@ void bind_tracker(nb::module_& module) {
         "nobody holding enough victory points to have already won; the rest is the\n"
         "deck, shuffled, and the game's random stream is reseeded. Neither deal\n"
         "uses what seats chose not to do. Raises ValueError for a finished game.");
+
+    module.def(
+        "likely_worlds",
+        [](const Game& game, const HandTracker& tracker, std::optional<TrackerMode> deal, std::size_t limit) {
+            std::vector<std::pair<std::vector<HiddenHand>, double>> result;
+            for (LikelyWorld& world : likely_worlds(game, tracker, deal, limit)) {
+                result.emplace_back(std::move(world.hands), world.probability);
+            }
+            return result;
+        },
+        nb::arg("game"), nb::arg("tracker"), nb::arg("deal") = nb::none(),
+        nb::arg("limit") = kMaxLikelyWorlds,
+        "Every deal of the hidden cards ``sample_world`` can return, as ``(hands,\n"
+        "probability)`` with a ``HiddenHand`` per seat (the observer's own is its\n"
+        "real one), most likely first; equally likely deals are in a fixed order.\n"
+        "The probabilities are exact and sum to 1: the exact belief's hypotheses or\n"
+        "the unknown pool's deals for the resources (one deal when a single other\n"
+        "seat holds every unknown card, as with two players), times the unseen\n"
+        "development cards' deals that keep every seat between its victory point\n"
+        "floor and cap. (``sample_world`` leaves this distribution only where it\n"
+        "gives up on the victory point condition.) ``Game.redeal_hidden_cards``\n"
+        "builds a deal's game. Raises ValueError for a finished game and when\n"
+        "there are more than ``limit`` deals.");
 }
 
 }  // namespace cppanatron::python

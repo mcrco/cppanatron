@@ -210,6 +210,24 @@ outcomes, monopolies and anything the worlds disagree on, and the caller then
 adds a new search from the real position with the updated tracker.
 Determinized roots offer exactly the real game's legal actions.
 
+`determinizations=N` samples N worlds (equal draws share a tree), deals the
+simulations between them in turn and pools the root visits.
+`world_choice=cpp.WorldChoice.LIKELY` takes the N most likely deals of the
+hidden cards instead: `likely_worlds(game, tracker)` lists every deal
+`sample_world` can draw with its exact probability, most likely first, and
+each of the N kept is searched by its probability among them
+(`world_weights(id)`). Every world's simulations stay within one of its
+share of those run so far, at a Gumbel root action by action, and the root's
+logits and value average the worlds by the same weights;
+`world_visits(id)` gives the root visits world by world. The worlds do not
+depend on the seed (it still shuffles each world's deck). Two-player positions
+always list (the other seat's resources are known; a handful of development
+cards have a few dozen deals); `add` raises `ValueError` ("likely worlds
+need ...") when a pool dealt over several seats has more than 65,536 deals.
+`advance` keeps the worlds and weights: what it accepts reveals nothing, so a
+new search would choose the same. It needs the move searched in every world,
+which a world with a small weight, and so few simulations, may not have done.
+
 A search can have its own budget, leaves per round and root noise instead of
 the pool's: `add(..., simulations=, max_pending=, dirichlet_alpha=)`, so
 searches of different sizes share a pool. `reroot(id, action, simulations=,

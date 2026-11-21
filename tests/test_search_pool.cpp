@@ -1,5 +1,6 @@
 // SearchPool: equivalence with MCTSSearch in 2p, N-player max^n backup,
-// finding wins, determinized searches that never read the hidden truth.
+// finding wins, determinized searches that never read the hidden truth,
+// over sampled worlds or the most likely ones.
 
 #include <algorithm>
 #include <atomic>
@@ -2366,6 +2367,554 @@ void test_pools_die_with_trees_still_waiting() {
     }
 }
 
+/**
+ * A position of a random two-player game for likely worlds: the seat to
+ * move has a choice and the other seat holds `hidden` unplayed development
+ * cards (`or_more`: at least); `building`: a road is among the choices, a
+ * decision of its own turn that a determinized search can re-root through.
+ */
+Played hidden_cards_position(int hidden, bool or_more = false, bool building = false) {
+    for (std::uint64_t seed = 1; seed <= 60; ++seed) {
+        Played played{Game(seats(2), MapType::base, seed), {}};
+        played.trackers.emplace_back(played.game, 0);
+        played.trackers.emplace_back(played.game, 1);
+        std::mt19937_64 rng(seed);
+        for (int step = 0; step < 1200; ++step) {
+            const auto& actions = played.game.playable_actions();
+            const Action action = actions[rng() % actions.size()];
+            const Game before = played.game;
+            played.game.execute(action);
+            for (auto& tracker : played.trackers) {
+                tracker.observe(before, action, played.game);
+            }
+            if (played.game.winning_color().has_value()) {
+                break;
+            }
+            const int mover = played.game.current_player_index();
+            const int held = played.trackers[static_cast<std::size_t>(mover)].development_card_count(1 - mover);
+            const auto& options = played.game.playable_actions();
+            const bool builds = std::any_of(options.begin(), options.end(), [](const Action& option) {
+                return option.type == ActionType::build_road;
+            });
+            if (step % 20 == 0 && options.size() >= 2 && (held == hidden || (or_more && held > hidden)) &&
+                (!building || (builds && played.game.current_prompt() == ActionPrompt::play_turn))) {
+                return played;
+            }
+        }
+    }
+    throw std::runtime_error("no random game reached the position asked for");
+}
+
+/** The tracker of the seat to move. */
+const HandTracker& mover_tracker(const Played& played) {
+    return played.trackers[static_cast<std::size_t>(played.game.current_player_index())];
+}
+
+bool same_hidden_cards(const Game& world, const std::vector<HiddenHand>& hands) {
+    for (std::size_t seat = 0; seat < hands.size(); ++seat) {
+        const PlayerState& player = world.players()[seat];
+        if (player.resources != hands[seat].resources ||
+            player.development_cards != hands[seat].development_cards ||
+            player.development_card_owned_at_start != hands[seat].development_card_owned_at_start) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/** The simulations each root world has had: its root visits. */
+std::vector<double> world_totals(const SearchPool& pool, std::int64_t id) {
+    const auto visits = pool.world_visits(id);
+    std::vector<double> totals(visits.size() / pool.action_size(), 0.0);
+    for (std::size_t i = 0; i < visits.size(); ++i) {
+        totals[i / pool.action_size()] += visits[i];
+    }
+    return totals;
+}
+
+/** The pool's visits are the worlds' visits, summed. */
+void require_pooled(const SearchPool& pool, std::int64_t id) {
+    const auto visits = pool.visits(id);
+    const auto by_world = pool.world_visits(id);
+    std::vector<std::uint32_t> summed(visits.size(), 0);
+    for (std::size_t i = 0; i < by_world.size(); ++i) {
+        summed[i % visits.size()] += by_world[i];
+    }
+    require(summed == visits, "the root visits are the worlds' visits summed");
+}
+
+SearchConfig likely_config(RootSelection root, int determinizations, int simulations) {
+    SearchConfig config;
+    config.root = root;
+    config.determinizations = determinizations;
+    config.world_choice = WorldChoice::likely;
+    config.simulations = simulations;
+    config.max_players = 2;
+    return config;
+}
+
+/**
+ * Likely worlds are the most likely deals, in order, whatever the seed:
+ * the eight most likely of more with their probabilities among the eight,
+ * every deal with its own probability when there are no more than asked
+ * for, and one world with the whole budget when nothing is hidden. Only the
+ * rest of a world (its deck's order) follows the seed.
+ */
+void test_likely_worlds_are_the_most_likely_deals() {
+    const Played played = hidden_cards_position(4, true);
+    const Game& game = played.game;
+    const HandTracker& tracker = mover_tracker(played);
+    const std::vector<LikelyWorld> deals = likely_worlds(game, tracker);
+    require(deals.size() > 8, "four hidden cards have more than eight deals");
+    double top = 0.0;
+    for (std::size_t i = 0; i < 8; ++i) {
+        top += deals[i].probability;
+    }
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    std::vector<float> observations(64 * ToyEncoder().size());
+    std::vector<std::int64_t> ids(64);
+    for (const RootSelection root : {RootSelection::puct, RootSelection::gumbel}) {
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), likely_config(root, 8, 64));
+        std::vector<std::vector<DevelopmentCard>> decks;
+        for (const std::uint64_t seed : {5, 6}) {
+            const auto id = pool.add(game, seed, &tracker);
+            require(pool.stats(id).worlds == 8, "eight worlds of more deals");
+            const auto weights = pool.world_weights(id);
+            // Every world's root is evaluated before any simulation.
+            require(pool.collect(observations, ids) == 8, "the eight roots come first");
+            for (std::size_t w = 0; w < 8; ++w) {
+                require(same_hidden_cards(pool.pending_game(w), deals[w].hands),
+                        "world w holds the w-th most likely deal, whatever the seed");
+                require(std::abs(weights[w] - deals[w].probability / top) < 1e-12,
+                        "a world weighs its probability among the worlds kept");
+                require(!pool.pending_game(w).search_equivalent(game) || same_hidden_cards(game, deals[w].hands),
+                        "only the true deal's world is the true game");
+            }
+            decks.push_back(pool.pending_game(0).development_deck());
+            pool.cancel();
+            pool.remove(id);
+        }
+        require(decks[0] != decks[1] && std::is_permutation(decks[0].begin(), decks[0].end(), decks[1].begin(), decks[1].end()),
+                "the seed shuffles a world's deck and nothing else");
+
+        // Asked for more worlds than there are deals: all of them, as likely as they are.
+        SearchPool wide(codec, std::make_shared<ToyEncoder>(), likely_config(root, 1000, 64));
+        const auto all = wide.add(game, 5, &tracker);
+        const auto weights = wide.world_weights(all);
+        require(weights.size() == deals.size() && wide.stats(all).worlds == deals.size(), "every deal is a world");
+        for (std::size_t w = 0; w < weights.size(); ++w) {
+            require(std::abs(weights[w] - deals[w].probability) < 1e-12, "all deals keep their exact probabilities");
+        }
+        run(wide, hashed_evaluator(2));
+        require(wide.done(all) && total(wide.visits(all)) == 64, "more worlds than simulations still search");
+        require_pooled(wide, all);
+
+        // Nothing hidden: one world, the whole budget.
+        const Played open = hidden_cards_position(0);
+        require(likely_worlds(open.game, mover_tracker(open)).size() == 1, "nothing hidden is one deal");
+        const auto one = pool.add(open.game, 5, &mover_tracker(open));
+        run(pool, hashed_evaluator(2));
+        require(pool.stats(one).worlds == 1 && pool.world_weights(one) == std::vector<double>{1.0},
+                "one world of weight 1");
+        require(world_totals(pool, one) == std::vector<double>{64.0}, "the one world has the whole budget");
+        require(pool.world_visits(one) == pool.visits(one), "its visits are the root's");
+    }
+
+    // Sampled worlds report their share of the draws; an oracle its one world.
+    SearchConfig sampled;
+    sampled.determinizations = 8;
+    sampled.max_players = 2;
+    sampled.simulations = 64;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), sampled);
+    const auto id = pool.add(game, 5, &tracker);
+    const auto shares = pool.world_weights(id);
+    require(shares.size() == pool.stats(id).worlds, "a share per sampled world");
+    for (const double share : shares) {
+        require(share > 0.0 && std::abs(share * 8.0 - std::round(share * 8.0)) < 1e-12, "shares are eighths");
+    }
+    require(std::abs(std::accumulate(shares.begin(), shares.end(), 0.0) - 1.0) < 1e-12, "the shares sum to 1");
+    run(pool, hashed_evaluator(2));
+    const auto sampled_totals = world_totals(pool, id);
+    for (std::size_t w = 0; w < shares.size(); ++w) {
+        require(sampled_totals[w] == shares[w] * 64.0, "a sampled world gets its draws' simulations");
+    }
+    require_pooled(pool, id);
+}
+
+/**
+ * A PUCT search gives every likely world its probability's share of the
+ * simulations: to within one, after any number of them, so a search cut
+ * short is as well shared as a finished one.
+ */
+void test_likely_worlds_share_the_simulations() {
+    const Played played = hidden_cards_position(4, true);
+    const Game& game = played.game;
+    const HandTracker& tracker = mover_tracker(played);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    const auto evaluate = hashed_evaluator(2);
+    const auto within_one = [](const SearchPool& pool, std::int64_t id, double simulations) {
+        const auto weights = pool.world_weights(id);
+        const auto totals = world_totals(pool, id);
+        for (std::size_t w = 0; w < weights.size(); ++w) {
+            if (std::abs(totals[w] - weights[w] * simulations) > 1.0 + 1e-9) {
+                return false;
+            }
+        }
+        return true;
+    };
+    {
+        // One leaf at a time, checked after every simulation.
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), likely_config(RootSelection::puct, 8, 400));
+        const auto id = pool.add(game, 3, &tracker);
+        std::vector<float> observations(pool.observation_size());
+        std::vector<std::int64_t> ids(1);
+        std::vector<float> logits(pool.action_size());
+        std::vector<float> values(2);
+        int checked = 0;
+        while (pool.collect(observations, ids) == 1) {
+            evaluate(pool.pending_game(0), logits, values);
+            pool.apply(logits, values);
+            const double simulations = static_cast<double>(pool.stats(id).simulations);
+            require(total(pool.visits(id)) == simulations, "every simulation is a root visit");
+            require(within_one(pool, id, simulations),
+                    "after " + std::to_string(pool.stats(id).simulations) + " simulations every world is within one of its share");
+            ++checked;
+        }
+        require(pool.done(id) && pool.stats(id).simulations == 400 && checked >= 400, "the search ran out its budget");
+        require_pooled(pool, id);
+        const auto weights = pool.world_weights(id);
+        const auto totals = world_totals(pool, id);
+        require(totals.front() > totals.back() && weights.front() > weights.back(),
+                "the most likely world is searched more than the least likely one");
+    }
+    // Leaves in flight, several threads, and budgets of the search's own.
+    SearchConfig config = likely_config(RootSelection::puct, 8, 1000);
+    config.max_pending = 8;
+    config.threads = 2;
+    SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+    std::vector<std::pair<std::int64_t, int>> searches{{pool.add(game, 3, &tracker), 1000}};
+    for (const int budget : {1, 5, 37, 250}) {
+        searches.emplace_back(pool.add(game, 3, SearchOptions{budget, {}, {}, {}, {}}, &tracker), budget);
+    }
+    run(pool, evaluate, 32);
+    for (const auto& [id, budget] : searches) {
+        require(pool.done(id) && total(pool.visits(id)) == static_cast<std::uint32_t>(budget), "the budget is spent");
+        require(within_one(pool, id, budget), "a budget of " + std::to_string(budget) + " is shared by weight");
+        require_pooled(pool, id);
+        const auto q = pool.q(id);
+        const auto visits = pool.visits(id);
+        require(visits[pool.select(id)] > 0 && !std::isnan(q[pool.select(id)]), "the move chosen was searched");
+    }
+    // Withdrawn leaves leave the shares as they were.
+    const auto id = pool.add(game, 4, &tracker);
+    std::vector<float> observations(32 * pool.observation_size());
+    std::vector<std::int64_t> ids(32);
+    std::vector<float> logits(32 * pool.action_size());
+    std::vector<float> values(32 * 2);
+    for (int round = 0; round < 40; ++round) {
+        const std::size_t rows = pool.collect(observations, ids);
+        if (round % 3 == 2) {
+            pool.cancel();
+            continue;
+        }
+        for (std::size_t row = 0; row < rows; ++row) {
+            evaluate(pool.pending_game(row), std::span<float>(logits).subspan(row * pool.action_size(), pool.action_size()),
+                     std::span<float>(values).subspan(row * 2, 2));
+        }
+        pool.apply(std::span<const float>(logits).first(rows * pool.action_size()),
+                   std::span<const float>(values).first(rows * 2));
+        require(within_one(pool, id, static_cast<double>(pool.stats(id).simulations)),
+                "cancelled leaves do not shift the worlds' shares");
+    }
+}
+
+/**
+ * A Gumbel root over likely worlds: its logits are the worlds' log-priors
+ * averaged by their weights, and every root action's simulations are shared
+ * between the worlds by weight, so the actions Sequential Halving compares
+ * were searched in the same worlds.
+ */
+void test_likely_worlds_at_a_gumbel_root() {
+    const Played played = hidden_cards_position(4, true);
+    const Game& game = played.game;
+    const HandTracker& tracker = mover_tracker(played);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    const std::size_t actions = codec->size();
+    {
+        // Equal values everywhere: the improved policy is the root's logits.
+        SearchConfig config = likely_config(RootSelection::gumbel, 8, 8);
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 3, &tracker);
+        // Logits that differ widely between the actions and between the worlds.
+        run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+            const std::uint64_t hash = signature(leaf);
+            for (std::size_t i = 0; i < logits.size(); ++i) {
+                std::mt19937_64 scramble(hash + 0x9e3779b97f4a7c15ULL * (i + 1));
+                logits[i] = static_cast<float>(scramble() % 2001) / 500.0F - 2.0F;
+            }
+            std::fill(values.begin(), values.end(), 0.5F);
+        });
+        const auto priors = pool.root_priors(id);
+        const auto weights = pool.world_weights(id);
+        require(!std::equal(priors.begin(), priors.begin() + static_cast<std::ptrdiff_t>(actions),
+                            priors.begin() + static_cast<std::ptrdiff_t>(actions)),
+                "the worlds' priors differ");
+        std::vector<double> by_weight(actions, 0.0);
+        std::vector<double> evenly(actions, 0.0);
+        double weight_sum = 0.0;
+        double even_sum = 0.0;
+        for (std::size_t a = 0; a < actions; ++a) {
+            if (priors[a] <= 0.0F) {
+                continue;
+            }
+            double weighted = 0.0;
+            double even = 0.0;
+            for (std::size_t w = 0; w < weights.size(); ++w) {
+                weighted += weights[w] * std::log(static_cast<double>(priors[w * actions + a]));
+                even += std::log(static_cast<double>(priors[w * actions + a])) / static_cast<double>(weights.size());
+            }
+            weight_sum += by_weight[a] = std::exp(weighted);
+            even_sum += evenly[a] = std::exp(even);
+        }
+        const auto policy = pool.policy_target(id);
+        double off_weights = 0.0;
+        double off_even = 0.0;
+        for (std::size_t a = 0; a < actions; ++a) {
+            off_weights = std::max(off_weights, std::abs(policy[a] - by_weight[a] / weight_sum));
+            off_even = std::max(off_even, std::abs(policy[a] - evenly[a] / even_sum));
+        }
+        require(off_weights < 1e-6, "the root's logits are the worlds' log-priors averaged by weight");
+        require(off_even > 1e-2, "which is not their plain average");
+    }
+    for (const int considered : {4, 16}) {
+        SearchConfig config = likely_config(RootSelection::gumbel, 8, 600);
+        config.gumbel_considered = considered;
+        config.max_pending = 4;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+        const auto id = pool.add(game, 3, &tracker);
+        run(pool, hashed_evaluator(2), 16);
+        require(pool.done(id) && total(pool.visits(id)) == 600, "the Gumbel root spends its budget");
+        require_pooled(pool, id);
+        const auto weights = pool.world_weights(id);
+        const auto visits = pool.visits(id);
+        const auto by_world = pool.world_visits(id);
+        int searched = 0;
+        for (std::size_t a = 0; a < actions; ++a) {
+            searched += visits[a] > 0;
+            for (std::size_t w = 0; w < weights.size(); ++w) {
+                require(std::abs(by_world[w * actions + a] - weights[w] * visits[a]) <= 1.0 + 1e-9,
+                        "every action's simulations are shared between the worlds by weight");
+            }
+        }
+        require(searched >= std::min(considered, 2), "Sequential Halving considered several actions");
+        require(visits[pool.select(id)] > 0, "the action chosen was searched");
+        const auto policy = pool.policy_target(id);
+        require(std::abs(std::accumulate(policy.begin(), policy.end(), 0.0) - 1.0) < 1e-5, "the improved policy sums to 1");
+    }
+}
+
+/**
+ * Re-rooting keeps the likely worlds and their weights, which are the ones
+ * a new search of the position reached would take: what advance accepts
+ * reveals nothing. Every world must have searched the move, the least
+ * likely one too, whose share of a small budget may be no simulation of it.
+ * A refused advance is followed by a new search, whose worlds are the most
+ * likely deals of the new position.
+ */
+void test_likely_worlds_and_reuse() {
+    Played played = hidden_cards_position(2, true, true);
+    Game& game = played.game;
+    const int mover = game.current_player_index();
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    const auto& options = game.playable_actions();
+    const Action road = *std::find_if(options.begin(), options.end(), [](const Action& option) {
+        return option.type == ActionType::build_road;
+    });
+    const Action pass = *std::find_if(options.begin(), options.end(), [](const Action& option) {
+        return option.type == ActionType::end_turn;
+    });
+    const std::size_t road_index = codec->index(game, road);
+    const std::size_t pass_index = codec->index(game, pass);
+    Game built = game;
+    built.execute(road);
+    std::vector<HandTracker> after = played.trackers;
+    for (HandTracker& tracker : after) {
+        tracker.observe(game, road, built);
+    }
+    // At the root the road and the pass are favoured, so both are searched.
+    const Evaluator favouring = [&](const Game& leaf, std::span<float> logits, std::span<float> values) {
+        std::fill(logits.begin(), logits.end(), 0.0F);
+        if (leaf.num_turns() == game.num_turns() && leaf.playable_actions() == game.playable_actions()) {
+            logits[road_index] = 6.0F;
+            logits[pass_index] = 3.0F;
+        }
+        std::fill(values.begin(), values.end(), 0.5F);
+    };
+    const int budget = 1200;
+    for (const RootSelection root : {RootSelection::puct, RootSelection::gumbel}) {
+        const HandTracker& tracker = played.trackers[static_cast<std::size_t>(mover)];
+        {
+            // A world that has not searched the move cannot be re-rooted on it.
+            SearchPool brief(codec, std::make_shared<ToyEncoder>(), likely_config(root, 8, 40));
+            const auto id = brief.add(game, 4, &tracker);
+            run(brief, favouring);
+            const auto by_world = brief.world_visits(id);
+            bool everywhere = true;
+            for (std::size_t w = 0; w < 8; ++w) {
+                everywhere = everywhere && by_world[w * codec->size() + road_index] > 0;
+            }
+            require(brief.visits(id)[road_index] > 0 && !everywhere, "the least likely world's share is too small for the road");
+            require(!brief.advance(id, road_index), "an advance needs the move searched in every world");
+        }
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), likely_config(root, 8, budget));
+        const auto id = pool.add(game, 4, &tracker);
+        run(pool, favouring);
+        require(pool.visits(id)[road_index] > 0 && pool.visits(id)[pass_index] > 0, "both moves were searched");
+        const auto weights = pool.world_weights(id);
+        require(weights.size() == 8, "two hidden cards have more than eight deals");
+
+        // Ending the turn hands the move over: refused, the search unchanged.
+        require(!pool.advance(id, pass_index), "another seat's decision is no root for these worlds");
+        require(pool.world_weights(id) == weights && pool.done(id), "a refused advance changes nothing");
+
+        require(pool.advance(id, road_index), "an own decision re-roots the likely worlds");
+        require(pool.world_weights(id) == weights && pool.stats(id).worlds == 8, "the worlds and weights are kept");
+        const std::vector<LikelyWorld> fresh = likely_worlds(built, after[static_cast<std::size_t>(mover)]);
+        double top = 0.0;
+        for (std::size_t w = 0; w < 8; ++w) {
+            top += fresh[w].probability;
+        }
+        for (std::size_t w = 0; w < 8; ++w) {
+            require(std::abs(weights[w] - fresh[w].probability / top) < 1e-12,
+                    "a new search of the new position would weigh its worlds the same");
+        }
+        const auto carried = world_totals(pool, id);
+        run(pool, hashed_evaluator(2));
+        require(pool.done(id) && pool.stats(id).simulations == budget, "the re-rooted search runs a full budget");
+        require_pooled(pool, id);
+        const auto totals = world_totals(pool, id);
+        std::vector<std::uint8_t> legal(codec->size());
+        codec->mask(built, legal);
+        const auto visits = pool.visits(id);
+        for (std::size_t a = 0; a < visits.size(); ++a) {
+            require(visits[a] == 0 || legal[a] != 0, "the re-rooted search visits the new position's moves");
+        }
+        if (root == RootSelection::puct) {
+            for (std::size_t w = 0; w < 8; ++w) {
+                require(std::abs(totals[w] - carried[w] - weights[w] * budget) <= 1.0 + 1e-9,
+                        "the new budget is shared by weight again");
+            }
+            // Under a visit cap the carried visits count, and the worlds end by weight.
+            SearchPool capped(codec, std::make_shared<ToyEncoder>(), likely_config(root, 8, budget));
+            const auto again = capped.add(game, 4, &tracker);
+            run(capped, favouring);
+            const std::uint32_t cap = 1500;
+            require(capped.reroot(again, road_index, SearchOptions{static_cast<int>(cap), {}, {}, {}, {}}),
+                    "likely worlds re-root under a cap");
+            const std::uint32_t kept = total(capped.visits(again));
+            require(kept > 0 && kept < cap, "the worlds' visits are carried");
+            run(capped, hashed_evaluator(2));
+            require(capped.done(again) && total(capped.visits(again)) == cap && capped.stats(again).simulations == cap - kept,
+                    "the worlds together are topped up to the cap");
+            const auto capped_totals = world_totals(capped, again);
+            for (std::size_t w = 0; w < 8; ++w) {
+                require(std::abs(capped_totals[w] - weights[w] * cap) <= 1.0 + 1e-9,
+                        "the worlds behind their share are topped up first");
+            }
+        }
+
+        // The refused move, played for real: a new search lists the deals anew.
+        pool.remove(id);
+        Played next = played;
+        std::mt19937_64 rng(11);
+        Action action = pass;
+        while (true) {
+            const Game before = next.game;
+            next.game.execute(action);
+            for (HandTracker& follower : next.trackers) {
+                follower.observe(before, action, next.game);
+            }
+            require(!next.game.winning_color().has_value(), "the game goes on");
+            const auto& choices = next.game.playable_actions();
+            if (next.game.current_player_index() == mover && choices.size() >= 2 &&
+                next.trackers[static_cast<std::size_t>(mover)].development_card_count(1 - mover) != 2) {
+                break;
+            }
+            action = choices[rng() % choices.size()];
+        }
+        const HandTracker& updated = next.trackers[static_cast<std::size_t>(mover)];
+        const std::vector<LikelyWorld> deals = likely_worlds(next.game, updated);
+        const auto renewed = pool.add(next.game, 4, &updated);
+        const std::size_t kept = std::min<std::size_t>(deals.size(), 8);
+        require(pool.stats(renewed).worlds == kept, "the new search takes the new position's deals");
+        std::vector<float> observations(64 * pool.observation_size());
+        std::vector<std::int64_t> ids(64);
+        require(pool.collect(observations, ids) == kept, "its roots come first");
+        for (std::size_t w = 0; w < kept; ++w) {
+            require(same_hidden_cards(pool.pending_game(w), deals[w].hands), "its worlds are the new most likely deals");
+        }
+        pool.cancel();
+        run(pool, hashed_evaluator(2));
+        require(pool.done(renewed) && total(pool.visits(renewed)) == static_cast<std::uint32_t>(budget), "the new search runs");
+    }
+}
+
+/**
+ * What likely worlds cannot do says so: without determinizations there is
+ * nothing to take, and a position with too many deals to list is refused by
+ * add, which leaves the pool as it was. Positions of more seats whose deals
+ * can be listed are searched like any other.
+ */
+void test_likely_worlds_refusals() {
+    const auto two = std::make_shared<FlatActionCodec>(2, MapType::base);
+    bool threw = false;
+    try {
+        SearchPool pool(two, std::make_shared<ToyEncoder>(), likely_config(RootSelection::puct, 0, 64));
+    } catch (const std::invalid_argument& error) {
+        threw = std::string(error.what()).find("likely worlds need determinizations") != std::string::npos;
+    }
+    require(threw, "likely worlds without determinizations are refused");
+
+    const auto codec = std::make_shared<FlatActionCodec>(4, MapType::base);
+    for (const RootSelection root : {RootSelection::puct, RootSelection::gumbel}) {
+        SearchConfig config = likely_config(root, 4, 120);
+        config.max_players = 4;
+        SearchPool pool(codec, std::make_shared<ToyEncoder>(), config);
+
+        // A tracker started on dealt hands knows none of thirty cards.
+        auto players = random_placements(4, 12);
+        for (std::size_t seat = 1; seat < 4; ++seat) {
+            players[seat].resources = {2, 2, 2, 2, 2};
+        }
+        Game wide(seats(4), MapType::base, 12);
+        GameSetup setup;
+        setup.players = players;
+        wide.apply_setup(setup);
+        const HandTracker wide_tracker(wide, 0);
+        threw = false;
+        try {
+            (void)pool.add(wide, 1, &wide_tracker);
+        } catch (const std::invalid_argument& error) {
+            threw = std::string(error.what()).find("likely worlds need") != std::string::npos;
+        }
+        require(threw && pool.size() == 0, "too many deals are refused and no search is added");
+
+        // Three unknown cards and a development card over three seats: a few deals.
+        const Game game = knight_and_monopoly_position();
+        const HandTracker tracker(game, 0);
+        const std::vector<LikelyWorld> deals = likely_worlds(game, tracker);
+        require(deals.size() > 4, "the four-player position has more deals than worlds asked for");
+        const auto id = pool.add(game, 1, &tracker);
+        run(pool, [](const Game& leaf, std::span<float> logits, std::span<float> values) {
+            hashed_logits(leaf, logits);
+            std::fill(values.begin(), values.end(), 0.25F);
+        });
+        require(pool.done(id) && pool.stats(id).worlds == 4 && total(pool.visits(id)) == 120,
+                "a listable position of four seats is searched");
+        require_pooled(pool, id);
+    }
+}
+
 int main() {
     try {
         test_free_backlog_changes_no_result();
@@ -2400,6 +2949,11 @@ int main() {
         test_failures_leave_the_pool_usable();
         test_searches_spread_over_threads();
         test_tracker_needs_determinizations();
+        test_likely_worlds_are_the_most_likely_deals();
+        test_likely_worlds_share_the_simulations();
+        test_likely_worlds_at_a_gumbel_root();
+        test_likely_worlds_and_reuse();
+        test_likely_worlds_refusals();
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
         return 1;

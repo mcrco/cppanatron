@@ -20,6 +20,21 @@ enum class RootSelection : std::uint8_t {
     gumbel,
 };
 
+/** Which root worlds a determinized search takes from the root player's HandTracker. */
+enum class WorldChoice : std::uint8_t {
+    /**
+     * `determinizations` draws of sample_world. Draws that deal the same
+     * hidden cards share a tree and take a draw's simulations each.
+     */
+    sample,
+    /**
+     * The `determinizations` most likely deals of the hidden cards
+     * (likely_worlds; all of them when there are fewer), each weighted by
+     * its probability among the ones kept.
+     */
+    likely,
+};
+
 struct SearchConfig {
     /**
      * PUCT exploration constant. Values are win probabilities in [0, 1], so
@@ -44,9 +59,10 @@ struct SearchConfig {
     /** Gumbel: min-max rescale completed Q before sigma. */
     bool gumbel_rescale_values{true};
     /**
-     * Root worlds sampled from the root player's HandTracker; the simulations
-     * are split between them and their root visits summed. 0 searches the
-     * game as given (perfect information: an oracle unless it is a sample).
+     * Root worlds taken from the root player's HandTracker (world_choice:
+     * sampled, or the most likely ones); the simulations are split between
+     * them and their root visits summed. 0 searches the game as given
+     * (perfect information: an oracle unless it is a sample).
      */
     int determinizations{0};
     /** Width P of the value rows: the most seats the network predicts. */
@@ -113,6 +129,21 @@ struct SearchConfig {
      * on it; the default is about 160 MB of two-player base games.
      */
     int free_backlog{1 << 16};
+    /**
+     * Where the root worlds of a determinized search come from
+     * (determinizations > 0). `sample` draws them. `likely` takes the most
+     * likely deals instead and weights each world by its probability
+     * (SearchPool::world_weights): a world gets that share of the
+     * simulations, of any number of them to within one (PUCT roots, where
+     * every world runs PUCT on its share), or of every root action's
+     * simulations (Gumbel roots, so the actions Sequential Halving compares
+     * were searched in the same worlds); a Gumbel root also weights the
+     * worlds' log-priors and root values so. The rest of a world (the order
+     * of its deck, its random stream) comes from the search's seed either
+     * way. `likely` needs a position likely_worlds can list, which every
+     * two-player position is; add throws std::invalid_argument otherwise.
+     */
+    WorldChoice world_choice{WorldChoice::sample};
 };
 
 /**
@@ -215,6 +246,12 @@ public:
      * restricted to the real options the worlds share. `deal` picks how the
      * worlds' resource hands are drawn (sample_world's `deal`): the
      * tracker's own mode by default.
+     *
+     * With SearchConfig::world_choice `likely` nothing is sampled: the worlds
+     * are the most likely deals likely_worlds lists for `game`, `tracker`
+     * and `deal`, the same for every seed (the seed still shuffles their
+     * decks), and std::invalid_argument is thrown when the position has too
+     * many deals to list.
      */
     std::int64_t add(
         const Game& game, std::uint64_t seed, const HandTracker* tracker = nullptr,
@@ -287,6 +324,19 @@ public:
      */
     [[nodiscard]] std::vector<float> root_search_priors(std::int64_t id) const;
     /**
+     * Each root world's share of the search, in the order of root_priors'
+     * worlds; they sum to 1. World choice `likely`: the world's probability
+     * among the worlds kept, most likely first. `sample`: the share of the
+     * draws that dealt it. One world, also without determinizations: {1}.
+     * Empty for a finished game.
+     */
+    [[nodiscard]] std::vector<double> world_weights(std::int64_t id) const;
+    /**
+     * Root visits per root world: visits() before the worlds are summed,
+     * action_size() counts per world, world after world, as root_priors.
+     */
+    [[nodiscard]] std::vector<std::uint32_t> world_visits(std::int64_t id) const;
+    /**
      * The action to play. Temperature 0: most visits (PUCT) or the
      * Sequential Halving winner (Gumbel: the best noise + logits + sigma
      * among the final survivors, which are re-ranked after every phase);
@@ -309,7 +359,10 @@ public:
      * action reveals hidden cards (a monopoly's per-seat amounts). Then
      * start a new search from the real position with the tracker updated
      * by the real transition: reused worlds are only valid while nothing
-     * the root player learns could contradict them.
+     * the root player learns could contradict them. The worlds and their
+     * weights stay as add chose them: what advance accepts (the root
+     * player's own decisions, nothing drawn or revealed) leaves the deals
+     * and their probabilities as they were.
      */
     bool advance(std::int64_t id, std::size_t action_index);
     /**

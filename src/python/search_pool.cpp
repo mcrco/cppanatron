@@ -80,6 +80,16 @@ void bind_search_pool(nb::module_& module) {
             "GUMBEL", RootSelection::gumbel,
             "Gumbel-Top-k with Sequential Halving (Danihelka et al., 2022).");
 
+    nb::enum_<WorldChoice>(
+        module, "WorldChoice", "Which root worlds a determinized search takes from the HandTracker.")
+        .value(
+            "SAMPLE", WorldChoice::sample,
+            "``determinizations`` draws of ``sample_world``; equal draws share a tree.")
+        .value(
+            "LIKELY", WorldChoice::likely,
+            "The ``determinizations`` most likely deals of the hidden cards "
+            "(``likely_worlds``), each weighted by its probability among them.");
+
     const SearchConfig defaults;
     nb::class_<SearchConfig>(
         module, "SearchConfig",
@@ -111,7 +121,13 @@ void bind_search_pool(nb::module_& module) {
         "free_backlog: the most tree nodes that remove, advance and reroot may leave\n"
         "  for the pool's threads to free (at the next collect, or when more would\n"
         "  pass it) instead of freeing them in the call; 0, or one thread: all in the\n"
-        "  call. No result depends on it.")
+        "  call. No result depends on it.\n"
+        "world_choice: WorldChoice. SAMPLE draws the root worlds; LIKELY takes the\n"
+        "  most likely deals of the hidden cards and gives each world its\n"
+        "  probability's share of the simulations (PUCT) or of every root action's\n"
+        "  simulations, log-priors and root value (Gumbel). LIKELY needs\n"
+        "  determinizations and a position ``likely_worlds`` can list (every\n"
+        "  two-player one).")
         .def(
             "__init__",
             [](SearchConfig* self, double c_puct, int simulations, int max_pending, RootSelection root,
@@ -120,13 +136,13 @@ void bind_search_pool(nb::module_& module) {
                bool gumbel_rescale_values, int determinizations, int max_players, double fpu_value,
                double fpu_reduction, bool skip_forced, bool release_games, int threads,
                bool transpositions, double root_policy_temperature, double forced_playouts,
-               int free_backlog) {
+               int free_backlog, WorldChoice world_choice) {
                 new (self) SearchConfig{
                     c_puct, simulations, max_pending, root, dirichlet_alpha, dirichlet_fraction,
                     gumbel_considered, gumbel_scale, gumbel_c_visit, gumbel_c_scale,
                     gumbel_rescale_values, determinizations, max_players, fpu_value, fpu_reduction,
                     skip_forced, release_games, threads, transpositions, root_policy_temperature,
-                    forced_playouts, free_backlog};
+                    forced_playouts, free_backlog, world_choice};
             },
             nb::kw_only(), nb::arg("c_puct") = defaults.c_puct,
             nb::arg("simulations") = defaults.simulations,
@@ -146,7 +162,8 @@ void bind_search_pool(nb::module_& module) {
             nb::arg("transpositions") = defaults.transpositions,
             nb::arg("root_policy_temperature") = defaults.root_policy_temperature,
             nb::arg("forced_playouts") = defaults.forced_playouts,
-            nb::arg("free_backlog") = defaults.free_backlog)
+            nb::arg("free_backlog") = defaults.free_backlog,
+            nb::arg("world_choice") = defaults.world_choice)
         .def_rw("c_puct", &SearchConfig::c_puct)
         .def_rw("simulations", &SearchConfig::simulations)
         .def_rw("max_pending", &SearchConfig::max_pending)
@@ -169,19 +186,21 @@ void bind_search_pool(nb::module_& module) {
         .def_rw("root_policy_temperature", &SearchConfig::root_policy_temperature)
         .def_rw("forced_playouts", &SearchConfig::forced_playouts)
         .def_rw("free_backlog", &SearchConfig::free_backlog)
+        .def_rw("world_choice", &SearchConfig::world_choice)
         .def("__repr__", [](const SearchConfig& c) {
             return nb::str(
                        "SearchConfig(c_puct={}, simulations={}, max_pending={}, root={!r}, "
                        "dirichlet_alpha={}, dirichlet_fraction={}, gumbel_considered={}, "
                        "gumbel_scale={}, gumbel_c_visit={}, gumbel_c_scale={}, "
-                       "gumbel_rescale_values={}, determinizations={}, max_players={}, "
+                       "gumbel_rescale_values={}, determinizations={}, world_choice={!r}, max_players={}, "
                        "fpu_value={}, fpu_reduction={}, skip_forced={}, release_games={}, threads={}, "
                        "transpositions={}, root_policy_temperature={}, forced_playouts={}, "
                        "free_backlog={})")
                 .format(
                     c.c_puct, c.simulations, c.max_pending, c.root, c.dirichlet_alpha,
                     c.dirichlet_fraction, c.gumbel_considered, c.gumbel_scale, c.gumbel_c_visit,
-                    c.gumbel_c_scale, c.gumbel_rescale_values, c.determinizations, c.max_players,
+                    c.gumbel_c_scale, c.gumbel_rescale_values, c.determinizations, c.world_choice,
+                    c.max_players,
                     c.fpu_value, c.fpu_reduction, c.skip_forced, c.release_games, c.threads,
                     c.transpositions, c.root_policy_temperature, c.forced_playouts, c.free_backlog);
         });
@@ -260,6 +279,9 @@ void bind_search_pool(nb::module_& module) {
             "by default). Without determinizations the search reads ``game`` as is,\n"
             "hidden cards included (an oracle), so a ``tracker`` raises ValueError\n"
             "unless ``ignore_tracker=True``. A finished game's search is done at once.\n"
+            "With ``world_choice=WorldChoice.LIKELY`` the worlds are the most likely\n"
+            "deals ``likely_worlds`` lists, whatever the seed (ValueError when the\n"
+            "position has too many to list).\n"
             "``simulations``, ``max_pending``, ``dirichlet_alpha``,\n"
             "``root_policy_temperature`` and ``forced_playouts`` are this search's own\n"
             "in place of the pool's config (None: the config's).")
@@ -356,6 +378,27 @@ void bind_search_pool(nb::module_& module) {
             "The priors the root selects by in its current search: ``root_priors`` at\n"
             "the root temperature with the Dirichlet noise mixed in (the same layout;\n"
             "``root_priors`` themselves without either, and at a Gumbel root).")
+        .def(
+            "world_weights",
+            [](const SearchPool& pool, std::int64_t id) { return to_numpy(pool.world_weights(id)); },
+            nb::arg("id"),
+            "Each root world's share of the search, in ``root_priors``' order (float64\n"
+            "[worlds], summing to 1): a likely world's probability among the worlds\n"
+            "kept, a sampled world's share of the draws.")
+        .def(
+            "world_visits",
+            [](const SearchPool& pool, std::int64_t id) {
+                auto* owned = new std::vector<std::uint32_t>(pool.world_visits(id));
+                nb::capsule deleter(owned, [](void* pointer) noexcept {
+                    delete static_cast<std::vector<std::uint32_t>*>(pointer);
+                });
+                const std::size_t actions = pool.action_size();
+                return nb::ndarray<nb::numpy, std::uint32_t, nb::ndim<2>>(
+                    owned->data(), {owned->size() / actions, actions}, deleter);
+            },
+            nb::arg("id"),
+            "Root visits per root world (uint32 [worlds, action_size]): ``visits``\n"
+            "before the worlds are summed.")
         .def(
             "select", &SearchPool::select, nb::arg("id"), nb::arg("temperature") = 0.0,
             "The action index to play: most visits (PUCT) or the Sequential Halving\n"

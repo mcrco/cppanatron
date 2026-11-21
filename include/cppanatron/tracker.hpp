@@ -332,4 +332,47 @@ private:
     const Game& game, const HandTracker& tracker, std::mt19937_64& rng,
     std::optional<TrackerMode> deal = std::nullopt);
 
+/** A deal of the hidden cards the tracker's observer cannot rule out, and how likely it is. */
+struct LikelyWorld {
+    /** Every seat's hidden cards, in seat order (the observer's are its real ones). */
+    std::vector<HiddenHand> hands;
+    /** The probability that sample_world deals exactly these hands. */
+    double probability{};
+};
+
+/** The most deals likely_worlds lists by default before it refuses the position. */
+inline constexpr std::size_t kMaxLikelyWorlds = 65536;
+
+/**
+ * Every deal of the hidden cards sample_world can return for `game`,
+ * `tracker` and `deal`, with its exact probability, most likely first.
+ *
+ * A deal is what tells two sampled worlds apart: every other seat's resource
+ * hand, its unplayed development cards and which kinds of them it held at the
+ * start of the turn (Game::redeal_hidden_cards takes exactly that; the order
+ * of the deck and the game's random stream are not part of it). Resources
+ * are the exact belief's hypotheses with their posterior, or the unknown
+ * pool's deals (multivariate hypergeometric; a single deal when one other
+ * seat holds every unknown card, as in a two-player game). Development cards
+ * are the unseen cards' deals to the cards each seat bought this turn, the
+ * ones it held before and the deck, also multivariate hypergeometric,
+ * renormalised over the deals that keep every seat between its victory point
+ * floor and cap. The probabilities sum to 1. Equally likely deals are in a
+ * fixed order (resource hands, then development hands, seat by seat), so the
+ * list depends on nothing but what the tracker knows.
+ *
+ * This is the distribution sample_world draws from, except in the corner
+ * where it gives up: after 1000 rejected deals in a row sample_world puts the
+ * victory point cards in the deck first, which is one of these deals but not
+ * drawn with these probabilities. It gets there only when fewer than about
+ * one deal in a hundred fits the victory point bounds.
+ *
+ * Throws std::invalid_argument for a finished game, as sample_world, and
+ * when there are more than `limit` deals (a pool dealt over several seats
+ * soon has millions); std::logic_error when no deal fits the tracker.
+ */
+[[nodiscard]] std::vector<LikelyWorld> likely_worlds(
+    const Game& game, const HandTracker& tracker, std::optional<TrackerMode> deal = std::nullopt,
+    std::size_t limit = kMaxLikelyWorlds);
+
 }  // namespace cppanatron

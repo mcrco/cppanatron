@@ -3,6 +3,7 @@
 // over sampled worlds or the most likely ones.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <limits>
@@ -2915,8 +2916,513 @@ void test_likely_worlds_refusals() {
     }
 }
 
+/** Test-only encoder for the cache: the position itself, so rows repeat where positions do. */
+class SignatureEncoder final : public ObservationEncoder {
+public:
+    [[nodiscard]] std::size_t size() const noexcept override { return 5; }
+    void encode(const Game& game, int observer, std::span<float> out) const override {
+        const std::uint64_t hash = signature(game);
+        out[0] = static_cast<float>(observer);
+        out[1] = static_cast<float>(hash & 0xffffff);
+        out[2] = static_cast<float>((hash >> 24) & 0xffffff);
+        out[3] = static_cast<float>((hash >> 48) & 0xffff);
+        out[4] = static_cast<float>(game.playable_actions().size());
+    }
+};
+
+/** A network as the cache sees one: outputs from the row alone (`salt`: its weights). */
+void row_outputs(std::span<const float> row, std::uint64_t salt, int n, std::span<float> logits,
+                 std::span<float> values) {
+    std::uint64_t hash = mix(1469598103934665603ULL, salt);
+    for (const float x : row) {
+        hash = mix(hash, std::bit_cast<std::uint32_t>(x));
+    }
+    for (std::size_t i = 0; i < logits.size(); ++i) {
+        logits[i] = static_cast<float>(2.0 * unit(mix(hash, i)) - 1.0);
+    }
+    const double v = 0.1 + 0.8 * unit(hash);
+    for (int slot = 0; slot < n; ++slot) {
+        values[static_cast<std::size_t>(slot)] = static_cast<float>(slot == 0 ? v : (1.0 - v) / (n - 1));
+    }
+}
+
+struct RowRun {
+    std::size_t rows{};
+    std::size_t rounds{};
+};
+
+/** run with the row network; counts the rows and rounds that reached it. */
+RowRun run_rows(SearchPool& pool, std::uint64_t salt, int n, std::size_t batch = 64) {
+    std::vector<float> observations(batch * pool.observation_size());
+    std::vector<std::int64_t> ids(batch);
+    const std::size_t width = pool.action_size();
+    const auto players = static_cast<std::size_t>(pool.max_players());
+    RowRun result;
+    while (true) {
+        const std::size_t rows = pool.collect(observations, ids);
+        require(rows == pool.pending(), "pending counts the rows collect returned");
+        if (rows == 0) {
+            return result;
+        }
+        std::vector<float> logits(rows * width);
+        std::vector<float> values(rows * players);
+        for (std::size_t row = 0; row < rows; ++row) {
+            require(pool.contains(ids[row]), "every row names its search");
+            row_outputs(
+                std::span<const float>(observations).subspan(row * pool.observation_size(), pool.observation_size()),
+                salt, n, std::span<float>(logits).subspan(row * width, width),
+                std::span<float>(values).subspan(row * players, players));
+        }
+        pool.apply(logits, values);
+        result.rows += rows;
+        ++result.rounds;
+    }
+}
+
+/** Everything a search's caller reads, for comparing two runs exactly. */
+struct SearchResult {
+    std::vector<std::uint32_t> visits;
+    std::vector<double> q;
+    std::vector<float> policy;
+    std::vector<float> value;
+    std::vector<float> priors;
+    std::uint64_t simulations{};
+    std::uint64_t evaluations{};
+    std::uint64_t nodes{};
+    std::uint32_t max_depth{};
+};
+
+SearchResult result_of(const SearchPool& pool, std::int64_t id) {
+    const SearchStats stats = pool.stats(id);
+    return {pool.visits(id), pool.q(id), pool.policy_target(id), pool.value(id), pool.root_priors(id),
+            stats.simulations, stats.evaluations, stats.nodes, stats.max_depth};
+}
+
+bool same_bits(const std::vector<double>& a, const std::vector<double>& b) {
+    return a.size() == b.size() &&
+           std::equal(a.begin(), a.end(), b.begin(), [](double x, double y) {
+               return std::bit_cast<std::uint64_t>(x) == std::bit_cast<std::uint64_t>(y);
+           });
+}
+
+/** The first thing two results differ in; empty if nothing. */
+std::string difference(const SearchResult& a, const SearchResult& b) {
+    return a.visits != b.visits ? "visits"
+        : !same_bits(a.q, b.q) ? "q"
+        : a.policy != b.policy ? "policy target"
+        : a.value != b.value ? "value"
+        : a.priors != b.priors ? "root priors"
+        : a.simulations != b.simulations ? "simulations"
+        : a.evaluations != b.evaluations ? "evaluations"
+        : a.nodes != b.nodes ? "nodes"
+        : a.max_depth != b.max_depth ? "depth"
+        : "";
+}
+
+bool same_result(const SearchResult& a, const SearchResult& b) {
+    const std::string what = difference(a, b);
+    if (!what.empty()) {
+        std::cerr << "results differ in " << what << '\n';
+    }
+    return what.empty();
+}
+
+/** The table itself: generations, the entry a full set gives up, the key. */
+void test_eval_cache_table() {
+    const auto row = [](float x, std::size_t width = 8) {
+        std::vector<float> values(width, 0.0F);
+        values[width / 2] = x;
+        return values;
+    };
+    require(EvalCache::key(row(1.0F)) == EvalCache::key(row(1.0F)), "a key is a function of the row");
+    require(EvalCache::key(row(1.0F)) != EvalCache::key(row(2.0F)), "another row, another key");
+    require(EvalCache::key(row(0.0F, 8)) != EvalCache::key(row(0.0F, 9)), "the length is part of the key");
+    require(EvalCache::key(row(0.0F)) != EvalCache::key(row(-0.0F)), "the key reads bytes, not numbers");
+    // Rows that differ in one bit anywhere get keys that differ in both halves.
+    std::vector<float> wide(2691, 0.0F);
+    const EvalCache::Key base = EvalCache::key(wide);
+    for (std::size_t i = 0; i < wide.size(); i += 7) {
+        wide[i] = std::bit_cast<float>(std::uint32_t{1} << (i % 32));
+        const EvalCache::Key other = EvalCache::key(wide);
+        require(other.hi != base.hi && other.lo != base.lo, "one bit moves both halves of the key");
+        wide[i] = 0.0F;
+    }
+
+    EvalCache cache(3, 2, 4);  // one set of four entries
+    require(cache.capacity() == 4 && cache.bytes() == 4 * EvalCache::entry_bytes(3, 2), "four entries");
+    require(cache.generation() == 1 && cache.stats().entries == 0, "a new table is empty");
+    std::vector<float> logits(3);
+    std::vector<float> values(2);
+    const auto store = [&](float x, std::uint32_t generation) {
+        const std::vector<float> l{x, x + 1, x + 2};
+        const std::vector<float> v{x / 100, 1 - x / 100};
+        cache.store(EvalCache::key(row(x)), generation, l, v);
+    };
+    const auto has = [&](float x) {
+        const bool found = cache.find(EvalCache::key(row(x)), cache.generation(), logits, values);
+        require(!found || (logits == std::vector<float>{x, x + 1, x + 2} && values[0] == x / 100),
+                "an entry gives back the outputs stored for its row");
+        return found;
+    };
+    for (const float x : {1.0F, 2.0F, 3.0F, 4.0F}) {
+        store(x, 1);
+    }
+    require(has(1.0F) && has(2.0F) && has(3.0F) && has(4.0F), "a set holds four rows");
+    require(cache.stats().entries == 4 && cache.stats().stored == 4 && cache.stats().replaced == 0, "counted");
+    // Full: a new row takes the place of the one used longest ago (2: 1 was just read again).
+    require(has(2.0F) && has(3.0F) && has(4.0F) && has(1.0F) && has(3.0F) && has(4.0F), "reads");
+    store(5.0F, 1);
+    require(has(5.0F) && has(1.0F) && has(3.0F) && has(4.0F) && !has(2.0F), "the least recently used entry goes");
+    require(cache.stats().entries == 4 && cache.stats().replaced == 1, "a replacement is counted");
+    store(5.0F, 1);
+    require(cache.stats().stored == 5, "a row the table holds is not stored again");
+    // A clear leaves nothing to serve, and what was collected before it stores nothing.
+    cache.clear();
+    require(cache.generation() == 2 && cache.stats().entries == 0 && cache.stats().clears == 1, "cleared");
+    require(!has(1.0F) && !has(3.0F) && !has(4.0F) && !has(5.0F), "no entry survives a clear");
+    store(6.0F, 1);
+    require(!has(6.0F) && cache.stats().entries == 0, "a row from before the clear is not stored");
+    require(!cache.find(EvalCache::key(row(1.0F)), 1, logits, values), "nor found by its old generation");
+    store(6.0F, 2);
+    store(7.0F, 2);
+    require(has(6.0F) && has(7.0F) && cache.stats().entries == 2 && cache.stats().replaced == 1,
+            "stale entries are the first to be written over");
+
+    // With a round's stamps the rows a set keeps do not depend on who stores first: the latest four,
+    // and a read with an older stamp does not make an entry older.
+    for (const bool backwards : {false, true}) {
+        cache.clear();
+        const std::uint64_t first = cache.stamps(6);
+        for (int k = 0; k < 6; ++k) {
+            const int x = backwards ? 5 - k : k;
+            const float at = 10.0F + static_cast<float>(x);
+            const std::vector<float> l{at, at + 1, at + 2};
+            const std::vector<float> v{at / 100, 1 - at / 100};
+            cache.store(EvalCache::key(row(at)), cache.generation(), l, v, first + static_cast<std::uint64_t>(x));
+        }
+        const std::uint64_t reads = cache.stamps(4);
+        const std::uint32_t now = cache.generation();
+        require(!cache.find(EvalCache::key(row(10.0F)), now, logits, values, reads) &&
+                    !cache.find(EvalCache::key(row(11.0F)), now, logits, values, reads),
+                "the rows with the round's earliest stamps are the ones a full set leaves out");
+        for (const int x : backwards ? std::array{5, 4, 3, 2} : std::array{2, 3, 4, 5}) {
+            require(cache.find(EvalCache::key(row(10.0F + static_cast<float>(x))), now, logits, values,
+                               reads + static_cast<std::uint64_t>(x - 2)),
+                    "and the latest four stay");
+        }
+        // 12 was read at the earliest stamp of that round (and then 13, ...): it is the next to go.
+        store(30.0F, now);
+        require(has(30.0F) && has(13.0F) && has(14.0F) && has(15.0F) && !has(12.0F),
+                "a round's reads order the entries by their stamps, not by who read first");
+    }
+
+    bool threw = false;
+    try {
+        EvalCache(0, 2, 4);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw, "a cache needs output sizes");
+}
+
+/**
+ * A cache changes no search: with a network whose outputs are a function of
+ * the row, every search is bit for bit the one without, whatever the table
+ * holds or loses, across threads, batch sizes, roots and re-rooted trees.
+ */
+void test_eval_cache_changes_no_search() {
+    struct Setting {
+        int players;
+        RootSelection root;
+        int threads;
+        std::size_t batch;
+        bool toy;
+        bool transpositions;
+    };
+    for (const Setting& setting : std::vector<Setting>{
+             {2, RootSelection::puct, 1, 64, false, false},
+             {2, RootSelection::puct, 4, 24, false, false},
+             {4, RootSelection::puct, 3, 64, false, true},
+             {3, RootSelection::gumbel, 2, 64, false, false},
+             {2, RootSelection::puct, 2, 64, true, false},
+             {4, RootSelection::gumbel, 1, 7, true, false}}) {
+        const int n = setting.players;
+        const Played played = play_random(n, 21 + static_cast<std::uint64_t>(n), 120);
+        const Played other = play_random(n, 77, 60);
+        const auto codec = std::make_shared<FlatActionCodec>(n, MapType::base);
+        SearchConfig config;
+        config.simulations = 150;
+        config.max_players = n;
+        config.max_pending = 4;
+        config.threads = setting.threads;
+        config.root = setting.root;
+        config.transpositions = setting.transpositions;
+        if (setting.root == RootSelection::puct) {
+            config.dirichlet_alpha = 0.3;
+            config.root_policy_temperature = 1.25;
+            config.forced_playouts = 2.0;
+        }
+        // No cache, a roomy one, and one of two sets that loses nearly everything.
+        std::vector<std::vector<SearchResult>> results;
+        std::vector<std::vector<bool>> kept;
+        std::vector<RowRun> runs;
+        std::vector<EvalCacheStats> counts;
+        for (const std::size_t entries : {std::size_t{0}, std::size_t{1} << 14, std::size_t{8}}) {
+            const std::shared_ptr<const ObservationEncoder> encoder =
+                setting.toy ? std::shared_ptr<const ObservationEncoder>(std::make_shared<ToyEncoder>())
+                            : std::make_shared<SignatureEncoder>();
+            SearchPool pool(codec, encoder, config);
+            const auto cache = entries == 0 ? nullptr : std::make_shared<EvalCache>(codec->size(), n, entries);
+            pool.set_cache(cache);
+            require(pool.cache() == cache, "the pool keeps its cache");
+            // Two searches with one seed issue the same leaves in every round.
+            std::vector<std::int64_t> ids{
+                pool.add(played.game, 1), pool.add(played.game, 1), pool.add(played.game, 2),
+                pool.add(other.game, 3)};
+            RowRun total = run_rows(pool, 5, n, setting.batch);
+            std::vector<SearchResult> all;
+            for (const auto id : ids) {
+                require(pool.done(id), "every search finishes");
+                all.push_back(result_of(pool, id));
+            }
+            // (While the batch has room for every search's leaves, they are one search.)
+            require(setting.batch < ids.size() * static_cast<std::size_t>(config.max_pending) ||
+                        same_result(all[0], all[1]),
+                    "one seed, one search");
+            // Tree reuse: the next searches start from the kept subtrees.
+            std::vector<bool> rerooted;
+            if (setting.root == RootSelection::puct) {
+                for (const auto id : ids) {
+                    SearchOptions options;
+                    options.simulations = 220;
+                    rerooted.push_back(pool.reroot(id, pool.select(id), options));
+                }
+                const RowRun more = run_rows(pool, 5, n, setting.batch);
+                total.rows += more.rows;
+                total.rounds += more.rounds;
+                for (const auto id : ids) {
+                    all.push_back(result_of(pool, id));
+                }
+            }
+            results.push_back(std::move(all));
+            kept.push_back(std::move(rerooted));
+            runs.push_back(total);
+            counts.push_back(cache ? cache->stats() : EvalCacheStats{});
+        }
+        require(kept[0] == kept[1] && kept[0] == kept[2], "the same trees were kept");
+        require(setting.root != RootSelection::puct || std::count(kept[0].begin(), kept[0].end(), true) > 0,
+                "and some were");
+        for (std::size_t i = 0; i < results[0].size(); ++i) {
+            require(same_result(results[0][i], results[1][i]), "a cache must not change a search");
+            require(same_result(results[0][i], results[2][i]), "nor one that keeps replacing its entries");
+        }
+        for (const std::size_t cached : {std::size_t{1}, std::size_t{2}}) {
+            const EvalCacheStats& stats = counts[cached];
+            require(stats.leaves == runs[0].rows, "every leaf is counted, and there are as many as without");
+            require(runs[cached].rows + stats.hits + stats.repeats == stats.leaves,
+                    "a leaf has a row, a repeat or a hit");
+            require(stats.repeats > 0, "the twin searches repeat each other's rows inside a round");
+            require(runs[cached].rows < runs[0].rows, "fewer rows reach the network");
+        }
+        require(counts[1].hits > 0 && counts[1].replaced == 0, "the roomy table answers and keeps its rows");
+        require(counts[2].replaced > 0 && counts[2].entries <= 8, "the small one replaces them");
+        require(runs[1].rows <= runs[2].rows, "and so forwards more");
+    }
+}
+
+/**
+ * A round whose leaves all have their outputs needs no rows; collect applies
+ * it and goes on, so a search the table knows end to end is run by one
+ * collect that returns 0 only once it is done.
+ */
+void test_eval_cache_round_without_rows() {
+    const Played played = play_random(2, 31, 100);
+    const auto codec = std::make_shared<FlatActionCodec>(2, MapType::base);
+    SearchConfig config;
+    config.simulations = 90;
+    config.max_players = 2;
+    config.max_pending = 3;
+    const auto cache = std::make_shared<EvalCache>(codec->size(), 2, 1 << 14);
+    SearchPool pool(codec, std::make_shared<SignatureEncoder>(), config);
+    pool.set_cache(cache);
+    const auto first = pool.add(played.game, 4);
+    const RowRun cold = run_rows(pool, 9, 2);
+    const EvalCacheStats before = cache->stats();
+    require(cold.rows > 30 && cold.rounds > 10, "the first search asks the network round after round");
+    // The same search again: only its root needs the network (a root always does).
+    const auto again = pool.add(played.game, 4);
+    std::vector<float> observations(64 * pool.observation_size());
+    std::vector<std::int64_t> ids(64);
+    require(pool.collect(observations, ids) == 1 && ids[0] == again, "the root's row");
+    require(!pool.done(again), "not done yet");
+    std::vector<float> logits(pool.action_size());
+    std::vector<float> values(2);
+    row_outputs(std::span<const float>(observations).first(pool.observation_size()), 9, 2, logits, values);
+    pool.apply(logits, values);
+    require(pool.collect(observations, ids) == 0 && pool.pending() == 0, "every later round needs no row");
+    require(pool.done(again) && pool.stats(again).simulations == 90, "and the search ran to its end");
+    require(same_result(result_of(pool, first), result_of(pool, again)), "as the first one did");
+    const EvalCacheStats after = cache->stats();
+    require(after.leaves - before.leaves == before.leaves, "the same leaves");
+    require(after.hits - before.hits + after.repeats - before.repeats == before.leaves - 1, "all but the root answered");
+    require(after.stored == before.stored, "nothing new to store");
+
+    // A second pool on the same cache: shared outputs, its own searches.
+    config.threads = 2;
+    SearchPool second(codec, std::make_shared<SignatureEncoder>(), config);
+    second.set_cache(cache);
+    const auto there = second.add(played.game, 4);
+    require(run_rows(second, 9, 2).rows == 1, "the other pool's rows serve this one");
+    require(same_result(result_of(pool, first), result_of(second, there)), "the same search");
+
+    bool threw = false;
+    try {
+        second.set_cache(std::make_shared<EvalCache>(codec->size() + 1, 2, 16));
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw && second.cache() == cache, "a cache of other output sizes is refused");
+}
+
+/**
+ * Outputs belong to one set of weights. After a clear nothing from before
+ * is served; a round that holds cached outputs when the cache is cleared is
+ * refused rather than applied; failures leave the pool usable.
+ */
+void test_eval_cache_never_serves_another_network() {
+    const Played played = play_random(3, 15, 150);
+    const Played other = play_random(3, 99, 90);
+    const auto codec = std::make_shared<FlatActionCodec>(3, MapType::base);
+    SearchConfig config;
+    config.simulations = 80;
+    config.max_players = 3;
+    config.max_pending = 4;
+    config.threads = 2;
+    const auto search = [&](const std::shared_ptr<EvalCache>& cache, std::uint64_t salt, std::uint64_t warm,
+                            bool clear) {
+        SearchPool pool(codec, std::make_shared<SignatureEncoder>(), config);
+        pool.set_cache(cache);
+        if (warm != 0) {
+            // The old network searches the same positions first.
+            const auto old = pool.add(played.game, 6);
+            run_rows(pool, warm, 3, 16);
+            pool.remove(old);
+            if (clear) {
+                cache->clear();
+            }
+        }
+        std::vector<SearchResult> all;
+        std::vector<std::int64_t> ids{pool.add(played.game, 6), pool.add(other.game, 7)};
+        run_rows(pool, salt, 3, 16);
+        for (const auto id : ids) {
+            all.push_back(result_of(pool, id));
+        }
+        return all;
+    };
+    const auto plain = search(nullptr, 2, 0, false);
+    const auto cleared = search(std::make_shared<EvalCache>(codec->size(), 3, 1 << 12), 2, 1, true);
+    const auto stale = search(std::make_shared<EvalCache>(codec->size(), 3, 1 << 12), 2, 1, false);
+    require(same_result(plain[0], cleared[0]) && same_result(plain[1], cleared[1]),
+            "after a clear the new network's searches are its own");
+    require(!difference(plain[0], stale[0]).empty(), "which the old network's outputs would have changed");
+
+    // A round holding cached outputs across a clear is refused, and can be withdrawn.
+    const auto cache = std::make_shared<EvalCache>(codec->size(), 3, 1 << 12);
+    SearchPool pool(codec, std::make_shared<SignatureEncoder>(), config);
+    pool.set_cache(cache);
+    const auto seen = pool.add(played.game, 6);
+    run_rows(pool, 2, 3, 16);
+    pool.remove(seen);
+    std::vector<std::int64_t> ids{pool.add(played.game, 6), pool.add(other.game, 7)};
+    std::vector<float> observations(16 * pool.observation_size());
+    std::vector<std::int64_t> rows(16);
+    const auto outputs = [&](std::size_t n, std::vector<float>& logits, std::vector<float>& values) {
+        // (Rows of either pool below: they share sizes.)
+        logits.assign(n * pool.action_size(), 0.0F);
+        values.assign(n * 3, 0.0F);
+        for (std::size_t row = 0; row < n; ++row) {
+            row_outputs(
+                std::span<const float>(observations).subspan(row * pool.observation_size(), pool.observation_size()),
+                2, 3, std::span<float>(logits).subspan(row * pool.action_size(), pool.action_size()),
+                std::span<float>(values).subspan(row * 3, 3));
+        }
+    };
+    std::vector<float> logits;
+    std::vector<float> values;
+    std::size_t n = pool.collect(observations, rows);  // the two roots
+    outputs(n, logits, values);
+    pool.apply(logits, values);
+    const std::uint64_t hits = cache->stats().hits;
+    n = pool.collect(observations, rows);  // search 6's leaves from the cache, search 7's rows
+    require(n > 0, "the unseen search needs rows");
+    outputs(n, logits, values);
+    bool threw = false;
+    try {
+        pool.set_cache(nullptr);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw, "the cache stays while rows are pending");
+    values[1] = std::numeric_limits<float>::quiet_NaN();
+    threw = false;
+    try {
+        pool.apply(logits, values);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    require(threw && pool.pending() == n, "a NaN row is rejected and the round stays pending");
+    outputs(n, logits, values);
+    cache->clear();
+    threw = false;
+    try {
+        pool.apply(logits, values);
+    } catch (const std::logic_error&) {
+        threw = true;
+    }
+    require(threw && pool.pending() == n, "outputs held from before a clear are not applied");
+    pool.cancel();
+    require(pool.pending() == 0 && cache->stats().hits == hits, "the round is withdrawn, its hits uncounted");
+    run_rows(pool, 2, 3, 16);
+    // The same roots, withdrawn round and rest in a pool without a cache.
+    SearchPool control(codec, std::make_shared<SignatureEncoder>(), config);
+    const std::vector<std::int64_t> twins{control.add(played.game, 6), control.add(other.game, 7)};
+    n = control.collect(observations, rows);
+    outputs(n, logits, values);
+    control.apply(logits, values);
+    require(control.collect(observations, rows) > 0, "the control's second round");
+    control.cancel();
+    run_rows(control, 2, 3, 16);
+    require(same_result(result_of(control, twins[0]), result_of(pool, ids[0])) &&
+                same_result(result_of(control, twins[1]), result_of(pool, ids[1])),
+            "the searches go on as they do without a cache");
+    for (const auto id : ids) {
+        require(pool.stats(id).simulations == 80, "no simulation is lost or stranded");
+    }
+
+    // An encoder failure inside a cached collect withdraws the issued leaves.
+    SearchPool fragile(codec, std::make_shared<FailingEncoder>(25), config);
+    fragile.set_cache(std::make_shared<EvalCache>(codec->size(), 3, 64));
+    const auto id = fragile.add(played.game, 3);
+    int failures = 0;
+    while (true) {
+        try {
+            if (run_rows(fragile, 2, 3, 16).rows == 0) {
+                break;
+            }
+        } catch (const std::runtime_error&) {
+            ++failures;
+            require(fragile.pending() == 0, "a failed collect leaves nothing pending");
+        }
+    }
+    require(failures == 1 && fragile.done(id) && fragile.stats(id).simulations == 80, "and the search finishes");
+}
+
 int main() {
     try {
+        test_eval_cache_table();
+        test_eval_cache_changes_no_search();
+        test_eval_cache_round_without_rows();
+        test_eval_cache_never_serves_another_network();
         test_free_backlog_changes_no_result();
         test_free_backlog_covers_what_a_new_root_cuts_away();
         test_free_backlog_bounds_what_waits();

@@ -23,6 +23,7 @@ add_library(cppanatron
     src/tracker.cpp
     src/flat_codec.cpp
     src/search_pool.cpp
+    src/eval_cache.cpp
 )
 add_library(cppanatron::cppanatron ALIAS cppanatron)
 

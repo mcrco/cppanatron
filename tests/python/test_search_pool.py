@@ -971,3 +971,129 @@ def test_search_pool_likely_worlds(root):
     assert shares.shape == (sampled.stats(search).worlds,) and shares.sum() == pytest.approx(1.0)
     run_hashed(sampled, 2)
     np.testing.assert_array_equal(sampled.world_visits(search).sum(axis=1), shares * 64)
+
+
+def test_eval_cache_table():
+    cache = cpp.EvalCache(5, 2, entries=10)
+    assert (cache.action_size, cache.max_players, cache.capacity, cache.generation) == (5, 2, 8, 1)
+    assert cache.bytes == 8 * cpp.EvalCache.entry_bytes(5, 2) and len(cache) == 0
+    rows = np.arange(12 * 7, dtype=np.float32).reshape(12, 7)
+    logits = np.arange(12 * 5, dtype=np.float32).reshape(12, 5)
+    values = np.arange(12 * 2, dtype=np.float32).reshape(12, 2)
+    assert cache.find(rows[0]) is None
+    for row in range(12):
+        cache.store(rows[row], logits[row], values[row])
+    cache.store(rows[11], logits[0], values[0])  # a row already there keeps its outputs
+    stats = cache.stats
+    assert stats.stored == 12 and stats.entries == len(cache) == 12 - stats.replaced and stats.replaced >= 4
+    found = [cache.find(row) for row in rows]
+    assert sum(pair is not None for pair in found) == len(cache)
+    for row, pair in enumerate(found):
+        if pair is not None:
+            assert pair[0].dtype == pair[1].dtype == np.float32
+            np.testing.assert_array_equal(pair[0], logits[row])
+            np.testing.assert_array_equal(pair[1], values[row])
+    assert found[11] is not None  # the latest row of a full set is not the one replaced
+    # The key is the row's bytes: -0.0 is not 0.0, a prefix is not the row.
+    zero = np.zeros(7, dtype=np.float32)
+    cache.store(zero, logits[1], values[1])
+    assert cache.find(-zero) is None and cache.find(zero[:6]) is None and cache.find(zero) is not None
+    cache.clear()
+    assert cache.generation == 2 and len(cache) == 0 and cache.stats.clears == 1
+    assert all(cache.find(row) is None for row in rows)
+    with pytest.raises(ValueError):
+        cache.store(rows[0], logits[0][:4], values[0])
+    assert "EvalCacheStats(leaves=0, hits=0" in repr(cache.stats)
+
+
+def row_network(observations: np.ndarray, pool: cpp.SearchPool, salt: float):
+    """Outputs that are a function of each row alone (and of ``salt``, the weights)."""
+    n = len(observations)
+    index = np.arange(observations.shape[1], dtype=np.float64)
+    phase = observations.astype(np.float64) @ np.stack([np.cos(index * (k + 1) + salt) for k in range(8)], axis=1)
+    logits = np.sin(phase @ np.cos(np.arange(8 * pool.action_size).reshape(8, -1) + salt)).astype(np.float32)
+    first = (0.5 + 0.4 * np.sin(phase[:, 0])).astype(np.float32)
+    values = np.repeat(((1.0 - first) / (pool.max_players - 1))[:, None], pool.max_players, axis=1)
+    values[:, 0] = first
+    assert logits.shape == (n, pool.action_size)
+    return logits, values.astype(np.float32)
+
+
+def run_rows(pool: cpp.SearchPool, salt: float, batch: int = 32, check_rows=None) -> int:
+    observations = np.zeros((batch, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(batch, dtype=np.int64)
+    total = 0
+    while n := pool.collect(observations, ids):
+        assert pool.pending == n
+        if check_rows is not None:
+            check_rows(observations[:n], ids[:n])
+        pool.apply(*row_network(observations[:n], pool, salt))
+        total += n
+    return total
+
+
+@pytest.mark.parametrize("entries", [1 << 14, 8])
+def test_search_pool_with_an_eval_cache(entries):
+    """The searches of a pool with a cache are the pool's without one, on fewer rows; the rows
+    written are the pending games', a second pool is served by the first's, and a clear starts
+    over (another network's outputs are never served)."""
+    game, _ = random_game(2, 3, 120)
+    codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
+    encoder = cpp.FlatObservationEncoder(2, observation_layout())
+    config = cpp.SearchConfig(simulations=96, max_players=2, max_pending=4, threads=2)
+
+    def searches(pool, salt, cache=None):
+        ids = [pool.add(game, seed) for seed in (0, 0, 1, 2)]  # two with one seed: the same leaves
+
+        def check_rows(observations, row_ids):
+            for row in range(len(row_ids)):
+                leaf = pool.pending_game(row)
+                np.testing.assert_array_equal(observations[row], encoder.encode(leaf, leaf.current_player_index))
+                assert int(row_ids[row]) in ids
+            if cache is not None:
+                assert len({observations[row].tobytes() for row in range(len(row_ids))}) >= len(row_ids) - len(ids)
+
+        rows = run_rows(pool, salt, check_rows=check_rows)
+        out = [(pool.visits(i).tobytes(), pool.q(i).tobytes(), pool.policy_target(i).tobytes(),
+                pool.value(i).tobytes(), pool.stats(i).simulations) for i in ids]
+        for i in ids:
+            pool.remove(i)
+        return out, rows
+
+    plain = cpp.SearchPool(codec, encoder, config)
+    assert plain.cache is None
+    cache = cpp.EvalCache(codec.size, 2, entries=entries)
+    pool = cpp.SearchPool(codec, encoder, config)
+    pool.cache = cache
+    assert pool.cache is cache
+    with pytest.raises(ValueError):
+        plain.cache = cpp.EvalCache(codec.size, 3, entries=8)
+    want, rows = searches(plain, 0.5)
+    got, fewer = searches(pool, 0.5, cache)
+    stats = cache.stats
+    assert got == want and fewer < rows
+    assert stats.leaves == rows and fewer + stats.hits + stats.repeats == rows and stats.repeats > 0
+    # The same searches once more: the table answers what it kept.
+    again, least = searches(pool, 0.5, cache)
+    assert again == want and least <= fewer and (entries == 8 or least == 4)  # the roots: a root has its row
+    other = cpp.SearchPool(codec, encoder, config)
+    other.cache = cache
+    served, rows_there = searches(other, 0.5, cache)
+    assert served == want and (entries == 8 or rows_there == 4)
+    # Other weights: without a clear the table would answer for the old ones.
+    changed, _ = searches(plain, 0.9)
+    assert changed != want
+    cache.clear()
+    assert searches(pool, 0.9, cache)[0] == changed
+    if entries > 8:
+        assert searches(pool, 0.5, cache)[0] != want  # (the control: the table still holds 0.9's)
+    # The cache cannot be swapped under a collected round.
+    sid = pool.add(game, 5)
+    observations = np.zeros((8, pool.observation_size), dtype=np.float32)
+    ids = np.zeros(8, dtype=np.int64)
+    n = pool.collect(observations, ids)
+    with pytest.raises(RuntimeError):
+        pool.cache = None
+    pool.cancel()
+    pool.cache = None
+    assert pool.cache is None and run_rows(pool, 0.9) > 0 and pool.done(sid)

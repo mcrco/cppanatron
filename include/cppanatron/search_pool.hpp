@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cppanatron/codec.hpp"
+#include "cppanatron/eval_cache.hpp"
 #include "cppanatron/game.hpp"
 #include "cppanatron/tracker.hpp"
 
@@ -267,6 +268,23 @@ public:
         std::optional<TrackerMode> deal = std::nullopt);
 
     /**
+     * Share network outputs with the other pools of the same network (see
+     * EvalCache; nullptr: none, the default). A round still issues at most
+     * `ids.size()` leaves, in the same order, but collect writes rows only
+     * for the leaves whose outputs are not known: not for a leaf whose row
+     * the cache holds, nor for one whose row an earlier leaf of the round
+     * has (a root always gets its row). apply takes outputs for the written
+     * rows, gives every leaf its row's in the order of the leaves and stores
+     * the new ones. A round that needs no row at all is applied inside
+     * collect, which goes on to the next. With outputs that are a function
+     * of the row alone, the searches are exactly those without a cache.
+     * Throws std::logic_error while rows await apply, and
+     * std::invalid_argument if the cache's output sizes are not the pool's.
+     */
+    void set_cache(std::shared_ptr<EvalCache> cache);
+    [[nodiscard]] std::shared_ptr<EvalCache> cache() const noexcept;
+
+    /**
      * Advance every unfinished search to its next leaves (roots first) and
      * write up to `ids.size()` observation rows into `observations`
      * (row-major, observation_size() floats per row) and the owning search
@@ -279,7 +297,9 @@ public:
      * action_size() floats per row, `values` max_players() floats per row.
      * Wrong sizes or non-finite values throw std::invalid_argument before
      * anything changes, so apply can be retried. If an expansion fails
-     * anyway, the rows not yet applied are withdrawn (see cancel).
+     * anyway, the rows not yet applied are withdrawn (see cancel). With a
+     * cache that was cleared since the collect, a round that took outputs
+     * from it throws std::logic_error and stays pending: cancel it.
      */
     void apply(std::span<const float> logits, std::span<const float> values);
     /**
@@ -289,7 +309,7 @@ public:
      */
     void cancel();
 
-    /** Rows of the last collect awaiting apply. */
+    /** Rows of the last collect awaiting apply (what collect returned). */
     [[nodiscard]] std::size_t pending() const noexcept;
     /** The position of a pending row (for evaluators that read games). */
     [[nodiscard]] const Game& pending_game(std::size_t row) const;

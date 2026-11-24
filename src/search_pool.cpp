@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <limits>
@@ -712,6 +714,32 @@ struct SearchPool::Impl {
         Leaf leaf;
     };
     std::vector<Row> batch;
+    std::shared_ptr<EvalCache> cache;
+    /**
+     * With a cache, where each leaf of `batch` gets its outputs from: the
+     * rows written for the network are fewer than the leaves.
+     */
+    struct Round {
+        /** The cache's generation when the round was collected. */
+        std::uint32_t generation{};
+        /** The first of the round's use stamps for the cache's entries, one per leaf. */
+        std::uint64_t stamp{};
+        /** Per leaf: its row's key. */
+        std::vector<EvalCache::Key> keys;
+        /** Per leaf: the written row with its outputs, or kNone: `outputs` has them, from the cache. */
+        std::vector<std::uint32_t> source;
+        /** Per written row: the leaf it was encoded for. */
+        std::vector<std::uint32_t> rows;
+        /** Leaves answered from the cache, and by an earlier leaf's row. */
+        std::size_t held{};
+        std::size_t repeats{};
+        /** Per leaf: its encoded row, and its outputs (logits, then values) if the cache had them. */
+        std::vector<float> encoded;
+        std::vector<float> outputs;
+        /** Open addressing over the round's keys: the first leaf with each. */
+        std::vector<std::uint32_t> index;
+    };
+    Round round;
     std::unique_ptr<WorkerPool> workers;
     /** A discarded tree (see discard), waiting for the thread that ran its search to free it. */
     struct Removed {
@@ -1597,16 +1625,11 @@ struct SearchPool::Impl {
         finish_if_done(search);
     }
 
-    std::size_t collect(std::span<float> observations, std::span<std::int64_t> ids) {
-        if (!batch.empty()) {
-            throw std::logic_error("apply (or cancel) the last collect before collecting again");
-        }
-        const std::size_t capacity = ids.size();
-        const std::size_t width = encoder->size();
-        if (observations.size() < capacity * width) {
-            throw std::invalid_argument("observation buffer is smaller than ids.size() rows");
-        }
-        free_removed();
+    /**
+     * Issue the next round's leaves into `batch`, at most `capacity` of
+     * them; false when every search is done (or there is no room).
+     */
+    bool issue(std::size_t capacity) {
         while (true) {
             std::vector<Search*> active;
             for (auto& [id, search] : searches) {
@@ -1615,7 +1638,7 @@ struct SearchPool::Impl {
                 }
             }
             if (active.empty() || capacity == 0) {
-                return 0;
+                return false;
             }
             // Rotate who goes first so a small batch does not starve anyone.
             std::rotate(
@@ -1660,7 +1683,7 @@ struct SearchPool::Impl {
                 search->issued.clear();
             }
             if (!batch.empty()) {
-                break;
+                return true;
             }
             for (const Search* search : active) {
                 progress += search->started;
@@ -1670,18 +1693,118 @@ struct SearchPool::Impl {
             }
             // Every issued simulation ended in a terminal position: go again.
         }
-        try {
-            workers->run(batch.size(), [&](std::size_t row) {
-                const Row& entry = batch[row];
-                const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
-                encoder->encode(game, game.current_player_index(), observations.subspan(row * width, width));
-                ids[row] = entry.search->id;
-            });
-        } catch (...) {
-            cancel();
-            throw;
+    }
+
+    /**
+     * With a cache: encode the round's leaves, look their rows up, and write
+     * the rows the network still has to evaluate (in the leaves' order) to
+     * `observations` and their searches to `ids`. A leaf whose row the
+     * cache holds keeps a copy of the outputs until apply, so the entry may
+     * be replaced meanwhile; one whose row an earlier leaf of the round has
+     * takes that row's. A root always gets a row of its own: callers read
+     * the roots' outputs off the rows they collected.
+     */
+    void plan(std::span<float> observations, std::span<std::int64_t> ids) {
+        const std::size_t leaves = batch.size();
+        const std::size_t width = encoder->size();
+        const std::size_t actions = codec->size();
+        const std::size_t stride = actions + static_cast<std::size_t>(config.max_players);
+        round.generation = cache->generation();
+        round.stamp = cache->stamps(leaves);
+        round.keys.resize(leaves);
+        round.source.assign(leaves, 0);
+        round.rows.clear();
+        round.held = 0;
+        round.repeats = 0;
+        if (round.encoded.size() < leaves * width) {
+            round.encoded.resize(leaves * width);
+            round.outputs.resize(leaves * stride);
         }
-        return batch.size();
+        workers->run(leaves, [&](std::size_t leaf) {
+            const Row& entry = batch[leaf];
+            const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
+            const std::span<float> row = std::span<float>(round.encoded).subspan(leaf * width, width);
+            encoder->encode(game, game.current_player_index(), row);
+            round.keys[leaf] = EvalCache::key(row);
+            const std::span<float> outputs = std::span<float>(round.outputs).subspan(leaf * stride, stride);
+            if (!entry.leaf.root &&
+                cache->find(
+                    round.keys[leaf], round.generation, outputs.first(actions), outputs.subspan(actions),
+                    round.stamp + leaf)) {
+                round.source[leaf] = kNone;
+            }
+        });
+        round.index.assign(std::bit_ceil(2 * leaves), kNone);
+        const std::size_t mask = round.index.size() - 1;
+        for (std::uint32_t leaf = 0; leaf < leaves; ++leaf) {
+            if (round.source[leaf] == kNone) {
+                ++round.held;
+                continue;
+            }
+            if (!batch[leaf].leaf.root) {
+                std::size_t at = round.keys[leaf].lo & mask;
+                while (round.index[at] != kNone && round.keys[round.index[at]] != round.keys[leaf]) {
+                    at = (at + 1) & mask;
+                }
+                if (round.index[at] != kNone) {
+                    round.source[leaf] = round.source[round.index[at]];
+                    ++round.repeats;
+                    continue;
+                }
+                round.index[at] = leaf;
+            }
+            round.source[leaf] = static_cast<std::uint32_t>(round.rows.size());
+            round.rows.push_back(leaf);
+        }
+        workers->run(round.rows.size(), [&](std::size_t row) {
+            const std::size_t leaf = round.rows[row];
+            std::memcpy(
+                observations.data() + row * width, round.encoded.data() + leaf * width, width * sizeof(float));
+            ids[row] = batch[leaf].search->id;
+        });
+    }
+
+    /** Rows of the last collect the caller owes outputs for. */
+    std::size_t pending_rows() const noexcept {
+        return batch.empty() || cache == nullptr ? batch.size() : round.rows.size();
+    }
+
+    std::size_t collect(std::span<float> observations, std::span<std::int64_t> ids) {
+        if (!batch.empty()) {
+            throw std::logic_error("apply (or cancel) the last collect before collecting again");
+        }
+        const std::size_t capacity = ids.size();
+        const std::size_t width = encoder->size();
+        if (observations.size() < capacity * width) {
+            throw std::invalid_argument("observation buffer is smaller than ids.size() rows");
+        }
+        free_removed();
+        while (issue(capacity)) {
+            try {
+                if (cache == nullptr) {
+                    workers->run(batch.size(), [&](std::size_t row) {
+                        const Row& entry = batch[row];
+                        const Game& game = *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
+                        encoder->encode(
+                            game, game.current_player_index(), observations.subspan(row * width, width));
+                        ids[row] = entry.search->id;
+                    });
+                    return batch.size();
+                }
+                plan(observations, ids);
+                if (!round.rows.empty()) {
+                    return round.rows.size();
+                }
+                // Every leaf of the round has its outputs already, so the
+                // round is applied here, as the caller would with the
+                // network's, and the next one issued: 0 rows still means done.
+                apply({}, {});
+            } catch (...) {
+                cancel();
+                throw;
+            }
+        }
+        return 0;
     }
 
     /** Withdraw every pending row, latest first (restoring Gumbel's queue order). */
@@ -1693,29 +1816,54 @@ struct SearchPool::Impl {
     }
 
     void apply(std::span<const float> logits, std::span<const float> values) {
-        const std::size_t rows = batch.size();
+        const std::size_t leaves = batch.size();
         const std::size_t width = codec->size();
         const auto players = static_cast<std::size_t>(config.max_players);
+        const bool planned = cache != nullptr && !batch.empty();
+        const std::size_t rows = planned ? round.rows.size() : leaves;
         if (logits.size() != rows * width || values.size() != rows * players) {
             throw std::invalid_argument(
                 "apply needs action_size() logits and max_players() values per collected row");
         }
+        if (planned && round.held > 0 && cache->generation() != round.generation) {
+            throw std::logic_error(
+                "the evaluation cache was cleared while a round held outputs from it: cancel the round");
+        }
+        // A leaf's outputs: its row's, the row's it repeats, or the cache's.
+        struct Outputs {
+            std::span<const float> logits;
+            std::span<const float> values;
+        };
+        const auto outputs_of = [&](std::size_t leaf) -> Outputs {
+            const std::size_t row = planned ? round.source[leaf] : leaf;
+            if (row == kNone) {
+                const std::span<const float> held =
+                    std::span<const float>(round.outputs).subspan(leaf * (width + players), width + players);
+                return {held.first(width), held.subspan(width)};
+            }
+            return {logits.subspan(row * width, width), values.subspan(row * players, players)};
+        };
         // Reject bad rows before anything changes, so the caller can retry.
-        for (std::size_t row = 0; row < rows; ++row) {
-            const auto seats = static_cast<std::size_t>(batch[row].search->players);
+        for (std::size_t leaf = 0; leaf < leaves; ++leaf) {
+            const auto seats = static_cast<std::size_t>(batch[leaf].search->players);
+            const std::span<const float> own = outputs_of(leaf).values;
             for (std::size_t slot = 0; slot < seats; ++slot) {
-                if (!std::isfinite(values[row * players + slot])) {
+                if (!std::isfinite(own[slot])) {
+                    if (planned && round.source[leaf] == kNone) {
+                        throw std::invalid_argument("leaf values must be finite (a row from the cache)");
+                    }
+                    const std::size_t row = planned ? round.source[leaf] : leaf;
                     throw std::invalid_argument("leaf values must be finite (row " + std::to_string(row) + ")");
                 }
             }
         }
-        // Rows of one search are contiguous; each search is one task.
+        // Leaves of one search are contiguous; each search is one task.
         std::vector<std::pair<std::size_t, std::size_t>> ranges;
-        for (std::size_t row = 0; row < rows; ++row) {
-            if (row == 0 || batch[row].search != batch[row - 1].search) {
-                ranges.emplace_back(row, row);
+        for (std::size_t leaf = 0; leaf < leaves; ++leaf) {
+            if (leaf == 0 || batch[leaf].search != batch[leaf - 1].search) {
+                ranges.emplace_back(leaf, leaf);
             }
-            ranges.back().second = row + 1;
+            ranges.back().second = leaf + 1;
         }
         std::vector<Row> rows_in_flight;
         rows_in_flight.swap(batch);
@@ -1723,28 +1871,36 @@ struct SearchPool::Impl {
         for (std::size_t task = 0; task < ranges.size(); ++task) {
             lanes[task] = rows_in_flight[ranges[task].first].search->lane;
         }
-        std::vector<std::uint8_t> applied(rows, 0);
+        std::vector<std::uint8_t> applied(leaves, 0);
+        const std::uint64_t stamp = planned ? cache->stamps(leaves) : 0;
         try {
             workers->run(
                 ranges.size(),
                 [&](std::size_t task) {
-                    for (std::size_t row = ranges[task].first; row < ranges[task].second; ++row) {
-                        const Row& entry = rows_in_flight[row];
-                        evaluate(
-                            *entry.search, entry.leaf, logits.subspan(row * width, width),
-                            values.subspan(row * players, players));
-                        applied[row] = 1;
+                    for (std::size_t leaf = ranges[task].first; leaf < ranges[task].second; ++leaf) {
+                        const Row& entry = rows_in_flight[leaf];
+                        const Outputs outputs = outputs_of(leaf);
+                        evaluate(*entry.search, entry.leaf, outputs.logits, outputs.values);
+                        applied[leaf] = 1;
+                        // The network's outputs for a row go to the cache once, from the leaf it was written for.
+                        if (planned && round.source[leaf] != kNone && round.rows[round.source[leaf]] == leaf) {
+                            cache->store(
+                                round.keys[leaf], round.generation, outputs.logits, outputs.values, stamp + leaf);
+                        }
                     }
                 },
                 &lanes);
         } catch (...) {
-            // Rows that were not applied go back to their searches unevaluated.
-            for (std::size_t row = rows; row-- > 0;) {
-                if (applied[row] == 0) {
-                    withdraw(*rows_in_flight[row].search, rows_in_flight[row].leaf);
+            // Leaves that were not applied go back to their searches unevaluated.
+            for (std::size_t leaf = leaves; leaf-- > 0;) {
+                if (applied[leaf] == 0) {
+                    withdraw(*rows_in_flight[leaf].search, rows_in_flight[leaf].leaf);
                 }
             }
             throw;
+        }
+        if (planned) {
+            cache->count(leaves, round.held, round.repeats);
         }
     }
 
@@ -2323,10 +2479,23 @@ void SearchPool::apply(std::span<const float> logits, std::span<const float> val
 
 void SearchPool::cancel() { impl_->cancel(); }
 
-std::size_t SearchPool::pending() const noexcept { return impl_->batch.size(); }
+void SearchPool::set_cache(std::shared_ptr<EvalCache> cache) {
+    if (!impl_->batch.empty()) {
+        throw std::logic_error("apply (or cancel) the last collect before changing the cache");
+    }
+    if (cache != nullptr &&
+        (cache->action_size() != action_size() || cache->max_players() != max_players())) {
+        throw std::invalid_argument("the cache's outputs are not this pool's: action size or value width differs");
+    }
+    impl_->cache = std::move(cache);
+}
+
+std::shared_ptr<EvalCache> SearchPool::cache() const noexcept { return impl_->cache; }
+
+std::size_t SearchPool::pending() const noexcept { return impl_->pending_rows(); }
 
 const Game& SearchPool::pending_game(std::size_t row) const {
-    const auto& entry = impl_->batch.at(row);
+    const auto& entry = impl_->batch.at(impl_->cache == nullptr ? row : impl_->round.rows.at(row));
     return *entry.search->worlds[entry.leaf.world].nodes[entry.leaf.node].game;
 }
 

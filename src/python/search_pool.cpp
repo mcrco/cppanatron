@@ -222,6 +222,77 @@ void bind_search_pool(nb::module_& module) {
         .def_ro("tree_bytes", &SearchStats::tree_bytes, "Tree storage excluding the games' heap.")
         .def_ro("lane", &SearchStats::lane, "The worker thread the search runs on.");
 
+    nb::class_<EvalCacheStats>(module, "EvalCacheStats", "An EvalCache's counts since it was made.")
+        .def_ro("leaves", &EvalCacheStats::leaves, "Leaves applied by pools with the cache, roots included.")
+        .def_ro("hits", &EvalCacheStats::hits, "Of them, answered from the table.")
+        .def_ro("repeats", &EvalCacheStats::repeats, "Of them, answered by another leaf's row of the same round.")
+        .def_ro("stored", &EvalCacheStats::stored, "Rows whose outputs were written to the table.")
+        .def_ro("replaced", &EvalCacheStats::replaced, "Of them, written over a live entry.")
+        .def_ro("clears", &EvalCacheStats::clears)
+        .def_ro("entries", &EvalCacheStats::entries, "Live entries now.")
+        .def("__repr__", [](const EvalCacheStats& s) {
+            return nb::str("EvalCacheStats(leaves={}, hits={}, repeats={}, stored={}, replaced={}, clears={}, "
+                           "entries={})")
+                .format(s.leaves, s.hits, s.repeats, s.stored, s.replaced, s.clears, s.entries);
+        });
+
+    nb::class_<EvalCache>(
+        module, "EvalCache",
+        "A network's outputs by observation row, for the SearchPools that share the\n"
+        "network (``SearchPool.cache``).\n\n"
+        "A leaf whose row the table holds, or whose row another leaf of the same round\n"
+        "has, is not written to the batch and gets that row's outputs at ``apply``. A\n"
+        "row's outputs are a function of its bytes, so with an evaluator whose outputs\n"
+        "do not depend on the batch the searches are the same with and without a\n"
+        "cache. The key is a 128-bit hash of the row's bytes, computed on the pool's\n"
+        "threads. The table holds ``entries`` rows (``entry_bytes`` each, taken as\n"
+        "they are written) in sets of four; a new row replaces the one of its set\n"
+        "used longest ago.\n\n"
+        "The outputs belong to one set of weights: call ``clear`` whenever the\n"
+        "network changes. Entries from before a clear are never served, and a round\n"
+        "collected before it stores nothing after it. Thread-safe.")
+        .def(
+            "__init__",
+            [](EvalCache* self, std::size_t action_size, int max_players, std::size_t entries) {
+                new (self) EvalCache(action_size, max_players, entries);
+            },
+            nb::arg("action_size"), nb::arg("max_players"), nb::kw_only(), nb::arg("entries"))
+        .def_static(
+            "entry_bytes", &EvalCache::entry_bytes, nb::arg("action_size"), nb::arg("max_players"),
+            "Memory one entry takes for these output sizes.")
+        .def_prop_ro("action_size", &EvalCache::action_size)
+        .def_prop_ro("max_players", &EvalCache::max_players)
+        .def_prop_ro("capacity", &EvalCache::capacity, "Entries the table holds when full.")
+        .def_prop_ro("bytes", &EvalCache::bytes, "Memory of the full table.")
+        .def_prop_ro("generation", &EvalCache::generation, "Counts clears (from 1).")
+        .def_prop_ro("stats", &EvalCache::stats)
+        .def("__len__", [](const EvalCache& cache) { return cache.stats().entries; })
+        .def("clear", &EvalCache::clear, "Forget every entry: the network's weights changed.")
+        .def(
+            "find",
+            [](EvalCache& cache, InputVector<float> row) -> nb::object {
+                std::vector<float> logits(cache.action_size());
+                std::vector<float> values(static_cast<std::size_t>(cache.max_players()));
+                const EvalCache::Key key = EvalCache::key(std::span<const float>(row.data(), row.shape(0)));
+                if (!cache.find(key, cache.generation(), logits, values)) {
+                    return nb::none();
+                }
+                return nb::make_tuple(to_numpy(std::move(logits)), to_numpy(std::move(values)));
+            },
+            nb::arg("row"),
+            "(logits, values) stored for an observation row (float32), or None. Counts\n"
+            "as a use of the entry.")
+        .def(
+            "store",
+            [](EvalCache& cache, InputVector<float> row, InputVector<float> logits, InputVector<float> values) {
+                cache.store(
+                    EvalCache::key(std::span<const float>(row.data(), row.shape(0))), cache.generation(),
+                    std::span<const float>(logits.data(), logits.shape(0)),
+                    std::span<const float>(values.data(), values.shape(0)));
+            },
+            nb::arg("row"), nb::arg("logits"), nb::arg("values"),
+            "Store a row's outputs (what a pool does at ``apply``).");
+
     nb::class_<SearchPool>(
         module, "SearchPool",
         "Many independent searches advanced in lockstep with batched inference.\n\n"
@@ -249,6 +320,18 @@ void bind_search_pool(nb::module_& module) {
         .def("__contains__", &SearchPool::contains, nb::arg("id"))
         .def_prop_ro("ids", &SearchPool::ids)
         .def_prop_ro("pending", &SearchPool::pending, "Rows of the last collect awaiting apply.")
+        .def_prop_rw(
+            "cache", &SearchPool::cache, &SearchPool::set_cache, nb::arg("cache").none(),
+            "An EvalCache shared with the other pools of the same network (None: none,\n"
+            "the default). A round still issues the same leaves in the same order, but\n"
+            "``collect`` writes (and counts) rows only for the leaves whose outputs are\n"
+            "not known: not for a leaf whose row the cache holds, nor for one whose row\n"
+            "an earlier leaf of the round has; a root always gets its row. ``apply``\n"
+            "takes outputs for the written rows, gives every leaf its row's and stores\n"
+            "the new ones. A round that needs no row is applied inside ``collect``,\n"
+            "which goes on to the next, so 0 rows still means every search is done.\n"
+            "RuntimeError while rows await ``apply``; ValueError if the cache's output\n"
+            "sizes are not the pool's.")
         .def_prop_ro(
             "unfreed_nodes", &SearchPool::unfreed_nodes,
             "Tree nodes that remove, advance and reroot discarded and nothing has freed\n"

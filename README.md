@@ -19,13 +19,19 @@ Army, terminal scoring, the CatanRL flat action table, and the pinned
 victory point target, discard limit, friendly robber, bank, development deck and
 pieces per player, e.g. the 5–6 player extension's bank of 24 per resource and
 34-card deck. The friendly robber is OpenHex's (and differs from Catanatron's):
-a tile is shielded when an opponent of the mover with at most 2 public victory
-points (buildings and awards, never hidden victory point cards) has a building
-on it; shielded tiles are illegal unless every tile but the robber's is
-shielded, when all are legal. A knight's robber is placed on the points before
-the knight's Largest Army award, as OpenHex places it with the knight (a seat
-the knight takes the award from keeps its 2 points for that robber move;
-`Game.largest_army_taken_from`). The 5–6 player special building phase is not implemented.
+a tile is shielded when any player with at most 2 public victory points
+(buildings and awards, never hidden victory point cards) has a building on it,
+the mover included, and the robber may not move to a shielded tile. There is
+no fallback: when every tile but the robber's is shielded, the robber stays
+and nobody is robbed. A 7 then owes no robber move (after the discards, which
+still happen, the roller plays on), and a knight is played without a robber
+prompt: it still leaves the hand, counts for Largest Army and uses the turn's
+development card. A knight's robber is judged on the points after the knight's
+Largest Army award (`Game.largest_army_taken_from`, which served the earlier
+rule, is kept but always unset). A roll the bank cannot pay in full is settled
+per resource as OpenHex does, in every game: when one player alone claims the
+resource it takes what the bank has left (however many buildings the claim
+comes from), and when several claim it nobody gets any. The 5–6 player special building phase is not implemented.
 
 The engine also includes a policy/value-guided stochastic PUCT implementation.
 It keeps cloned game states, tree traversal, exact dice/development-card/robber

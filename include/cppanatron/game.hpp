@@ -130,13 +130,28 @@ public:
         return victory_points_to_win_;
     }
     [[nodiscard]] int discard_limit() const noexcept { return discard_limit_; }
+    /**
+     * Whether OpenHex's friendly robber is on. A tile is then shielded when
+     * any player with at most 2 public points (buildings and awards, never
+     * hidden victory point cards) has a building on it, the mover included,
+     * and the robber may not move to a shielded tile. There is no fallback:
+     * when every tile but the robber's is shielded the robber stays and
+     * nobody is robbed. A roll of 7 then owes no robber move (after the
+     * discards, which still happen, the prompt is the roller's play_turn),
+     * and a knight is played without a robber prompt (it leaves the hand,
+     * counts for Largest Army and uses the turn's development card). A
+     * knight's robber is judged on the points after the knight's Largest
+     * Army award, like any other: the shields always read the current
+     * public points, so the legal set holds no hidden information.
+     */
     [[nodiscard]] bool friendly_robber() const noexcept { return friendly_robber_; }
     /**
-     * Under the friendly robber, at the robber prompt of a knight that took
-     * Largest Army from another seat: that seat (unset otherwise, and once the
-     * robber has moved). OpenHex places a knight's robber before it awards
-     * Largest Army, so that seat's tiles are shielded on its points before
-     * the award (2 more than it shows now).
+     * No longer part of the rules: play never sets it, and nothing reads it.
+     * OpenHex used to judge a knight's robber on the points before the
+     * knight's Largest Army award, and this named the seat the knight took
+     * the award from, whose tiles counted 2 more points. The shields now read
+     * the points after the award. Always unset, also after apply_setup with
+     * GameSetup::largest_army_taken_from (accepted so saved positions load).
      */
     [[nodiscard]] std::optional<int> largest_army_taken_from() const noexcept {
         return largest_army_taken_from_;
@@ -239,6 +254,12 @@ private:
         const Action& action,
         std::optional<Resource> replay_stolen_resource);
     void apply_play_knight(const Action& action);
+    /** Friendly robber: whether a player with at most 2 public points has a building on `tile`. */
+    [[nodiscard]] bool robber_tile_shielded(const Tile& tile) const;
+    /** Whether the robber has a tile to go to: always, unless the friendly robber shields them all. */
+    [[nodiscard]] bool robber_can_move() const;
+    /** After a 7's discards or a knight: the robber prompt, or play_turn when the robber cannot move. */
+    void prompt_robber_move();
     void apply_play_year_of_plenty(const Action& action);
     void apply_play_monopoly(const Action& action);
     void apply_play_road_building(const Action& action);

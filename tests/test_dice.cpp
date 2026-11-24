@@ -93,7 +93,7 @@ void test_hand_computed_odds() {
     require_probability(other[5], 231, 1731, "the other seat's 7");
     require_probability(other[0], 50, 1731, "the other seat's 2");
     require_probability(other[4], 250, 1731, "the other seat's 6");
-    // The streak's owner rolling again (not a turn order a game produces): x 3/5.
+    // The streak's owner rolling again (as it does once the other seat has rolled no 7): x 3/5.
     require_probability(dice.sum_probabilities(0)[5], 99, 1599, "the owner's 7");
 
     // Imbalance once every seat could have a 7: seat 0 holds 3 of 4.
@@ -160,21 +160,96 @@ void test_the_deck_refills_lazily_and_keeps_its_history() {
     for (int draw = 0; draw < 23; ++draw) {
         dice.apply(dice.draw(rng, draw % 2), draw % 2);
     }
-    require(dice.remaining() == 13 && dice.drawable() == BalancedDice::kFullDeck,
-            "23 draws leave 13 cards, and the next draw refills");
+    // 13 cards: the draw takes from them, with no refill.
+    const Dice gone = BalancedDice::card_of_bit(std::countr_zero(~dice.deck & BalancedDice::kFullDeck));
+    require(dice.remaining() == 13 && dice.drawable() == dice.deck && !dice.can_draw(gone),
+            "23 draws leave 13 cards, which the next draw takes from");
+    {
+        const std::array<int, 11> left = dice.counts();
+        require(std::accumulate(left.begin(), left.end(), 0) == 13, "the odds count the 13 cards");
+        BalancedDice refused = dice;
+        require_invalid([&] { refused.apply(gone, 1); }, "a card drawn from the deck of 36 is not among the 13");
+        require(refused == dice, "a refused card changes nothing");
+        const std::uint64_t thirteen = dice.deck;
+        for (int sample = 0; sample < 200; ++sample) {
+            require((thirteen >> static_cast<unsigned>(BalancedDice::card_bit(dice.draw(rng, 1))) & 1U) != 0,
+                    "a draw from 13 cards is one of them");
+        }
+    }
+    dice.apply(dice.draw(rng, 1), 1);
+    // 12 cards: fewer than 13, so the next draw refills first.
+    require(dice.remaining() == 12 && dice.drawable() == BalancedDice::kFullDeck &&
+                dice.counts() == kWays,
+            "24 draws leave 12 cards, and the next draw refills");
     const BalancedDice before = dice;
     const Dice card = BalancedDice::card_of_bit(std::countr_zero(~dice.deck & BalancedDice::kFullDeck));
     require(dice.can_draw(card), "a card drawn before the refill can be drawn again");
-    dice.apply(card, 1);
+    dice.apply(card, 0);
     require(dice.remaining() == 35, "refilled, then one card drawn");
     require(dice.sevens == before.sevens && dice.recent[3] == before.recent[4],
             "the history survives the refill");
     // A card drawn since the refill is refused, and nothing changes.
     const BalancedDice snapshot = dice;
-    require_invalid([&] { dice.apply(card, 0); }, "a drawn card must be refused");
+    require_invalid([&] { dice.apply(card, 1); }, "a drawn card must be refused");
     require_invalid([&] { dice.apply(Dice{0, 7}, 0); }, "faces outside [1, 6] must be refused");
     require_invalid([&] { dice.apply(Dice{1, 1}, 2); }, "a roller must be a seat");
     require(dice == snapshot, "a refused card changes nothing");
+}
+
+/**
+ * Only a 7 moves the streak: its owner's extends it, another seat's takes it
+ * over at 1, and every other total leaves owner and count as they are.
+ */
+void test_the_streak_stands_until_another_seat_rolls_a_seven() {
+    const auto streak = [](const BalancedDice& dice) {
+        return std::pair<int, int>{dice.streak_player, dice.streak_count};
+    };
+    BalancedDice dice = BalancedDice::fresh(2);
+    dice.apply(Dice{1, 1}, 0);
+    require(streak(dice) == std::pair<int, int>{-1, 0}, "no 7 yet: no streak");
+    dice.apply(Dice{3, 4}, 1);
+    require(streak(dice) == std::pair<int, int>{1, 1}, "seat 1's 7 starts a streak");
+    // Totals other than 7, by either seat, leave it standing.
+    dice.apply(Dice{2, 2}, 0);
+    dice.apply(Dice{5, 5}, 1);
+    dice.apply(Dice{6, 6}, 0);
+    require(streak(dice) == std::pair<int, int>{1, 1} && dice.sevens == std::array<int, 6>{0, 1},
+            "a non-7 leaves the streak as it is");
+    // It still weighs on the 7: x 7/5 for the other seat, x 3/5 for its owner
+    // (one 7 so far, fewer than the seats: no imbalance term).
+    require(dice.seven_multiplier(0) == std::pair<std::int64_t, std::int64_t>{7, 5} &&
+                dice.seven_multiplier(1) == std::pair<std::int64_t, std::int64_t>{3, 5},
+            "the standing streak moves the 7's weight");
+    // The window is 7, 4, 10, 12 and 35 - 4 = 31 cards are left, 5 of them 7s:
+    // seat 0's 7 weighs 5 * 33 * 7 against 5 * 33 * 5 unweighted.
+    {
+        const auto weights = dice.sum_weights(0);
+        const auto plain = dice.sum_weights(-1);
+        require(weights[5] * plain[0] * 5 == plain[5] * weights[0] * 7, "x 7/5 on the 7 alone");
+    }
+    // The owner's next 7 extends it, across the other seat's rolls.
+    dice.apply(Dice{1, 6}, 1);
+    require(streak(dice) == std::pair<int, int>{1, 2}, "the owner's 7 extends the streak");
+    dice.apply(Dice{1, 2}, 0);
+    require(streak(dice) == std::pair<int, int>{1, 2}, "and it stands again");
+    // Another seat's 7 takes it over, at 1.
+    dice.apply(Dice{2, 5}, 0);
+    require(streak(dice) == std::pair<int, int>{0, 1} && dice.sevens == std::array<int, 6>{1, 2},
+            "another seat's 7 starts a new streak of 1");
+    // Three seats: the third seat's 7 takes it from seat 0 the same way.
+    BalancedDice three = BalancedDice::fresh(3);
+    three.apply(Dice{3, 4}, 0);
+    three.apply(Dice{1, 1}, 1);
+    three.apply(Dice{4, 3}, 2);
+    require(streak(three) == std::pair<int, int>{2, 1}, "taken over by the third seat");
+    three.apply(Dice{2, 2}, 0);
+    three.apply(Dice{1, 3}, 1);
+    three.apply(Dice{6, 1}, 2);
+    require(streak(three) == std::pair<int, int>{2, 2}, "and extended a round later");
+    // Without a roller nothing is tracked.
+    BalancedDice untracked = BalancedDice::fresh(2);
+    untracked.apply(Dice{3, 4}, -1);
+    require(streak(untracked) == std::pair<int, int>{-1, 0}, "no roller, no streak");
 }
 
 /**
@@ -235,10 +310,11 @@ void test_long_run_frequencies_and_seven_balance() {
         }
         previous_seven = total == 7;
     }
-    // Simulated with the exact reference (200k rolls): .0301 .0594 .0853 .1108 .1340 .1587
-    // .1348 .1113 .0860 .0591 .0305.
-    const std::array<double, 11> expected{.0301, .0594, .0853, .1108, .1340, .1587,
-                                          .1348, .1113, .0860, .0591, .0305};
+    // Simulated with OpenHex's own dice.py (two seats alternating, three runs of 200k
+    // rolls): .0308 .0592 .0859 .1109 .1348 .1559 .1352 .1114 .0864 .0590 .0305, a 7
+    // after a 7 .140 to .143, and no 7 possible on .021 to .022 of the rolls.
+    const std::array<double, 11> expected{.0308, .0592, .0859, .1109, .1348, .1559,
+                                          .1352, .1114, .0864, .0590, .0305};
     for (std::size_t i = 0; i < 11; ++i) {
         const double frequency = totals[i] / static_cast<double>(kDraws);
         require(std::abs(frequency - expected[i]) < 0.004,
@@ -246,9 +322,9 @@ void test_long_run_frequencies_and_seven_balance() {
         require(std::abs(frequency - kWays[i] / 36.0) < 0.012, "close to 2d6");
     }
     const double repeat = sevens_after_seven / static_cast<double>(after_seven);
-    require(std::abs(repeat - 0.128) < 0.01, "P(7 after a 7) " + std::to_string(repeat));
+    require(std::abs(repeat - 0.141) < 0.01, "P(7 after a 7) " + std::to_string(repeat));
     const double blocked = no_seven_possible / static_cast<double>(kDraws);
-    require(blocked > 0.005 && blocked < 0.02, "P(no 7 possible) " + std::to_string(blocked));
+    require(blocked > 0.015 && blocked < 0.03, "P(no 7 possible) " + std::to_string(blocked));
 
     // Over a game's worth of rolls the seats' 7s stay closer than with fair dice.
     const double balanced_gap = mean_seven_gap(true, 4000, 60, 7);
@@ -457,7 +533,7 @@ void test_the_main_phase_starts_on_a_full_deck() {
                 "the refill changes the 7's odds here");
     }
 
-    // Declared in the main phase, a partial deck stays (no refill before 13 left).
+    // Declared in the main phase, a partial deck stays (no refill while 13 or more are left).
     GameSetup main_setup;
     main_setup.players.resize(2);
     Game placed(seats(2), MapType::base, 6, balanced_rules());
@@ -609,6 +685,7 @@ int main() {
         test_a_fresh_deck_is_two_fair_dice();
         test_hand_computed_odds();
         test_the_deck_refills_lazily_and_keeps_its_history();
+        test_the_streak_stands_until_another_seat_rolls_a_seven();
         test_long_run_frequencies_and_seven_balance();
         test_random_dice_ignore_the_state();
         test_balanced_games_draw_from_the_state();

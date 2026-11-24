@@ -272,8 +272,9 @@ void Game::apply_setup(const GameSetup& setup) {
         resolve_award(setup.longest_road, road_lengths, 5, 1, "Longest Road");
     const auto army_holder = resolve_award(setup.largest_army, knights, 3, 3, "Largest Army");
     if (setup.largest_army_taken_from.has_value()) {
-        // The knight just played took the award: its former holder trails
-        // the current player by that one knight.
+        // (No longer read, but still checked, so a saved position is held to
+        // what it always was.) The knight just played took the award: its
+        // former holder trails the current player by that one knight.
         const int loser = *setup.largest_army_taken_from;
         if (loser < 0 || loser >= n || loser == setup.current_player ||
             army_holder != setup.current_player ||
@@ -358,7 +359,9 @@ void Game::apply_setup(const GameSetup& setup) {
     completed_turns_ = setup.completed_turns;
     is_discarding_ = prompt == ActionPrompt::discard;
     is_moving_knight_ = prompt == ActionPrompt::move_robber;
-    largest_army_taken_from_ = setup.largest_army_taken_from;
+    // (setup.largest_army_taken_from was checked above and is dropped: the
+    // friendly robber's shields read the points after the award.)
+    largest_army_taken_from_.reset();
     is_road_building_ = setup.free_roads > 0;
     free_roads_available_ = setup.free_roads;
     if (initial) {
@@ -369,6 +372,11 @@ void Game::apply_setup(const GameSetup& setup) {
         num_turns_ = setup.completed_turns + 2 * (n - 1);
     }
     playable_actions_ = generate_playable_actions();
+    if (prompt == ActionPrompt::move_robber && playable_actions_.empty()) {
+        throw std::invalid_argument(
+            "the robber has no tile to move to (the friendly robber shields them all): no "
+            "robber move is owed, so the prompt is play_turn");
+    }
 }
 
 }  // namespace cppanatron

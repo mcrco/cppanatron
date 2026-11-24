@@ -16,7 +16,8 @@ namespace cppanatron {
  * A deck of 36 cards, one per ordered pair of faces. A roll by `roller`
  * (the turn owner):
  *
- *  1. If at most 13 cards remain, the deck is first refilled to all 36. Only
+ *  1. If fewer than 13 cards remain, the deck is first refilled to all 36:
+ *     a draw can take from a deck of 13, and the one after it refills. Only
  *     the deck resets: the window, the sevens and the streak carry over. A
  *     game starts with a full deck and no history, and the deck is refilled
  *     again when the main phase starts (as OpenHex does; it matters only for
@@ -30,10 +31,15 @@ namespace cppanatron {
  *     once the 7s rolled so far S >= n seats (s the roller's), else 1.
  *  4. The total is k with probability w_k / sum(w), and the card is uniform
  *     among that total's cards left. (All-zero weights would draw a card
- *     uniformly; at least 14 cards span three totals, which rules it out.)
- *  5. The card leaves the deck, the total joins the window (dropping the
- *     oldest of six), a 7 counts for the roller and extends its streak or
- *     starts a new one of 1, and any other total ends the streak.
+ *     uniformly. No game reaches them: the window zeroes at most one total
+ *     and the multiplier only the 7, and two totals hold at most 11 cards,
+ *     so the 13 or more a draw takes from always span a third.)
+ *  5. The card leaves the deck and the total joins the window (dropping the
+ *     oldest of six). Only a 7 moves the streak: it counts for the roller
+ *     and extends the roller's streak, or starts a new one of 1 when the
+ *     streak is another seat's (or there is none). Any other total leaves
+ *     the streak as it is, owner and count, so a streak ends only by passing
+ *     to another seat.
  *
  * A card's chance depends only on its total, so the cards per total, the
  * window, the sevens and the streak decide every future total; the faces
@@ -43,7 +49,10 @@ namespace cppanatron {
 struct BalancedDice {
     static constexpr int kMaxSeats = 6;
     static constexpr int kWindow = 5;
-    /** A draw first refills the deck when at most this many cards remain. */
+    /**
+     * A draw first refills the deck when fewer than this many cards remain
+     * (OpenHex's RESHUFFLE_THRESHOLD): the smallest deck a draw takes from.
+     */
     static constexpr int kReshuffleAt = 13;
     static constexpr std::uint64_t kFullDeck = (std::uint64_t{1} << 36U) - 1U;
 
@@ -56,7 +65,11 @@ struct BalancedDice {
     int seats{2};
     /** 7s rolled per seat. */
     std::array<int, kMaxSeats> sevens{};
-    /** The seat owning the current run of 7s, -1 for none, and its length (0 for none). */
+    /**
+     * The seat that rolled the latest 7, -1 before the first, and how many 7s
+     * it has rolled since another seat last rolled one (0 before the first):
+     * totals other than 7 do not interrupt the run.
+     */
     int streak_player{-1};
     int streak_count{};
 

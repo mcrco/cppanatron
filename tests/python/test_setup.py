@@ -433,18 +433,14 @@ def test_every_prompt_of_random_games_round_trips(num_players, map_name, rules_k
 
 def openhex_robber_tiles(game: cpp.Game, points: list[int]) -> set[tuple]:
     """OpenHex's friendly robber from public state alone (open-hex engine.py
-    _validate_robber_placement): a tile is shielded when an opponent of the mover
-    with at most 2 of ``points`` has a building on it; shielded tiles are off
-    limits unless every tile but the robber's is shielded."""
+    _validate_robber_placement, _friendly_robber_shields): a tile is shielded when
+    any seat with at most 2 of ``points`` has a building on it, the mover included;
+    the other tiles are open (none: no robber move is owed)."""
     owner = {node: seat for seat, player in enumerate(game.players)
              for node in [*player.settlements, *player.cities]}
-    mover = game.current_player_index
     tiles = game.board.map.land_tiles
-    candidates = {c for c in tiles if c != game.board.robber_coordinate}
-    open_tiles = {c for c in candidates
-                  if not any(owner.get(node, mover) != mover and points[owner[node]] <= 2
-                             for node in tiles[c].nodes)}
-    return open_tiles or candidates
+    return {c for c in tiles if c != game.board.robber_coordinate
+            and not any(node in owner and points[owner[node]] <= 2 for node in tiles[c].nodes)}
 
 
 def robber_tiles(game: cpp.Game) -> set[tuple]:
@@ -454,10 +450,12 @@ def robber_tiles(game: cpp.Game) -> set[tuple]:
 def test_openhex_1v1_a_knight_takes_largest_army_on_balanced_dice():
     """Both of OpenHex's 1v1 rules at once. Red plays its fourth knight and takes
     Largest Army from Blue, who shows its two settlements and the award: 4 public
-    points before the award, 2 after. OpenHex validates the knight's tile on the
-    points before the award, so Blue shields nothing. The knight leaves the
-    balanced deck as it was; a declared copy (dice and the record), a world dealt
-    from Red's tracker and searches at the prompt all keep both states."""
+    points before the award, 2 after. OpenHex judges the knight's tile on the
+    points after the award, so Blue's tiles are shielded (Red, at 4, shields
+    nothing). The knight leaves the balanced deck as it was; a declared copy, a
+    world dealt from Red's tracker and searches at the prompt all keep both states.
+    largest_army_taken_from, the record of the earlier rule (points before the
+    award), is never set and a declared one is ignored."""
     rules = cpp.GameRules(**OPENHEX_1V1)
     placed = cpp.Game(2, seed=37, rules=rules)
     rng = random.Random(37)
@@ -485,34 +483,38 @@ def test_openhex_1v1_a_knight_takes_largest_army_on_balanced_dice():
     tracker.observe(previous, knight, game)
     now = [player.victory_points for player in game.players]
     assert game.current_prompt == cpp.ActionPrompt.MOVE_ROBBER
-    assert game.player(0).has_army and now[1] == 2 and game.largest_army_taken_from == 1
+    assert game.player(0).has_army and now == [4, 2] and game.largest_army_taken_from is None
     assert game.balanced_dice == dice
     tiles = robber_tiles(game)
-    assert tiles == openhex_robber_tiles(game, before), "on the points before the award"
-    opened = tiles - openhex_robber_tiles(game, now)
-    assert opened, "the points after the award would shield Blue's tiles"
+    assert tiles == openhex_robber_tiles(game, now), "on the points after the award"
+    shielded = openhex_robber_tiles(game, before) - tiles
+    assert shielded, "the points before the award would open Blue's tiles"
+    assert all(a.value[1] is None for a in game.playable_actions), "Blue cannot be robbed"
 
-    # A declared copy carries both states; without the record, the shields read the
-    # points as declared (as after a seven).
+    # A declared copy carries both states; the old record is checked and ignored.
     players, options = declare_everything(game)
     declared = cpp.Game(2, seed=99, rules=rules)
     declared.apply_setup(players, **options)
     assert state(declared) == state(game)
-    seven = cpp.Game(2, seed=99, rules=rules)
-    seven.apply_setup(players, **{**options, "largest_army_taken_from": None})
-    assert robber_tiles(seven) == openhex_robber_tiles(seven, now) == tiles - opened
-    assert seven.balanced_dice == dice
+    recorded = cpp.Game(2, seed=99, rules=rules)
+    recorded.apply_setup(players, **{**options, "largest_army_taken_from": 1})
+    assert recorded.largest_army_taken_from is None and state(recorded) == state(game)
+    assert robber_tiles(recorded) == tiles and recorded.balanced_dice == dice
 
     world = cpp.sample_world(game, tracker, seed=3)
-    assert world.largest_army_taken_from == 1 and world.balanced_dice == dice
+    assert world.largest_army_taken_from is None and world.balanced_dice == dice
     assert world.playable_actions == game.playable_actions
 
-    # Searches at the prompt: a move only the record opens is searched, every visit
-    # is legal, every leaf plays both rules, and a search repeats exactly.
+    # Searches at the prompt: every visit is legal (no shielded tile), every leaf
+    # plays both rules, and a search repeats exactly.
     codec = cpp.FlatActionCodec(2, cpp.MapType.BASE)
     encoder = cpp.FlatObservationEncoder(2, observation_layout())
-    target = codec.index(game, next(a for a in game.playable_actions if a.value[0] in opened))
+    target = codec.index(game, game.playable_actions[-1])
     legal = codec.mask(game).astype(bool)
+    normal = cpp.Game(2, seed=99, rules=cpp.GameRules(**{**OPENHEX_1V1, "friendly_robber": False}))
+    normal.apply_setup(players, **options)
+    blocked = [codec.index(normal, a) for a in normal.playable_actions if a.value[0] in shielded]
+    assert blocked and not legal[blocked].any()
 
     def search(config: cpp.SearchConfig) -> np.ndarray:
         pool = cpp.SearchPool(codec, encoder, config)

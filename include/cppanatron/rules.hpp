@@ -24,7 +24,11 @@ struct GameRules {
     int victory_points_to_win{10};
     int discard_limit{7};
     bool friendly_robber{false};
-    /** Starting bank, ordered WOOD, BRICK, SHEEP, WHEAT, ORE. */
+    /**
+     * Starting bank, ordered WOOD, BRICK, SHEEP, WHEAT, ORE. A roll the bank
+     * cannot pay in full is settled per resource: a sole claimant takes what
+     * is left, several claimants get nothing (OpenHex's rule).
+     */
     std::array<int, 5> resource_bank{19, 19, 19, 19, 19};
     /**
      * Starting deck in DevelopmentCard order: knight, year of plenty,

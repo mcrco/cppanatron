@@ -63,13 +63,18 @@ enum class InfoLevel : std::uint8_t { private_, public_, full };
  *                         due) / the full deck's cards of t
  *   dice_recent_<t>[11]   min(times t is among the last five totals / 3, 1)
  *                         (three zero its weight)
- *   dice_draws_left       (cards in drawable() - 13) / 23: the draws before
- *                         the next refill, 1 on a full deck
+ *   dice_draws_left       (cards in drawable() - 13) / 23: the draws the deck
+ *                         still gives after the next one, 1 on a full deck
+ *                         and 0 on a deck of 13, the last draw before a
+ *                         refill (the formula predates that draw: it read
+ *                         1/23 at its lowest, on 14 cards, and reads the
+ *                         same as before on every deck of 14 or more)
  *   dice_sevens_<k>[P]    min(seat k's sevens so far / 10, 1)
  *   dice_seven_share_<k>[P]  seat k's sevens / all sevens so far (0 before the
  *                         first): what the imbalance term reads
  *   dice_streak_<k>[P]    min(length of the current run of sevens / 5, 1) in
- *                         its owner's slot, else 0
+ *                         its owner's slot, else 0 (the run stands through
+ *                         other totals, until another seat rolls a 7)
  *  Under random dice these are the features of a fresh balanced state (the
  *  fair odds, a full deck, no history) at every roll: a deck that never ages.
  *

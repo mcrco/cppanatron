@@ -1233,10 +1233,12 @@ ROLLOUTS = {
         [cpp.Scenario(num_players=4, rules=cpp.GameRules(vps_to_win=6), turn_limit=120)],
         num_envs=6, seed=13, trackers=True, vp_reward=0.5, critic_level=cpp.InfoLevel.FULL),
 }
-#: Recorded with the engine at e8edef9, before the style counters.
+#: Recorded with the engine at e8edef9, before the style counters. The friendly robber
+#: and balanced dice row was recorded again (rollout_digest of its ROLLOUTS entry) when
+#: both rules followed OpenHex's of 2026-11-22, which changes how such a game plays.
 GOLDEN_ROLLOUTS = {
     "2p friendly robber, balanced dice":
-        "3284b33d25f346c7672646abb8d069ec68efa67d22cd8fc4eb77bab7fcd3eaec",
+        "433c42696ffbd2418df9aa1dc54308952f04fc52fab56d44a01f3bd3972ac789",
     "3p against F and R": "b04e9282a4de50a1e672b0a75e1b798c43b58ca1b7ae4310184445e910652318",
     "4p with trackers and shaping":
         "4fdcf296fa6d7b8b4488ef101a114f6ab90da70f0136f213ee294abfc37f36d7",

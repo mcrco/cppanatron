@@ -450,8 +450,8 @@ def test_dice_state_features_are_the_balanced_dice_as_the_header_says(num_player
                 seen["moved"] += not np.allclose(game.roll_probabilities(0), FAIR)
                 seen["streak"] += dice.streak_count >= 2
                 seen["window2"] += max(list(dice.recent).count(t) for t in TOTALS) >= 2 if dice.recent else 0
-                seen["refill"] += dice.remaining <= 13
-                seen["aged"] += 13 < dice.remaining < 36
+                seen["refill"] += dice.remaining < 13
+                seen["aged"] += 13 <= dice.remaining < 36
                 seen["sevens"] += sum(dice.sevens) > 0
     assert seen["tiles"] > 1000
     if balanced:

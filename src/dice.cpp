@@ -91,7 +91,7 @@ int BalancedDice::remaining() const noexcept {
 }
 
 std::uint64_t BalancedDice::drawable() const noexcept {
-    return remaining() <= kReshuffleAt ? kFullDeck : deck;
+    return remaining() < kReshuffleAt ? kFullDeck : deck;
 }
 
 std::array<int, 11> BalancedDice::counts() const noexcept {
@@ -220,10 +220,8 @@ void BalancedDice::apply(Dice dice, int roller) {
             streak_player = roller;
             streak_count = 1;
         }
-    } else {
-        streak_player = -1;
-        streak_count = 0;
     }
+    // (Any other total leaves the streak standing.)
 }
 
 }  // namespace cppanatron

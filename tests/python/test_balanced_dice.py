@@ -66,6 +66,36 @@ def test_the_state_by_hand():
     assert copy == after and copy is not after
 
 
+def test_the_deck_refills_below_thirteen_cards():
+    """OpenHex refills before a draw when fewer than 13 cards remain: a draw is
+    taken from a deck of 13, and the next one from all 36."""
+    dice = cpp.BalancedDice.fresh(2)
+    rng = random.Random(8)
+    while dice.remaining > 13:
+        total = rng.choice([k for k, count in zip(range(2, 13), dice.counts) if count])
+        dice = dice.apply(dice.card_for_total(total), None)
+    assert dice.remaining == 13 and dice.drawable == dice.deck
+    gone = next(card for card in cpp.BalancedDice.fresh(2).deck if card not in dice.deck)
+    assert not dice.can_draw(gone)
+    with pytest.raises(ValueError, match="not in the balanced deck"):
+        dice.apply(gone, None)
+    dice = dice.apply(dice.deck[0], None)
+    assert dice.remaining == 12 and len(dice.drawable) == 36 and dice.can_draw(gone)
+    assert dice.apply(gone, None).remaining == 35
+
+
+def test_only_a_seven_moves_the_streak():
+    dice = cpp.BalancedDice.fresh(2).apply((3, 4), 0)
+    assert (dice.streak_player, dice.streak_count) == (0, 1)
+    dice = dice.apply((2, 2), 1).apply((6, 6), 0)
+    assert (dice.streak_player, dice.streak_count) == (0, 1), "other totals leave it"
+    dice = dice.apply((1, 6), 0)
+    assert (dice.streak_player, dice.streak_count) == (0, 2), "its owner's 7 extends it"
+    dice = dice.apply((5, 5), 1).apply((2, 5), 1)
+    assert (dice.streak_player, dice.streak_count) == (1, 1), "another seat's 7 starts a new one"
+    assert dice.sevens == (2, 1)
+
+
 @pytest.mark.parametrize("kwargs", [
     {"sevens": ()},
     {"sevens": (0,) * 7},

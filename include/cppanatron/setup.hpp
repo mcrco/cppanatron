@@ -63,8 +63,9 @@ struct PlayerSetup {
  *                             while a road building card is being played
  *   discard                   after a 7: `acting_player` is the first seat
  *                             (in seat order) with `discards` left
- *   move_robber               after a 7 (rolled) or a knight (and see
- *                             largest_army_taken_from)
+ *   move_robber               after a 7 (rolled) or a knight; refused when the
+ *                             friendly robber shields every tile but the
+ *                             robber's (no move is owed: declare play_turn)
  *   build_initial_settlement  the initial placement, its state read from the
  *   build_initial_road        pieces: the seats placed so far in snake order,
  *                             the last of a seat's settlements being its newest
@@ -112,10 +113,14 @@ struct GameSetup {
      */
     std::optional<BalancedDice> dice;
     /**
-     * Under the friendly robber, at move_robber after a knight that took
-     * Largest Army: the seat it took the award from, whose tiles are then
-     * shielded on its points before the award (Game::largest_army_taken_from).
-     * Unset: the shields read the points as declared, as after a seven.
+     * No longer part of the rules; kept so that saved positions load. It
+     * named, under the friendly robber at move_robber after a knight that
+     * took Largest Army, the seat the award was taken from, whose tiles were
+     * shielded on its points before the award. It is checked as before
+     * (std::invalid_argument for a seat the knight cannot have taken the
+     * award from, or outside that prompt) and then ignored: the shields read
+     * the points as declared, after the award, and
+     * Game::largest_army_taken_from stays unset.
      */
     std::optional<int> largest_army_taken_from;
 };

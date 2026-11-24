@@ -154,13 +154,15 @@ void bind_game(nb::module_& module) {
     nb::class_<BalancedDice>(
         module, "BalancedDice",
         "OpenHex's balanced dice between two rolls; all of it is public.\n\n"
-        "A 36-card deck of (die1, die2) pairs, refilled before a draw when at most 13\n"
-        "cards remain (only the deck resets). Total k weighs (cards of k left) *\n"
+        "A 36-card deck of (die1, die2) pairs, refilled before a draw when fewer than\n"
+        "13 cards remain (only the deck resets). Total k weighs (cards of k left) *\n"
         "max(0, 1 - 0.34 * its appearances among the last five totals); with two or\n"
         "more seats the 7's weight is multiplied by clamp(imbalance + streak, 0, 2):\n"
         "streak 0.4 per 7 in the current run of 7s, negative if the roller owns it;\n"
         "imbalance 1 + (1/n - share of the 7s the roller rolled) * n once the 7s so\n"
-        "far reach the n seats, else 1. The card is uniform within its total.\n"
+        "far reach the n seats, else 1. The run of 7s is one seat's: a 7 by its owner\n"
+        "extends it, a 7 by another seat starts a new run of 1, and other totals\n"
+        "leave it as it is. The card is uniform within its total.\n"
         "Seats index turn order; a roller of None applies no seven balancing.")
         .def(
             "__init__",
@@ -204,8 +206,9 @@ void bind_game(nb::module_& module) {
             nb::arg("streak_count") = 0,
             "``sevens``: 7s rolled per seat (one entry per seat). ``deck``: the (die1,\n"
             "die2) cards left (default all 36). ``recent``: the last five totals or\n"
-            "fewer, oldest first. ``streak_player``/``streak_count``: the seat owning\n"
-            "the current run of 7s and its length (None and 0 for none).")
+            "fewer, oldest first. ``streak_player``/``streak_count``: the seat that\n"
+            "rolled the latest 7 and how many it has rolled since another seat's last\n"
+            "(None and 0 before the first 7).")
         .def_static(
             "fresh", &BalancedDice::fresh, nb::arg("seats"),
             "The state at the start of the main phase: a full deck, no history.")
@@ -319,7 +322,13 @@ void bind_game(nb::module_& module) {
     nb::class_<GameRules>(
         module, "GameRules",
         "Rule settings: scoring, discards, the robber, and the bank, deck and pieces.\n"
-        "Defaults are the base game's. Counts follow Resource and DevelopmentCard order.")
+        "Defaults are the base game's. Counts follow Resource and DevelopmentCard order.\n\n"
+        "``friendly_robber`` is OpenHex's: the robber may not move to a tile where any\n"
+        "player with at most 2 public victory points has a building, the mover\n"
+        "included. When that leaves no tile but the robber's own, the robber stays and\n"
+        "nobody is robbed: a 7 goes (after the discards) straight to the roller's\n"
+        "PLAY_TURN, and a knight is played with no MOVE_ROBBER prompt. A knight's\n"
+        "robber reads the points after the knight's Largest Army award.")
         .def(
             "__init__",
             [](GameRules* self, int vps_to_win, int discard_limit, bool friendly_robber,
@@ -353,7 +362,9 @@ void bind_game(nb::module_& module) {
         .def_ro("friendly_robber", &GameRules::friendly_robber)
         .def_prop_ro(
             "resource_bank", [](const GameRules& rules) { return to_tuple(rules.resource_bank); },
-            "Starting bank ordered WOOD, BRICK, SHEEP, WHEAT, ORE.")
+            "Starting bank ordered WOOD, BRICK, SHEEP, WHEAT, ORE. A roll the bank cannot\n"
+            "pay in full is settled per resource: a player claiming it alone takes what is\n"
+            "left, several claimants get nothing (OpenHex's rule).")
         .def_prop_ro(
             "development_deck",
             [](const GameRules& rules) { return to_tuple(rules.development_deck); },
@@ -681,9 +692,8 @@ void bind_game(nb::module_& module) {
         .def_prop_ro("friendly_robber", &Game::friendly_robber)
         .def_prop_ro(
             "largest_army_taken_from", &Game::largest_army_taken_from,
-            "Under the friendly robber, at the robber prompt of a knight that took\n"
-            "Largest Army: the seat it took it from, shielded on its points before\n"
-            "the award (OpenHex places a knight's robber first). None otherwise.")
+            "Always None: no longer part of the rules (the friendly robber reads the\n"
+            "points after a knight's Largest Army award). Kept so callers keep loading.")
         .def_prop_ro("rules", &Game::rules, nb::rv_policy::copy)
         .def_prop_ro("dice_mode", &Game::dice_mode)
         .def_prop_ro(
@@ -824,7 +834,8 @@ void bind_game(nb::module_& module) {
             "``current_player``'s turn, before or after the roll, at ``prompt``:\n"
             "PLAY_TURN (``free_roads`` 1 or 2 while a road building card is played),\n"
             "DISCARD (``acting_player`` is the first seat, in seat order, with\n"
-            "``discards`` left), MOVE_ROBBER (after a 7 or a knight), or the initial\n"
+            "``discards`` left), MOVE_ROBBER (after a 7 or a knight; refused when the\n"
+            "friendly robber shields every tile but the robber's), or the initial\n"
             "placement (BUILD_INITIAL_SETTLEMENT/ROAD, its progress read from the\n"
             "pieces in snake order, each seat's newest settlement last).\n"
             "``longest_road_length`` is the length Longest Road was won with\n"
@@ -833,9 +844,9 @@ void bind_game(nb::module_& module) {
             "declared during the initial placement, its deck is refilled when the main\n"
             "phase starts, as OpenHex does).\n"
             "``largest_army_taken_from`` (friendly robber, MOVE_ROBBER after a knight\n"
-            "that took Largest Army) is the seat it took it from; see\n"
-            "Game.largest_army_taken_from. Raises ValueError for positions the rules\n"
-            "cannot produce.")
+            "that took Largest Army: the seat it took it from) is no longer part of the\n"
+            "rules: it is checked as before, so saved positions load, and then ignored.\n"
+            "Raises ValueError for positions the rules cannot produce.")
         .def(
             "determinize_development_cards",
             [](Game& game, const PlayerRef& player, const std::array<int, 5>& cards,

@@ -156,7 +156,7 @@ void bind_graph(nb::module_& module) {
         "action space's mask for the seat to act and the no-op for the others.\n"
         "``dice_state=True`` appends the balanced dice state (the ``dice_*`` features:\n"
         "each seat's next-roll odds, the deck, the window of recent totals, the\n"
-        "draws before the refill, the sevens and their streak) to the global block\n"
+        "draws left in the deck, the sevens and their streak) to the global block\n"
         "and each tile's view of its own number to the tiles block; under RANDOM\n"
         "dice they are a fresh state's. Off, rows are as they always were.")
         .def(nb::init<EncoderDims, InfoLevel, bool>(), nb::arg("dims"),

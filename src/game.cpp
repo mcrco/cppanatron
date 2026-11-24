@@ -335,36 +335,17 @@ std::vector<Action> Game::generate_playable_actions() const {
             if (!friendly_robber_) {
                 return unfiltered;
             }
-            // OpenHex's friendly robber: a tile is shielded when an opponent
-            // of the mover with at most 2 public points (buildings and
-            // awards; never hidden victory point cards) has a building on
-            // it. Shielded tiles are illegal unless every candidate tile is
-            // shielded; then all are legal. Public points keep the legal
-            // set free of hidden information. A knight's robber is placed
-            // on the points before the knight's Largest Army award (OpenHex
-            // validates the knight's tile, then awards), so a seat the knight
-            // took the award from still counts its 2 points.
-            const auto public_points = [&](Color owner) {
-                const int points = player(owner).victory_points;
-                return largest_army_taken_from_ == player_index(owner) ? points + 2 : points;
-            };
+            // OpenHex's friendly robber: shielded tiles are illegal, with no
+            // fallback. (The engine opens this prompt only when a tile is
+            // open, see robber_can_move; a declared position where none is
+            // has no action here, which apply_setup refuses.)
             for (const Action& action : unfiltered) {
                 const RobberMove& move = std::get<RobberMove>(action.value);
-                const Tile& tile = board_.map().tile_at(move.coordinate);
-                const bool shielded = std::any_of(
-                    tile.nodes.begin(),
-                    tile.nodes.end(),
-                    [&](int node) {
-                        const auto building = board_.buildings().find(node);
-                        return building != board_.buildings().end() &&
-                               building->second.color != color &&
-                               public_points(building->second.color) <= 2;
-                    });
-                if (!shielded) {
+                if (!robber_tile_shielded(board_.map().tile_at(move.coordinate))) {
                     result.push_back(action);
                 }
             }
-            return result.empty() ? unfiltered : result;
+            return result;
         }
         return result;
     }
@@ -788,9 +769,21 @@ void Game::yield_resources(int number) {
             totals[resource] += count;
         }
     }
+    // A short bank (OpenHex's rule): a resource the bank cannot pay in full
+    // goes to nobody when several players claim it; a sole claimant, however
+    // many buildings its claim comes from, takes what is left. Each resource
+    // is judged over every claim on it, so the bank never goes negative.
     for (std::size_t resource = 0; resource < totals.size(); ++resource) {
         if (totals[resource] > resource_bank_[resource]) {
-            continue;
+            const auto claims = std::count_if(
+                payouts.begin(), payouts.end(),
+                [resource](const std::array<int, 5>& payout) { return payout[resource] > 0; });
+            if (claims != 1) {
+                continue;
+            }
+            for (auto& payout : payouts) {
+                payout[resource] = std::min(payout[resource], resource_bank_[resource]);
+            }
         }
         for (std::size_t player_id = 0; player_id < players_.size(); ++player_id) {
             players_[player_id].resources[resource] += payouts[player_id][resource];
@@ -830,13 +823,47 @@ void Game::apply_roll(const Action& action, std::optional<Dice> replay_dice) {
             is_discarding_ = true;
         } else {
             std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
-            current_prompt_ = ActionPrompt::move_robber;
-            is_moving_knight_ = true;
+            prompt_robber_move();
         }
         return;
     }
     yield_resources(number);
     current_prompt_ = ActionPrompt::play_turn;
+}
+
+bool Game::robber_tile_shielded(const Tile& tile) const {
+    return friendly_robber_ &&
+           std::any_of(tile.nodes.begin(), tile.nodes.end(), [&](int node) {
+               const auto building = board_.buildings().find(node);
+               return building != board_.buildings().end() &&
+                      player(building->second.color).victory_points <= 2;
+           });
+}
+
+bool Game::robber_can_move() const {
+    if (!friendly_robber_) {
+        return true;
+    }
+    for (const auto& [coordinate, tile_index] : board_.map().coordinate_to_tile()) {
+        const Tile& tile = board_.map().tiles().at(static_cast<std::size_t>(tile_index));
+        if (tile.kind == TileKind::land && coordinate != board_.robber_coordinate() &&
+            !robber_tile_shielded(tile)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Game::prompt_robber_move() {
+    if (robber_can_move()) {
+        current_prompt_ = ActionPrompt::move_robber;
+        is_moving_knight_ = true;
+    } else {
+        // Every tile but the robber's is shielded: the robber stays, nobody
+        // is robbed, and the turn's owner plays on.
+        current_prompt_ = ActionPrompt::play_turn;
+        is_moving_knight_ = false;
+    }
 }
 
 void Game::apply_discard(const Action& action) {
@@ -868,10 +895,9 @@ void Game::apply_discard(const Action& action) {
         return;
     }
     current_player_index_ = current_turn_index_;
-    current_prompt_ = ActionPrompt::move_robber;
     is_discarding_ = false;
-    is_moving_knight_ = true;
     std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
+    prompt_robber_move();
 }
 
 void Game::apply_move_robber(
@@ -906,25 +932,18 @@ void Game::apply_move_robber(
     board_.move_robber(move.coordinate);
     current_prompt_ = ActionPrompt::play_turn;
     is_moving_knight_ = false;
-    largest_army_taken_from_.reset();
 }
 
 void Game::apply_play_knight(const Action& action) {
     consume_development_card(action.color, DevelopmentCard::knight);
     player(action.color).last_knight_completed_turn = completed_turns_;
-    std::optional<int> holder;
-    for (std::size_t i = 0; i < players_.size(); ++i) {
-        if (players_[i].has_army) {
-            holder = static_cast<int>(i);
-        }
-    }
+    // The award first: the friendly robber's shields, and whether the robber
+    // can move at all, read the points with this knight counted (OpenHex's
+    // _with_knight_counted). With no open tile the knight is still played:
+    // it left the hand, counts for Largest Army and uses the turn's
+    // development card, and the turn goes on (to the roll, if that is due).
     update_largest_army_award(action.color);
-    if (friendly_robber_ && holder.has_value() &&
-        !players_[static_cast<std::size_t>(*holder)].has_army) {
-        largest_army_taken_from_ = holder;  // read by the robber's shields (see there)
-    }
-    current_prompt_ = ActionPrompt::move_robber;
-    is_moving_knight_ = true;
+    prompt_robber_move();
 }
 
 void Game::apply_play_year_of_plenty(const Action& action) {

@@ -213,6 +213,7 @@ void bind_game(nb::module_& module) {
             "fresh", &BalancedDice::fresh, nb::arg("seats"),
             "The state at the start of the main phase: a full deck, no history.")
         .def_ro("seats", &BalancedDice::seats)
+        .def_ro("left", &BalancedDice::left, "Seats that left the game (see Game.leave).")
         .def_prop_ro(
             "deck", [](const BalancedDice& dice) { return cards_to_python(dice.deck); },
             "The cards left, as sorted (die1, die2) pairs (before any refill).")
@@ -328,13 +329,20 @@ void bind_game(nb::module_& module) {
         "included. When that leaves no tile but the robber's own, the robber stays and\n"
         "nobody is robbed: a 7 goes (after the discards) straight to the roller's\n"
         "PLAY_TURN, and a knight is played with no MOVE_ROBBER prompt. A knight's\n"
-        "robber reads the points after the knight's Largest Army award.")
+        "robber reads the points after the knight's Largest Army award.\n\n"
+        "``win_on_turn`` is OpenHex's too: only the seat whose turn it is wins (after\n"
+        "the initial placement); a seat that reaches the points on another's turn wins\n"
+        "when its turn comes. So is ``openhex_roads``: a road may end at an\n"
+        "opponent's building as well as start at one, and Longest Road is decided again\n"
+        "after each road and settlement (the one longest road of five or more; on a tie\n"
+        "the holder if it is one of the tied, nobody otherwise), where Catanatron gives a\n"
+        "cut award to the first longest road, even below five.")
         .def(
             "__init__",
             [](GameRules* self, int vps_to_win, int discard_limit, bool friendly_robber,
                const std::array<int, 5>& resource_bank, const std::array<int, 5>& development_deck,
                int roads_per_player, int settlements_per_player, int cities_per_player,
-               DiceMode dice_mode) {
+               DiceMode dice_mode, bool win_on_turn, bool openhex_roads) {
                 GameRules rules;
                 rules.victory_points_to_win = vps_to_win;
                 rules.discard_limit = discard_limit;
@@ -345,6 +353,8 @@ void bind_game(nb::module_& module) {
                 rules.settlements_per_player = settlements_per_player;
                 rules.cities_per_player = cities_per_player;
                 rules.dice_mode = dice_mode;
+                rules.win_on_turn = win_on_turn;
+                rules.openhex_roads = openhex_roads;
                 validate_rules(rules);
                 new (self) GameRules(rules);
             },
@@ -356,7 +366,9 @@ void bind_game(nb::module_& module) {
             nb::arg("roads_per_player") = defaults.roads_per_player,
             nb::arg("settlements_per_player") = defaults.settlements_per_player,
             nb::arg("cities_per_player") = defaults.cities_per_player,
-            nb::arg("dice_mode") = defaults.dice_mode)
+            nb::arg("dice_mode") = defaults.dice_mode,
+            nb::arg("win_on_turn") = defaults.win_on_turn,
+            nb::arg("openhex_roads") = defaults.openhex_roads)
         .def_ro("vps_to_win", &GameRules::victory_points_to_win)
         .def_ro("discard_limit", &GameRules::discard_limit)
         .def_ro("friendly_robber", &GameRules::friendly_robber)
@@ -373,6 +385,8 @@ void bind_game(nb::module_& module) {
         .def_ro("settlements_per_player", &GameRules::settlements_per_player)
         .def_ro("cities_per_player", &GameRules::cities_per_player)
         .def_ro("dice_mode", &GameRules::dice_mode)
+        .def_ro("win_on_turn", &GameRules::win_on_turn)
+        .def_ro("openhex_roads", &GameRules::openhex_roads)
         .def(
             "__eq__", [](const GameRules& lhs, const GameRules& rhs) { return lhs == rhs; },
             nb::is_operator())
@@ -381,13 +395,15 @@ void bind_game(nb::module_& module) {
             return nb::str(
                        "GameRules(vps_to_win={}, discard_limit={}, friendly_robber={}, "
                        "resource_bank={}, development_deck={}, roads_per_player={}, "
-                       "settlements_per_player={}, cities_per_player={}{})")
+                       "settlements_per_player={}, cities_per_player={}{}{}{})")
                 .format(
                     rules.victory_points_to_win, rules.discard_limit, rules.friendly_robber,
                     to_tuple(rules.resource_bank), to_tuple(rules.development_deck),
                     rules.roads_per_player, rules.settlements_per_player,
                     rules.cities_per_player,
-                    rules.dice_mode == DiceMode::random ? "" : ", dice_mode=BALANCED");
+                    rules.dice_mode == DiceMode::random ? "" : ", dice_mode=BALANCED",
+                    rules.win_on_turn ? ", win_on_turn=True" : "",
+                    rules.openhex_roads ? ", openhex_roads=True" : "");
         });
 
     nb::class_<HiddenHand>(
@@ -749,6 +765,44 @@ void bind_game(nb::module_& module) {
                 return game.remaining_discards(resolve_color(game, player));
             },
             nb::arg("player"))
+        .def(
+            "leave",
+            [](Game& game, const PlayerRef& player, nb::object robber) {
+                game.leave(
+                    resolve_color(game, player),
+                    robber.is_none() ? std::nullopt
+                                     : std::optional<Coordinate>(coordinate_from_python(robber)));
+            },
+            nb::arg("player"), nb::arg("robber") = nb::none(),
+            "``player`` leaves the game (OpenHex's leaveGame) while at least two other\n"
+            "seats play on: its resource cards go back to the bank, its buildings stay\n"
+            "but produce nothing, it takes no more turns and cannot win. Longest Road\n"
+            "and Largest Army are decided again among the seats in play if it held them\n"
+            "or nobody did (a tie awards nobody). A discard it owed is dropped; its\n"
+            "turn, if it was its turn, ends at once, or after the discards its 7 left\n"
+            "the others owing (with no robber move). ``robber``: the tile it had moved\n"
+            "the robber to before leaving, the steal not made (only for the seat that is\n"
+            "to move the robber). Raises ValueError for a seat that already left, a\n"
+            "finished game, only two seats playing, or a ``robber`` it is not to move.")
+        .def(
+            "points_short_of_win",
+            [](const Game& game, const PlayerRef& player) {
+                const Color color = resolve_color(game, player);
+                const auto& colors = game.colors();
+                return game.points_short_of_win(static_cast<int>(
+                    std::find(colors.begin(), colors.end(), color) - colors.begin()));
+            },
+            nb::arg("player"),
+            "The public points that cap ``player``'s hidden victory point cards in a game\n"
+            "in progress: its own, or 0 for a seat that could not win now whatever it\n"
+            "holds (``GameRules.win_on_turn`` off its turn, or a seat that left).")
+        .def(
+            "has_left",
+            [](const Game& game, const PlayerRef& player) {
+                return game.has_left(resolve_color(game, player));
+            },
+            nb::arg("player"), "Whether ``player`` left the game (see ``leave``).")
+        .def_prop_ro("colors_in_play", &Game::colors_in_play, "The seats still playing, in turn order.")
         .def(
             "execute",
             [](Game& game, const Action& action, std::optional<std::array<int, 2>> dice,

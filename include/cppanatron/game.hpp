@@ -126,6 +126,18 @@ public:
         return playable_actions_;
     }
     [[nodiscard]] std::optional<Color> winning_color() const;
+    /**
+     * The public points that say something about `seat`'s hidden victory
+     * point cards in a game in progress: its own (it has not won, so its
+     * cards are fewer than the points it lacks), or 0 for a seat that could
+     * not win now whatever it holds (GameRules::win_on_turn off its turn, or
+     * a seat that left).
+     */
+    [[nodiscard]] int points_short_of_win(int seat) const;
+    /** Whether `color` left the game (see leave). */
+    [[nodiscard]] bool has_left(Color color) const;
+    /** The seats still playing, in turn order. */
+    [[nodiscard]] std::vector<Color> colors_in_play() const;
     [[nodiscard]] int victory_points_to_win() const noexcept {
         return victory_points_to_win_;
     }
@@ -239,8 +251,41 @@ public:
         std::optional<DevelopmentCard> replay_development_card = std::nullopt,
         std::optional<Resource> replay_stolen_resource = std::nullopt);
 
+    /**
+     * `color` leaves the game (OpenHex's leaveGame, the server's move for a
+     * seat that missed three deadlines in a row), while at least two other
+     * seats play on. Its resource cards go back to the bank; its buildings
+     * and roads stay but produce nothing; it takes no more turns, is offered
+     * no trades and cannot win. Longest Road and Largest Army are decided
+     * again among the seats in play if it held them or nobody did (a tie
+     * leaves the award with nobody). A discard it owed is dropped, and its
+     * turn, if it was its turn, ends: at once (during the initial placement
+     * the next seat places), or once the others have made the discards its 7
+     * left them owing, with no robber move. A trade being resolved is
+     * cancelled. Balanced dice share the sevens among the seats in play.
+     *
+     * `robber`: the tile it had moved the robber to before leaving, the
+     * steal not made (OpenHex moves the robber and steals in two steps; here
+     * they are one action). Only for the seat that is to move the robber.
+     *
+     * Throws std::invalid_argument for a seat that already left, in a
+     * finished game, with only two seats playing, or for a `robber` the
+     * seat is not to move.
+     */
+    void leave(Color color, std::optional<Coordinate> robber = std::nullopt);
+
 private:
     [[nodiscard]] int player_index(Color color) const;
+    [[nodiscard]] bool in_play(int index) const noexcept {
+        return !left_[static_cast<std::size_t>(index)];
+    }
+    [[nodiscard]] bool anyone_left() const noexcept;
+    /** The initial placement's next slot (snake order) of a seat in play, or the main phase. */
+    void advance_setup_past_left();
+    /** After the last discard of a 7: the robber prompt, or the end of the turn of a roller that left. */
+    void finish_discards();
+    /** The turn of `index` ends and the next seat in play is to roll. */
+    void end_turn_of(int index);
     [[nodiscard]] std::vector<Action> generate_playable_actions() const;
     void apply_build_settlement(const Action& action);
     void apply_build_road(const Action& action);
@@ -310,6 +355,8 @@ private:
     DomesticTrade current_trade_{};
     std::vector<bool> acceptees_;
     std::vector<int> discard_counts_;
+    /** Seats that left the game (leave). */
+    std::array<bool, 6> left_{};
     std::vector<Action> playable_actions_;
 };
 

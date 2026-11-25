@@ -329,7 +329,8 @@ HandTracker::HandTracker(const Game& game, int observer, TrackerMode mode, int m
         played_[seat] = state.played_development_cards;
         victory_point_caps_[seat] = over ? development_counts_[seat]
                                          : std::min(development_counts_[seat],
-                                                    rules_.victory_points_to_win - 1 - state.victory_points);
+                                                    rules_.victory_points_to_win - 1 -
+                                                        game.points_short_of_win(static_cast<int>(seat)));
     }
     const PlayerState& own = game.players()[static_cast<std::size_t>(observer)];
     known_[static_cast<std::size_t>(observer)] = own.resources;
@@ -909,8 +910,8 @@ std::vector<TrackerEvent> HandTracker::events(
     auto events = transition_events(before, action, after, observer);
     if (!after.winning_color().has_value()) {
         std::vector<int> points;
-        for (const PlayerState& state : after.players()) {
-            points.push_back(state.victory_points);
+        for (int seat = 0; seat < static_cast<int>(after.players().size()); ++seat) {
+            points.push_back(after.points_short_of_win(seat));
         }
         events.push_back(TrackerEvent::public_victory_points(std::move(points)));
         // The observer sees its own options when it is to move.
@@ -1159,7 +1160,7 @@ bool HandTracker::consistent_with(const Game& truth) const {
             }
             hidden[r] += state.development_cards[r];
         }
-        if (!over && state.victory_points + state.development_cards[kVictoryPoint] >=
+        if (!over && truth.points_short_of_win(seat) + state.development_cards[kVictoryPoint] >=
                          truth.victory_points_to_win()) {
             return false;
         }
@@ -1230,8 +1231,7 @@ Game sample_world(
     for (int seat : others) {
         caps.push_back(std::min(
             tracker.victory_point_card_cap(seat),
-            game.victory_points_to_win() - 1 -
-                game.players()[static_cast<std::size_t>(seat)].victory_points));
+            game.victory_points_to_win() - 1 - game.points_short_of_win(seat)));
     }
     std::vector<int> floors;
     for (int seat : others) {
@@ -1458,8 +1458,7 @@ std::vector<LikelyWorld> likely_worlds(
         sizes.push_back(count - bought);
         caps.push_back(std::min(
             tracker.victory_point_card_cap(seat),
-            game.victory_points_to_win() - 1 -
-                game.players()[static_cast<std::size_t>(seat)].victory_points));
+            game.victory_points_to_win() - 1 - game.points_short_of_win(seat)));
         floors.push_back(tracker.victory_point_card_floor(seat));
     }
     std::map<Part, double> development;

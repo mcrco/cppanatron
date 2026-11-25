@@ -61,6 +61,9 @@ void BalancedDice::validate() const {
     if (seats < 1 || seats > kMaxSeats) {
         throw std::invalid_argument("balanced dice need one to six seats");
     }
+    if (left < 0 || left >= seats) {
+        throw std::invalid_argument("balanced dice need a seat that has not left");
+    }
     if ((deck & ~kFullDeck) != 0) {
         throw std::invalid_argument("balanced dice deck holds bits beyond its 36 cards");
     }
@@ -112,7 +115,8 @@ std::pair<std::int64_t, std::int64_t> BalancedDice::seven_multiplier(int roller)
     if (roller < -1 || roller >= seats) {
         throw std::invalid_argument("the roller is not a seat");
     }
-    if (roller < 0 || seats < 2) {
+    const int playing = seats - left;
+    if (roller < 0 || playing < 2) {
         return {1, 1};
     }
     // streak = 0.4 * count * direction = 2 * signed_streak / 5.
@@ -123,11 +127,11 @@ std::pair<std::int64_t, std::int64_t> BalancedDice::seven_multiplier(int roller)
     const std::int64_t total = std::accumulate(sevens.begin(), sevens.end(), std::int64_t{0});
     std::int64_t numerator = 0;
     std::int64_t denominator = 0;
-    if (total >= seats) {
+    if (total >= playing) {
         // 1 + (1/n - s/S) / (1/n) = (2S - n s) / S, plus 2 streak / 5: over 5S.
         const std::int64_t own = sevens[static_cast<std::size_t>(roller)];
         denominator = 5 * total;
-        numerator = 5 * (2 * total - seats * own) + 2 * signed_streak * total;
+        numerator = 5 * (2 * total - playing * own) + 2 * signed_streak * total;
     } else {
         denominator = 5;
         numerator = 5 + 2 * signed_streak;
@@ -222,6 +226,18 @@ void BalancedDice::apply(Dice dice, int roller) {
         }
     }
     // (Any other total leaves the streak standing.)
+}
+
+void BalancedDice::leave(int seat) {
+    if (seat < 0 || seat >= seats) {
+        throw std::invalid_argument("the seat that leaves is not a seat");
+    }
+    sevens[static_cast<std::size_t>(seat)] = 0;
+    if (streak_player == seat) {
+        streak_player = -1;
+        streak_count = 0;
+    }
+    ++left;
 }
 
 }  // namespace cppanatron

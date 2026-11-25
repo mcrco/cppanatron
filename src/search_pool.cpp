@@ -354,6 +354,7 @@ std::uint64_t outcome_fingerprint(const Game& game) {
         }
         mix(static_cast<std::uint64_t>(dice.streak_player + 1));
         mix(static_cast<std::uint64_t>(dice.streak_count));
+        mix(static_cast<std::uint64_t>(dice.left));
     }
     return hash;
 }

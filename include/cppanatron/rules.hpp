@@ -39,6 +39,24 @@ struct GameRules {
     int settlements_per_player{5};
     int cities_per_player{4};
     DiceMode dice_mode{DiceMode::random};
+    /**
+     * OpenHex's win: only the seat whose turn it is wins, once the initial
+     * placement is over. A seat that reaches the points on another's turn
+     * (an award passed on by a cut road or by a seat that left) wins when
+     * its turn comes. Off (the base game here): any seat with the points
+     * has won.
+     */
+    bool win_on_turn{false};
+    /**
+     * OpenHex's Longest Road. A road may end at an opponent's building as
+     * well as start at one (Catanatron's may only start there). And the award
+     * is decided again among every seat in play after each road and
+     * settlement: the one longest road of five or more; on a tie the holder
+     * if it is one of the tied, nobody otherwise. (Catanatron's: a longer
+     * road takes it; after a cut the first longest road in the order the
+     * seats built their first, even below five.)
+     */
+    bool openhex_roads{false};
 
     auto operator<=>(const GameRules&) const = default;
 };

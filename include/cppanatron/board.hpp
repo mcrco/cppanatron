@@ -45,6 +45,11 @@ public:
         Color color) const;
 
     void build_settlement(Color color, int node_id, bool initial_build_phase = false);
+    /**
+     * Count roads and decide Longest Road OpenHex's way (GameRules::
+     * openhex_roads). To be set before anything is built.
+     */
+    void count_openhex_roads(bool on) { openhex_roads_ = on; }
     void build_road(Color color, Edge edge);
     void build_city(Color color, int node_id);
 
@@ -69,6 +74,12 @@ public:
      */
     void set_longest_road_holder(
         std::optional<Color> color, std::optional<int> length = std::nullopt);
+    /**
+     * `color` left the game (OpenHex's leaveGame): its roads and buildings
+     * stay, but it never holds Longest Road again, and the award is decided
+     * again among the others (decide_longest_road).
+     */
+    void retire(Color color);
     /**
      * Scenario setup: a color's cached road length (Catanatron's
      * board.road_lengths entry), which play only ever raises until a cut. The
@@ -125,6 +136,19 @@ private:
      * road_lengths dict order, which decides ties after a cut.
      */
     std::vector<Color> road_order_;
+    /**
+     * OpenHex's Longest Road, among the colors of road_order_: the one
+     * longest road of five or more; on a tie the holder if it is one of the
+     * tied, nobody otherwise (the award then waits for a longer road).
+     */
+    void decide_longest_road();
+    /**
+     * The longest road of `color`: Catanatron's (a road may start at an
+     * opponent's building, never end at one), or under openhex_roads_
+     * OpenHex's (it may do both; the building only stops it going through).
+     */
+    [[nodiscard]] int count_longest_road(Color color);
+    bool openhex_roads_{false};
     std::optional<Color> road_color_;
     int road_length_{};
     std::set<int> board_buildable_ids_;

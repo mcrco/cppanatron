@@ -162,12 +162,11 @@ void Board::build_settlement(Color color, int node_id, bool initial_build_phase)
             }
             rebuild_connected_components(road_color);
 
-            int best = 0;
-            for (const auto& component : connected_components_[road_color]) {
-                best = std::max(
-                    best, longest_acyclic_path(component, road_color));
+            road_lengths_[road_color] = count_longest_road(road_color);
+            if (openhex_roads_) {
+                decide_longest_road();
+                continue;
             }
-            road_lengths_[road_color] = best;
             // Catanatron's max(road_lengths.items()): the first longest in the
             // order the players built their first road, even below five.
             road_color_.reset();
@@ -232,6 +231,11 @@ void Board::build_road(Color color, Edge edge) {
         longest_acyclic_path(components[chosen_index], color);
     if (!road_lengths_.contains(color)) {
         road_order_.push_back(color);
+    }
+    if (openhex_roads_) {
+        road_lengths_[color] = count_longest_road(color);
+        decide_longest_road();
+        return;
     }
     int& cached_length = road_lengths_[color];
     cached_length = std::max(cached_length, candidate_length);
@@ -449,11 +453,7 @@ void Board::restore(
         if (!has_road) {
             continue;
         }
-        int best = 0;
-        for (const auto& component : connected_components_[color]) {
-            best = std::max(best, longest_acyclic_path(component, color));
-        }
-        road_lengths_[color] = best;
+        road_lengths_[color] = count_longest_road(color);
         road_order_.push_back(color);
     }
     road_color_.reset();
@@ -466,6 +466,79 @@ void Board::set_longest_road_holder(std::optional<Color> color, std::optional<in
     }
     road_color_ = color;
     road_length_ = color.has_value() ? length.value_or(longest_road(*color)) : 0;
+}
+
+void Board::retire(Color color) {
+    std::erase(road_order_, color);
+    if (road_color_ == color) {
+        road_color_.reset();
+    }
+    decide_longest_road();
+}
+
+int Board::count_longest_road(Color color) {
+    int best = 0;
+    if (!openhex_roads_) {
+        for (const auto& component : connected_components_[color]) {
+            best = std::max(best, longest_acyclic_path(component, color));
+        }
+        return best;
+    }
+    std::set<int> ends;
+    for (const auto& [edge, owner] : roads_) {
+        if (owner == color) {
+            ends.insert(edge.a);
+            ends.insert(edge.b);
+        }
+    }
+    std::set<Edge> used;
+    std::function<void(int, int)> visit = [&](int node, int length) {
+        best = std::max(best, length);
+        for (int neighbor : neighbors(node)) {
+            const Edge edge = Edge{node, neighbor}.normalized();
+            if (!is_friendly_road(edge, color) || used.contains(edge)) {
+                continue;
+            }
+            if (is_enemy_node(neighbor, color)) {
+                best = std::max(best, length + 1);
+                continue;
+            }
+            used.insert(edge);
+            visit(neighbor, length + 1);
+            used.erase(edge);
+        }
+    };
+    for (int node : ends) {
+        visit(node, 0);
+    }
+    return best;
+}
+
+void Board::decide_longest_road() {
+    int best = 4;
+    int tied = 0;
+    std::optional<Color> longest;
+    for (Color candidate : road_order_) {
+        const int length = road_lengths_.at(candidate);
+        if (length > best) {
+            best = length;
+            tied = 1;
+            longest = candidate;
+        } else if (length == best) {
+            ++tied;
+        }
+    }
+    if (!longest.has_value()) {
+        road_color_.reset();
+        road_length_ = 0;
+        return;
+    }
+    if (tied > 1) {
+        const bool holder_tied = road_color_.has_value() && road_lengths_.at(*road_color_) == best;
+        longest = holder_tied ? road_color_ : std::nullopt;
+    }
+    road_color_ = longest;
+    road_length_ = best;
 }
 
 void Board::set_road_length(Color color, int length) {

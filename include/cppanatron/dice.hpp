@@ -63,6 +63,12 @@ struct BalancedDice {
     int recent_count{};
     /** The seats (n of the imbalance term); `sevens` beyond them stay 0. */
     int seats{2};
+    /**
+     * Seats that left the game (OpenHex's leaveGame): the sevens are shared
+     * among the `seats - left` still playing (n of the imbalance term), and a
+     * seat that left keeps no sevens and no streak.
+     */
+    int left{};
     /** 7s rolled per seat. */
     std::array<int, kMaxSeats> sevens{};
     /**
@@ -123,6 +129,12 @@ struct BalancedDice {
      * holds or a roller that is not a seat.
      */
     void apply(Dice dice, int roller);
+    /**
+     * `seat` leaves the game: its sevens are forgotten, a streak it owned
+     * ends, and one seat fewer shares the sevens. Throws
+     * std::invalid_argument for a seat that is not one.
+     */
+    void leave(int seat);
 };
 
 }  // namespace cppanatron

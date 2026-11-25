@@ -76,6 +76,7 @@ Game::Game(
       acceptees_(colors_.size()),
       discard_counts_(colors_.size()) {
     validate_rules(rules_);
+    board_.count_openhex_roads(rules_.openhex_roads);
     if (colors_.empty() || colors_.size() > kColors.size()) {
         throw std::invalid_argument("game requires one to six colors");
     }
@@ -132,12 +133,28 @@ int Game::remaining_discards(Color color) const {
 
 std::optional<Color> Game::winning_color() const {
     std::optional<Color> winner;
+    if (rules_.win_on_turn) {
+        const auto turn = static_cast<std::size_t>(current_turn_index_);
+        if (!is_initial_build_phase_ && in_play(current_turn_index_) &&
+            players_[turn].actual_victory_points >= victory_points_to_win_) {
+            winner = colors_[turn];
+        }
+        return winner;
+    }
     for (std::size_t i = 0; i < colors_.size(); ++i) {
-        if (players_[i].actual_victory_points >= victory_points_to_win_) {
+        if (in_play(static_cast<int>(i)) &&
+            players_[i].actual_victory_points >= victory_points_to_win_) {
             winner = colors_[i];
         }
     }
     return winner;
+}
+
+int Game::points_short_of_win(int seat) const {
+    if (!in_play(seat) || (rules_.win_on_turn && seat != current_turn_index_)) {
+        return 0;
+    }
+    return players_.at(static_cast<std::size_t>(seat)).victory_points;
 }
 
 bool Game::search_equivalent(const Game& other) const noexcept {
@@ -164,7 +181,7 @@ bool Game::search_equivalent(const Game& other) const noexcept {
            free_roads_available_ == other.free_roads_available_ &&
            is_resolving_trade_ == other.is_resolving_trade_ &&
            current_trade_ == other.current_trade_ && acceptees_ == other.acceptees_ &&
-           discard_counts_ == other.discard_counts_ &&
+           discard_counts_ == other.discard_counts_ && left_ == other.left_ &&
            playable_actions_ == other.playable_actions_;
 }
 
@@ -173,7 +190,30 @@ int Game::next_roller() const noexcept {
     if (!players_[turn].has_rolled) {
         return current_turn_index_;
     }
-    return (current_turn_index_ + 1) % static_cast<int>(players_.size());
+    const int count = static_cast<int>(players_.size());
+    int next = (current_turn_index_ + 1) % count;
+    while (!in_play(next)) {
+        next = (next + 1) % count;
+    }
+    return next;
+}
+
+bool Game::has_left(Color color) const {
+    return !in_play(player_index(color));
+}
+
+std::vector<Color> Game::colors_in_play() const {
+    std::vector<Color> result;
+    for (std::size_t i = 0; i < colors_.size(); ++i) {
+        if (in_play(static_cast<int>(i))) {
+            result.push_back(colors_[i]);
+        }
+    }
+    return result;
+}
+
+bool Game::anyone_left() const noexcept {
+    return std::any_of(left_.begin(), left_.end(), [](bool left) { return left; });
 }
 
 std::array<double, 11> Game::roll_probabilities(int roller) const {
@@ -667,7 +707,9 @@ void Game::apply_build_road(const Action& action) {
                 return sum + static_cast<int>(candidate.settlements.size());
             });
         const int num_players = static_cast<int>(players_.size());
-        if (num_buildings < num_players) {
+        if (anyone_left()) {
+            advance_setup_past_left();
+        } else if (num_buildings < num_players) {
             advance_turn();
             current_prompt_ = ActionPrompt::build_initial_settlement;
         } else if (num_buildings == num_players) {
@@ -760,6 +802,9 @@ void Game::yield_resources(int number) {
         for (int node : tile.nodes) {
             const auto building = board_.buildings().find(node);
             if (building == board_.buildings().end()) {
+                continue;
+            }
+            if (has_left(building->second.color)) {
                 continue;
             }
             const int count =
@@ -894,10 +939,7 @@ void Game::apply_discard(const Action& action) {
         current_player_index_ = next_discarder;
         return;
     }
-    current_player_index_ = current_turn_index_;
-    is_discarding_ = false;
-    std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
-    prompt_robber_move();
+    finish_discards();
 }
 
 void Game::apply_move_robber(
@@ -1021,7 +1063,7 @@ void Game::apply_offer_trade(const Action& action) {
     const auto it = std::find_if(
         colors_.begin(),
         colors_.end(),
-        [&](Color color) { return color != action.color; });
+        [&](Color color) { return color != action.color && !has_left(color); });
     current_player_index_ = static_cast<int>(std::distance(colors_.begin(), it));
     current_prompt_ = ActionPrompt::decide_trade;
 }
@@ -1033,7 +1075,7 @@ void Game::apply_accept_trade(const Action& action) {
     for (int i = current_player_index_ + 1;
          i < static_cast<int>(colors_.size());
          ++i) {
-        if (colors_[static_cast<std::size_t>(i)] != action.color) {
+        if (colors_[static_cast<std::size_t>(i)] != action.color && in_play(i)) {
             next = i;
             break;
         }
@@ -1051,7 +1093,7 @@ void Game::apply_reject_trade(const Action& action) {
     for (int i = current_player_index_ + 1;
          i < static_cast<int>(colors_.size());
          ++i) {
-        if (colors_[static_cast<std::size_t>(i)] != action.color) {
+        if (colors_[static_cast<std::size_t>(i)] != action.color && in_play(i)) {
             next = i;
             break;
         }
@@ -1144,6 +1186,15 @@ void Game::update_largest_army_award(Color candidate_color) {
         }
     }
     if (!previous_owner.has_value()) {
+        // Nobody holds it although the candidate has three: possible only once
+        // the holder left, and then a tie among the seats in play awards nobody.
+        for (std::size_t i = 0; i < players_.size(); ++i) {
+            if (static_cast<int>(i) != candidate_index && in_play(static_cast<int>(i)) &&
+                players_[i].played_development_cards[
+                    static_cast<std::size_t>(DevelopmentCard::knight)] >= candidate_size) {
+                return;
+            }
+        }
         candidate.has_army = true;
         candidate.victory_points += 2;
         candidate.actual_victory_points += 2;
@@ -1170,22 +1221,167 @@ void Game::update_largest_army_award(Color candidate_color) {
 }
 
 void Game::apply_end_turn(const Action& action) {
-    PlayerState& state = player(action.color);
+    end_turn_of(player_index(action.color));
+}
+
+void Game::end_turn_of(int index) {
+    PlayerState& state = players_[static_cast<std::size_t>(index)];
     state.has_played_development_card_in_turn = false;
     state.has_rolled = false;
     for (std::size_t i = 0; i < state.development_card_owned_at_start.size(); ++i) {
         state.development_card_owned_at_start[i] = state.development_cards[i] > 0;
     }
     ++completed_turns_;
+    current_player_index_ = index;
     advance_turn();
     current_prompt_ = ActionPrompt::play_turn;
 }
 
 void Game::advance_turn(int direction) {
     const int count = static_cast<int>(colors_.size());
-    current_player_index_ = (current_player_index_ + direction + count) % count;
+    do {
+        current_player_index_ = (current_player_index_ + direction + count) % count;
+    } while (!in_play(current_player_index_));
     current_turn_index_ = current_player_index_;
     ++num_turns_;
+}
+
+void Game::finish_discards() {
+    current_player_index_ = current_turn_index_;
+    is_discarding_ = false;
+    std::fill(discard_counts_.begin(), discard_counts_.end(), 0);
+    if (in_play(current_turn_index_)) {
+        prompt_robber_move();
+    } else {
+        // The seat that rolled the 7 left while the others discarded: nobody
+        // moves the robber, and its turn ends.
+        end_turn_of(current_turn_index_);
+    }
+}
+
+void Game::advance_setup_past_left() {
+    const int count = static_cast<int>(players_.size());
+    for (int slot = 0; slot < 2 * count; ++slot) {
+        const int seat = slot < count ? slot : 2 * count - 1 - slot;
+        const std::size_t pass = slot < count ? 1 : 2;
+        if (!in_play(seat) || players_[static_cast<std::size_t>(seat)].roads.size() >= pass) {
+            continue;
+        }
+        if (seat != current_turn_index_) {
+            ++num_turns_;
+        }
+        current_player_index_ = current_turn_index_ = seat;
+        current_prompt_ = ActionPrompt::build_initial_settlement;
+        return;
+    }
+    // Every seat in play has placed twice: the first of them rolls.
+    int first = 0;
+    while (!in_play(first)) {
+        ++first;
+    }
+    if (first != current_turn_index_) {
+        ++num_turns_;
+    }
+    current_player_index_ = current_turn_index_ = first;
+    is_initial_build_phase_ = false;
+    current_prompt_ = ActionPrompt::play_turn;
+    if (rules_.dice_mode == DiceMode::balanced) {
+        dice_.deck = BalancedDice::kFullDeck;
+    }
+}
+
+void Game::leave(Color color, std::optional<Coordinate> robber) {
+    const int index = player_index(color);
+    const auto seat = static_cast<std::size_t>(index);
+    if (!in_play(index)) {
+        throw std::invalid_argument("the seat already left");
+    }
+    if (winning_color().has_value()) {
+        throw std::invalid_argument("the game is over");
+    }
+    if (colors_in_play().size() <= 2) {
+        throw std::invalid_argument("only two seats are playing");
+    }
+    if (robber.has_value()) {
+        if (current_prompt_ != ActionPrompt::move_robber || current_player_index_ != index) {
+            throw std::invalid_argument("the seat is not to move the robber");
+        }
+        board_.move_robber(*robber);
+    }
+    PlayerState& state = players_[seat];
+    for (std::size_t resource = 0; resource < state.resources.size(); ++resource) {
+        resource_bank_[resource] += state.resources[resource];
+        state.resources[resource] = 0;
+    }
+    left_[seat] = true;
+    dice_.leave(index);
+
+    // The awards among the seats in play: one it held, or one nobody held.
+    board_.retire(color);
+    update_longest_road_award();
+    const bool army_held = std::any_of(
+        players_.begin(), players_.end(), [](const PlayerState& p) { return p.has_army; });
+    if (state.has_army || !army_held) {
+        if (state.has_army) {
+            state.has_army = false;
+            state.victory_points -= 2;
+            state.actual_victory_points -= 2;
+        }
+        const auto knight = static_cast<std::size_t>(DevelopmentCard::knight);
+        int most = 0;
+        int leaders = 0;
+        int leader = -1;
+        for (std::size_t i = 0; i < players_.size(); ++i) {
+            if (!in_play(static_cast<int>(i))) {
+                continue;
+            }
+            const int knights = players_[i].played_development_cards[knight];
+            if (knights > most) {
+                most = knights;
+                leaders = 1;
+                leader = static_cast<int>(i);
+            } else if (knights == most) {
+                ++leaders;
+            }
+        }
+        if (most >= 3 && leaders == 1) {
+            PlayerState& next = players_[static_cast<std::size_t>(leader)];
+            next.has_army = true;
+            next.victory_points += 2;
+            next.actual_victory_points += 2;
+        }
+    }
+
+    if (is_resolving_trade_) {
+        reset_trading_state();
+        current_player_index_ = current_turn_index_;
+        current_prompt_ = ActionPrompt::play_turn;
+    }
+    if (is_discarding_) {
+        // The discard it owed is dropped; the others' stand, and a 7 of its
+        // own turn ends with them (finish_discards).
+        discard_counts_[seat] = 0;
+        if (current_player_index_ == index) {
+            const auto next = std::find_if(
+                discard_counts_.begin(), discard_counts_.end(), [](int owed) { return owed > 0; });
+            if (next == discard_counts_.end()) {
+                finish_discards();
+            } else {
+                current_player_index_ =
+                    static_cast<int>(std::distance(discard_counts_.begin(), next));
+            }
+        }
+    } else if (current_turn_index_ == index) {
+        is_moving_knight_ = false;
+        is_road_building_ = false;
+        free_roads_available_ = 0;
+        if (is_initial_build_phase_) {
+            advance_setup_past_left();
+        } else {
+            end_turn_of(index);
+        }
+    }
+    playable_actions_ = generate_playable_actions();
 }
 
 }  // namespace cppanatron
